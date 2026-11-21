@@ -14,6 +14,19 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### Notes on a changeset, kept apart from it
+
+- A changeset is immutable and the thing worth saying about it usually arrives afterwards: which ticket
+  it closes, who reviewed it, why it was reverted. `notes add <changeset> -m <text>` attaches that text
+  beside the changeset rather than inside it, so the changeset keeps its hash and every reference to it
+  keeps working.
+- One note per changeset, replaced rather than appended. A list would need ordering and merging nobody
+  asked for, and the second note is almost always a correction of the first.
+- A note against a changeset that does not exist is refused rather than stored: a row nothing can read
+  back hides the typo in the id instead of reporting it.
+- `bench/notes.py`, eight checks, a gate step. The check that matters most asserts the changeset is
+  byte for byte what it was before the note was attached.
+
 ### Linked worktrees: two branches, one store
 
 - Two branches cannot be checked out in one directory at once, and the alternative - clone the

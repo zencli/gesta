@@ -7,6 +7,7 @@ pub mod history;
 pub mod hooks;
 pub mod merge;
 pub use merge::recursive_merge;
+pub mod notes;
 pub mod rebase;
 pub mod stash;
 pub mod submodule;

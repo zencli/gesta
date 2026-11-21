@@ -106,6 +106,9 @@ gesta blame src/main.rs
 | `bisect start <good> <bad>` | Begin a search for the changeset that introduced a fault |
 | `bisect good \| bad` | Answer about the changeset under test |
 | `bisect run <command>` | Drive the whole search from one command; exit 0 good, else bad, 125 skip |
+| `notes add <cs> -m <text>` | Attach a note to a changeset without changing it |
+| `notes show <cs>` | The note a changeset carries |
+| `notes remove <cs>` | Drop the note, leaving the changeset alone |
 | `worktree add <path> <branch>` | A second working tree sharing this store |
 | `worktree list` | The trees of this repository, the one holding the store first |
 | `worktree remove <path>` | Remove a tree, leaving its store and branch alone |

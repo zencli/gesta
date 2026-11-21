@@ -1958,6 +1958,20 @@ def main():
             st[1][:200],
         )
 
+    if want("notes"):
+        # A changeset is immutable and the thing worth saying about it usually arrives later. The
+        # check that matters most is the one about identity: a note must not rewrite the changeset it
+        # belongs to, because that would change its hash and break every reference to it.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'notes.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a note attaches to a changeset without changing it",
+            r[0] == 0 and "8/8 notes checks pass" in r[1],
+            (r[1] or "")[-500:],
+        )
+
     if want("worktree"):
         # An integrity check that compares tables cannot see the disk, and the worst defect
         # this tool had was a working tree that disagreed with the head while every check

@@ -373,3 +373,37 @@ pub fn cmd_worktree(sub: crate::WorktreeCmd) -> ZResult<()> {
         }
     }
 }
+
+/// `gesta notes` - annotations attached to a changeset, kept apart from it.
+pub fn cmd_notes(sub: crate::NotesCmd) -> ZResult<()> {
+    use crate::NotesCmd;
+    let (_root, conn) = open_repo()?;
+    match sub {
+        NotesCmd::Add { changeset, message } => {
+            // The author is whoever is configured for commits, so a note is attributable without a
+            // separate flag nobody would remember to pass.
+            let author = crate::store::get_state(&conn, "user_name")?
+                .unwrap_or_else(|| "unknown".to_string());
+            crate::repo::notes::add(&conn, &changeset, &message, &author)?;
+            println!("noted on {changeset}");
+            Ok(())
+        }
+        NotesCmd::Show { changeset } => match crate::repo::notes::show(&conn, &changeset)? {
+            Some((body, author)) => {
+                println!("{body}");
+                println!("  -- {author}");
+                Ok(())
+            }
+            None => Err(bad(format!("no note on {changeset}"))),
+        },
+        NotesCmd::Remove { changeset } => {
+            if crate::repo::notes::remove(&conn, &changeset)? {
+                println!("removed the note on {changeset}");
+                println!("the changeset itself is unchanged");
+                Ok(())
+            } else {
+                Err(bad(format!("no note on {changeset}")))
+            }
+        }
+    }
+}

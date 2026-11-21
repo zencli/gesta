@@ -471,6 +471,11 @@ enum Cmd {
         #[command(subcommand)]
         sub: BranchCmd,
     },
+    /// Annotations attached to a changeset, kept apart from it
+    Notes {
+        #[command(subcommand)]
+        sub: NotesCmd,
+    },
     /// Additional working trees that share this repository's store
     Worktree {
         #[command(subcommand)]
@@ -802,6 +807,22 @@ enum SparseCmd {
     List,
     /// Return to a full checkout
     Clear,
+}
+
+#[derive(Subcommand)]
+enum NotesCmd {
+    /// Attach a note to a changeset, replacing any note it already carries
+    Add {
+        /// The changeset the note belongs to
+        changeset: String,
+        /// The text of the note
+        #[arg(short, long)]
+        message: String,
+    },
+    /// Print the note a changeset carries
+    Show { changeset: String },
+    /// Drop the note a changeset carries, leaving the changeset alone
+    Remove { changeset: String },
 }
 
 #[derive(Subcommand)]
@@ -1178,6 +1199,7 @@ fn run() -> ZResult<()> {
         } if json => cli::cmd_branch_merge_json(&source, &target, &author),
         Cmd::Branch { sub } if json => cli::cmd_branch_json(sub),
         Cmd::Changeset { sub } if json => cli::cmd_changeset_json(sub),
+        Cmd::Notes { sub } => cli::cmd_notes(sub),
         Cmd::Worktree { sub } => cli::cmd_worktree(sub),
         Cmd::Sparse { sub } => cli::cmd_sparse(sub),
         Cmd::Rebase {
