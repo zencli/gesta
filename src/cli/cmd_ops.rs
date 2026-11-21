@@ -329,3 +329,47 @@ fn report_rebase(p: crate::repo::rebase::Progress) {
         }
     }
 }
+
+/// `gesta worktree` - additional working trees sharing this store.
+pub fn cmd_worktree(sub: crate::WorktreeCmd) -> ZResult<()> {
+    use crate::WorktreeCmd;
+    let (root, conn) = open_repo()?;
+    match sub {
+        WorktreeCmd::Add { path, branch } => {
+            let target = std::path::PathBuf::from(&path);
+            let target = if target.is_absolute() {
+                target
+            } else {
+                root.join(target)
+            };
+            crate::repo::worktree::add(&conn, &root, &target, &branch)
+        }
+        WorktreeCmd::List => {
+            let trees = crate::repo::worktree::list(&conn, &root)?;
+            for (i, t) in trees.iter().enumerate() {
+                // The tree holding the store is marked, because removing it is not a thing this
+                // command does and a list that does not say which one it is invites the attempt.
+                let tag = if i == 0 { " (main)" } else { "" };
+                println!("{} [{}]{}", t.path.display(), t.branch, tag);
+            }
+            Ok(())
+        }
+        WorktreeCmd::Remove { path } => {
+            let target = std::path::PathBuf::from(&path);
+            let target = if target.is_absolute() {
+                target
+            } else {
+                root.join(target)
+            };
+            // Removing the tree that holds the store would delete the repository out from under
+            // itself. That is never what was meant, so it is refused rather than guessed at.
+            if std::fs::canonicalize(&target).ok() == std::fs::canonicalize(&root).ok() {
+                return Err(bad(
+                    "that is the main working tree, which holds the store; remove another tree"
+                        .to_string(),
+                ));
+            }
+            crate::repo::worktree::remove(&conn, &target)
+        }
+    }
+}

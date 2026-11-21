@@ -39,7 +39,7 @@ pub const LEGACY_DIR: &str = ".zenforge";
 /// then creates an empty database next to the real one, which looks like every
 /// file went missing.
 pub fn repo_db(root: &std::path::Path) -> PathBuf {
-    let new = repo_dir(root).join(ZF_DB);
+    let new = store_dir(root).join(ZF_DB);
     let legacy = root.join(LEGACY_DIR).join(LEGACY_DB);
 
     // Size, not existence. An empty file of the new name is what a failed or
@@ -97,15 +97,40 @@ pub fn normalise(file: &str) -> String {
 }
 
 pub fn repo_root() -> ZResult<PathBuf> {
-    let mut cur = std::env::current_dir()?;
+    let cur = std::env::current_dir()?;
+    let mut probe = cur.clone();
     loop {
         // A repository made before the rename has the old directory name. Reading
         // it keeps every existing repository usable; `gesta init` and every write
         // path use the new name, so nothing new lands in the old directory.
-        if cur.join(ZF_DIR).is_dir() || cur.join(LEGACY_DIR).is_dir() {
-            return Ok(cur);
+        if probe.join(ZF_DIR).is_dir() || probe.join(LEGACY_DIR).is_dir() {
+            // The root of the working tree, not the directory the process started in: run from a
+            // subdirectory and the files still belong at the top. Where the STORE is, is a separate
+            // question that `store_dir` answers.
+            return Ok(probe);
         }
-        if !cur.pop() {
+        // A linked worktree marks itself with a `.gesta` FILE naming the main store, the way git uses
+        // a `.git` file. That is what makes a second tree cost a pointer instead of a copy of every
+        // object.
+        if probe.join(ZF_DIR).is_file() {
+            let text = std::fs::read_to_string(probe.join(ZF_DIR)).map_err(|e| {
+                Box::new(error::Error::new(
+                    error::Code::NotARepo,
+                    format!("cannot read {}: {e}", probe.join(ZF_DIR).display()),
+                ))
+            })?;
+            if text.trim().is_empty() {
+                return Err(Box::new(error::Error::new(
+                    error::Code::NotARepo,
+                    format!(
+                        "{} is empty, so this worktree does not name a repository",
+                        probe.join(ZF_DIR).display()
+                    ),
+                )));
+            }
+            return Ok(probe);
+        }
+        if !probe.pop() {
             return Err(Box::new(error::Error::new(
                 error::Code::NotARepo,
                 format!(
@@ -117,12 +142,37 @@ pub fn repo_root() -> ZResult<PathBuf> {
     }
 }
 
+/// The store a working tree belongs to.
+///
+/// For an ordinary repository this is `<root>/.gesta`. For a linked worktree it is the path written in
+/// the `.gesta` file, which points at the main tree's store: one database, two working trees, so a
+/// commit made in either is immediately visible in the other.
+pub fn store_dir(root: &std::path::Path) -> PathBuf {
+    let marker = root.join(ZF_DIR);
+    if marker.is_file() {
+        if let Ok(text) = std::fs::read_to_string(&marker) {
+            let target = text.trim();
+            if !target.is_empty() {
+                let p = std::path::PathBuf::from(target);
+                return if p.is_absolute() { p } else { root.join(p) };
+            }
+        }
+    }
+    repo_dir(root)
+}
+
 /// Open the repository at the current directory, running any pending migration.
 fn open_repo() -> ZResult<(PathBuf, rusqlite::Connection)> {
     let root = repo_root()?;
     let conn = open_db(&root)?;
     if migrate(&conn)? {
         init_schema(&conn)?;
+    }
+    // A linked worktree holds its own branch. Read it once, here, so every command in this process
+    // that asks "which branch am I on" gets this tree's answer rather than the main tree's.
+    if root.join(crate::repo::worktree::ZF_BRANCH).is_file() {
+        let branch = crate::repo::worktree::branch_of(&root, &conn)?;
+        crate::store::set_worktree_branch(&branch);
     }
     Ok((root, conn))
 }
@@ -420,6 +470,11 @@ enum Cmd {
     Branch {
         #[command(subcommand)]
         sub: BranchCmd,
+    },
+    /// Additional working trees that share this repository's store
+    Worktree {
+        #[command(subcommand)]
+        sub: WorktreeCmd,
     },
     /// Remote operations (push, pull, clone)
     Remote {
@@ -747,6 +802,24 @@ enum SparseCmd {
     List,
     /// Return to a full checkout
     Clear,
+}
+
+#[derive(Subcommand)]
+enum WorktreeCmd {
+    /// Add a working tree on another branch
+    Add {
+        /// Where to put it; created if missing
+        path: String,
+        /// The branch to check out there
+        branch: String,
+    },
+    /// List the working trees of this repository
+    List,
+    /// Remove a working tree, leaving its store alone
+    Remove {
+        /// The working tree to remove
+        path: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1105,6 +1178,7 @@ fn run() -> ZResult<()> {
         } if json => cli::cmd_branch_merge_json(&source, &target, &author),
         Cmd::Branch { sub } if json => cli::cmd_branch_json(sub),
         Cmd::Changeset { sub } if json => cli::cmd_changeset_json(sub),
+        Cmd::Worktree { sub } => cli::cmd_worktree(sub),
         Cmd::Sparse { sub } => cli::cmd_sparse(sub),
         Cmd::Rebase {
             onto,

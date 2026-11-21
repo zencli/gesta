@@ -14,6 +14,25 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### Linked worktrees: two branches, one store
+
+- Two branches cannot be checked out in one directory at once, and the alternative - clone the
+  repository again - duplicates every object and then has to be kept in step by hand. `worktree add
+  <path> <branch>` makes a second working tree whose `.gesta` is a **file** naming the first one's
+  store, the way git marks a linked worktree with a `.git` file. One database, two trees, so a commit
+  in either is immediately visible in the other.
+- A working tree's branch is a property of the tree, not of the repository. `current_branch` read one
+  row out of the store's shared state, which can only describe one tree: before this change a commit
+  made in a linked worktree landed on **`main`** instead of on the branch the worktree was created
+  for. Each tree now records its branch in `.gesta-branch`, and `open_repo` installs that answer for
+  the rest of the process. A repository with one tree never writes the file, so nothing changes for it.
+- `worktree remove` deletes the files the tree wrote and nothing else. The first version used
+  `changeset_files`, which holds what a changeset *changed*, so it would have deleted only the files
+  the last commit touched and left the rest of the checkout behind; it walks the branch tree now. A
+  file the store never wrote stays, and the directory itself only goes when it is empty.
+- The store is never touched by `remove`. The branch, its changesets and every object remain.
+- `bench/worktree.py`, seven checks, a gate step.
+
 ### `bisect run` drives a search from one command
 
 - `gesta bisect run <command>` answers every question by running the command, adopting git's exit

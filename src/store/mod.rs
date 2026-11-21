@@ -936,7 +936,28 @@ pub fn set_state(conn: &Connection, key: &str, value: &str) -> ZResult<()> {
 }
 
 pub fn current_branch(conn: &Connection) -> ZResult<String> {
+    // The branch belongs to the working tree, not to the store. Two trees can share one store - a
+    // linked worktree is exactly that - and each holds a different branch, so a single row in the
+    // shared state can only ever describe one of them. Whichever tree this process is working in
+    // records its branch before anything reads it, and that answer wins.
+    //
+    // Falling back to the store keeps every existing repository reading as it did: a repository with
+    // one tree never writes the per-tree value, so this branch of the code is the only one it takes.
+    if let Some(name) = WORKTREE_BRANCH.get() {
+        return Ok(name.clone());
+    }
     Ok(get_state(conn, "current_branch")?.unwrap_or_else(|| "main".to_string()))
+}
+
+/// The branch the working tree of this process holds, when it differs from the store's.
+static WORKTREE_BRANCH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Point the rest of this process at the branch a particular working tree holds.
+///
+/// Called once, at startup, after the repository root is known. A second call is ignored rather than
+/// panicking: a process has one working tree, and the first answer is the true one.
+pub fn set_worktree_branch(branch: &str) {
+    let _ = WORKTREE_BRANCH.set(branch.to_string());
 }
 
 // graph.

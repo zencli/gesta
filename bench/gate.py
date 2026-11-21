@@ -4678,6 +4678,20 @@ def main():
             (r[1] or "")[-500:],
         )
 
+    if want("worktree"):
+        # Two branches cannot be checked out in one directory, and the alternative - clone again -
+        # duplicates every object. A linked worktree is a second directory whose `.gesta` is a file
+        # naming the first one's store, so a commit in either tree is visible in the other.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worktree.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a linked worktree shares the store, holds its own branch, and removes cleanly",
+            r[0] == 0 and "7/7 worktree checks pass" in r[1],
+            (r[1] or "")[-500:],
+        )
+
     if want("bisect-run"):
         # The manual bisect loop is step, answer, step, answer. Driving it from one command is the
         # difference between a search over 30 changesets and five answers typed by hand, and the

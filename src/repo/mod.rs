@@ -11,6 +11,7 @@ pub mod rebase;
 pub mod stash;
 pub mod submodule;
 pub mod subrepo;
+pub mod worktree;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
