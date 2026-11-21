@@ -60,6 +60,25 @@ def documented_commands():
         for m in re.finditer(r"\bgesta ([a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)?)", text):
             words = m.group(1).split()
             out.add(" ".join(words))
+        # A command table row is a promise too, and the two-word regex above only reads prose: it
+        # missed every command the README lists as `| `notes add <cs> -m <text>` | ... |`, which is
+        # where most of them live. It also collected garbage from sentences - "keeps the", "writes
+        # and" - because prose after a bare `gesta` looks the same to the regex as a command name.
+        # The row may or may not spell out `gesta` first, so both forms are read.
+        for m in re.finditer(r"^\|\s*`(?:gesta )?([^`]+)`", text, re.M):
+            words = m.group(1).split()
+            # Drop placeholders and flags: the command name is the leading words that are not one.
+            name = []
+            for w in words:
+                if w.startswith("-") or w.startswith("<") or w.startswith("["):
+                    break
+                name.append(w)
+            if name and name[0].isalpha() and name[0] not in ("the", "this", "that"):
+                out.add(" ".join(name[:2]))
+    # Words that are never a subcommand, collected from prose the regex read as one. Keeping them
+    # makes the count look bigger and the surface look covered when it is not.
+    junk = {"keeps the", "writes and"}
+    out -= junk
     for extra in ("docs/install.md", "docs/hosting.md", "docs/secrets.md", "docs/harness.md"):
         path = os.path.join(ROOT, extra)
         if not os.path.exists(path):

@@ -608,13 +608,20 @@ is a difference from git that a person will notice.
 
 ### 9. What git has that nothing here replaces
 
-- **Hooks ecosystem.** There are pre and post commit hooks, not the full set, and no `.git/hooks`
-  compatibility.
+- **`.git/hooks` compatibility.** Six hook points run here (`pre-changeset`, `pre-commit`,
+  `post-commit`, `pre-land`, `post-checkout`, `pre-push`), and each one is a program in
+  `.gesta/hooks/`. A hook written for `.git/hooks` is not picked up, and the argument a git hook
+  receives is not the same shape.
 - **Submodules** in git's sense. `sub` records a pointer to a child repository, which covers the
   common case with different semantics.
-- **`git bisect run`**, `git worktree`, `git notes`, `git stash --patch`.
+- **`git stash --patch`.** `stash` takes the whole working set; there is no way to stash part of it.
 - **The forge ecosystem.** GitHub, GitLab and the rest speak git's protocol. `git push` is the
   bridge, and it is the one place a repository still needs the git binary.
+
+Three entries that used to be on this list are done, and are recorded here rather than deleted so the
+next reader can tell they were considered: `bisect run` drives a whole search from one command
+(exit 0 good, else bad, 125 skip), `worktree` gives a second working tree over one store, and `notes`
+attaches an annotation to a changeset without changing it.
 
 ## What "100% replacement" would mean, honestly
 
