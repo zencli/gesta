@@ -12,8 +12,8 @@ use std::path::Path;
 use rusqlite::params;
 use rusqlite::Connection;
 
-use crate::repo::worktree::{read_file, IgnoreRules, ReadOutcome};
 use crate::store::hash_content;
+use crate::store::walk::{read_file, IgnoreRules, ReadOutcome};
 use crate::ZResult;
 use std::fs;
 
@@ -79,10 +79,8 @@ pub fn scan_with_cache(
     // never recorded in this repository's cache either.
     // A submodule checkout holds another repository's files and must never be recorded as
     // this repository's own. Both kinds of pointer are excluded here so the walk has one list.
-    let root_ref = root;
-    let mut excluded = crate::repo::subrepo::excluded_paths(conn);
-    excluded.extend(crate::repo::submodule::excluded_paths(root_ref));
-    let walked = crate::repo::worktree::scan_files_excluding(root, rules, &excluded)?;
+    let excluded = crate::store::walk::excluded_paths(conn, root);
+    let walked = crate::store::walk::scan_files_excluding(root, rules, &excluded)?;
     for (rel, meta) in walked {
         // Nanoseconds, not seconds. Two writes inside one second with the same
         // size are indistinguishable at second resolution, and the cache would

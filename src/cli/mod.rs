@@ -14,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::repo;
 use crate::repo::history;
 use crate::repo::merge;
-use crate::repo::worktree;
+use crate::store::walk;
 use crate::store::{
     self, branch_head, current_branch, get_object, hash_at_point, init_schema, open_db,
     reachable_from, set_state,
@@ -416,7 +416,7 @@ pub fn cmd_diff(changeset: Option<&str>, name_only: bool) -> ZResult<()> {
             let mut any = false;
             for rel in changed {
                 let full = root.join(&rel);
-                let Some(content) = worktree::read_text(&full) else {
+                let Some(content) = walk::read_text(&full) else {
                     continue;
                 };
                 let old_hash = store::latest_hash(&conn, &rel, &branch)?;
@@ -938,7 +938,7 @@ pub fn cmd_blame(file: &str, ignore: &[String]) -> ZResult<()> {
             .collect()
     };
 
-    let content = match worktree::read_text(&root.join(&rel)) {
+    let content = match walk::read_text(&root.join(&rel)) {
         Some(c) => c,
         None => {
             let branch = current_branch(&conn)?;

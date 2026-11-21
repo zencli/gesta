@@ -7,7 +7,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::repo;
-use crate::repo::worktree::IgnoreRules;
+use crate::store::walk::IgnoreRules;
 use crate::store::{
     ancestors, branch_head, current_branch, delta_stats, init_schema, object_store_bytes, open_db,
     set_state,
@@ -1076,7 +1076,7 @@ pub fn cmd_ignore_why(path: &str, json: bool) -> ZResult<()> {
     }
     sources.push((
         "built-in defaults".to_string(),
-        crate::repo::worktree::DEFAULT_IGNORES
+        crate::store::walk::DEFAULT_IGNORES
             .iter()
             .map(|s| s.to_string())
             .collect(),
@@ -1088,7 +1088,7 @@ pub fn cmd_ignore_why(path: &str, json: bool) -> ZResult<()> {
         .iter()
         .flat_map(|(_, r)| r.iter().cloned())
         .collect();
-    let ignored = crate::repo::worktree::IgnoreRules::new(all).is_ignored(&rel, false);
+    let ignored = crate::store::walk::IgnoreRules::new(all).is_ignored(&rel, false);
 
     // The deciding rule is the last one that matches, because a later negation undoes an earlier
     // pattern. Each rule is tried on its own, without its `!`, so the question is "does this
@@ -1097,7 +1097,7 @@ pub fn cmd_ignore_why(path: &str, json: bool) -> ZResult<()> {
     for (source, rules) in &sources {
         for rule in rules {
             let body = rule.trim_start_matches('!');
-            let solo = crate::repo::worktree::IgnoreRules::new(vec![body.to_string()]);
+            let solo = crate::store::walk::IgnoreRules::new(vec![body.to_string()]);
             if solo.is_ignored(&rel, false) {
                 deciding = Some((source.clone(), rule.clone()));
             }
@@ -1142,8 +1142,8 @@ pub fn cmd_ignore_why(path: &str, json: bool) -> ZResult<()> {
             println!("  a rule covers it, and one of these puts it back:");
             for (src, rules) in &sources {
                 for r in rules.iter().filter(|r| r.starts_with('!')) {
-                    let restored = crate::repo::worktree::IgnoreRules::new(vec![r.clone()]);
-                    if crate::repo::worktree::IgnoreRules::new(vec![rule
+                    let restored = crate::store::walk::IgnoreRules::new(vec![r.clone()]);
+                    if crate::store::walk::IgnoreRules::new(vec![rule
                         .trim_start_matches('!')
                         .to_string()])
                     .is_ignored(&rel, false)

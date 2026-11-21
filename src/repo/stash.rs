@@ -15,7 +15,7 @@ use rusqlite::Connection;
 
 use crate::now;
 use crate::repo;
-use crate::repo::worktree::{read_file, ReadOutcome};
+use crate::store::walk::{read_file, ReadOutcome};
 use crate::store::{get_object, put_object_against};
 use crate::{bad, ZResult};
 

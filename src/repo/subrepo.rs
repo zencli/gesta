@@ -22,6 +22,8 @@ use rusqlite::Connection;
 
 use crate::{bad, now, ZResult};
 
+pub use crate::store::walk::is_inside_sub;
+
 #[derive(Debug)]
 pub struct Sub {
     pub path: String,
@@ -172,17 +174,6 @@ pub fn excluded_paths(conn: &Connection) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Is `rel` inside a subrepository, or the subrepository itself?
-pub fn is_inside_sub(rel: &str, subs: &[String]) -> bool {
-    subs.iter().any(|s| {
-        rel == s.as_str()
-            || rel
-                .strip_prefix(s.as_str())
-                .map(|rest| rest.starts_with('/'))
-                .unwrap_or(false)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,14 +256,13 @@ mod tests {
         std::fs::write(root.join("vendor/lib/src/lib.rs"), "theirs\n").unwrap();
         std::fs::write(root.join("vendor/other/x.txt"), "also mine\n").unwrap();
 
-        let rules = crate::repo::worktree::IgnoreRules::with_defaults(&[]);
+        let rules = crate::store::walk::IgnoreRules::with_defaults(&[]);
         let exclude = vec!["vendor/lib".to_string()];
-        let found: Vec<String> =
-            crate::repo::worktree::scan_files_excluding(&root, &rules, &exclude)
-                .unwrap()
-                .iter()
-                .map(|(r, _)| r.to_string())
-                .collect();
+        let found: Vec<String> = crate::store::walk::scan_files_excluding(&root, &rules, &exclude)
+            .unwrap()
+            .iter()
+            .map(|(r, _)| r.to_string())
+            .collect();
 
         assert!(found.contains(&"own.txt".to_string()));
         assert!(

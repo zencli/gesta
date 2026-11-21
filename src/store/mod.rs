@@ -12,6 +12,7 @@ pub mod sidecar;
 pub mod sparse;
 #[cfg(windows)]
 pub mod vfs;
+pub mod walk;
 
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -1632,29 +1633,62 @@ fn table_exists(conn: &Connection, name: &str) -> ZResult<bool> {
 pub(crate) mod tests {
     use super::*;
 
+    /// Every source file in this tier, for the check that reads them.
+    ///
+    /// Spelled out because `include_str!` is the only way to read a file at compile time and it takes a
+    /// literal path. Adding a module here means adding a line, and forgetting to means the new file is
+    /// the one that gets the cycle - which is why the test also checks the count against the declarations
+    /// in mod.rs.
+    const DIR_FILES: &[(&str, &str)] = &[
+        ("mod.rs", include_str!("mod.rs")),
+        ("cache.rs", include_str!("cache.rs")),
+        ("content.rs", include_str!("content.rs")),
+        ("delta.rs", include_str!("delta.rs")),
+        ("delta_pack.rs", include_str!("delta_pack.rs")),
+        ("gitobj.rs", include_str!("gitobj.rs")),
+        ("pack.rs", include_str!("pack.rs")),
+        ("packfile.rs", include_str!("packfile.rs")),
+        ("sidecar.rs", include_str!("sidecar.rs")),
+        ("sparse.rs", include_str!("sparse.rs")),
+        ("walk.rs", include_str!("walk.rs")),
+    ];
+
     #[test]
     fn the_storage_layer_does_not_call_up_into_the_repository_layer() {
-        // A cycle inside one crate is invisible to the compiler: `store` calling `repo` while
-        // `repo` calls `store` builds cleanly and only shows up by reading use lines. It was real
-        // here, through `tree_at`, and it is the kind of thing that comes back the moment somebody
-        // adds a fourth call. Reading this file is the only check that costs nothing at build time.
+        // A cycle inside one crate is invisible to the compiler: `store` calling `repo` while `repo`
+        // calls `store` builds cleanly and only shows up by reading use lines.
         //
-        // The one exception is a test helper below: `crate::repo::tests::commit_files` builds a
-        // fixture, and a fixture using the layer above it makes the test shorter without making
-        // the product depend upwards.
-        // The needle is spelled apart so this test does not find itself: the first run did, which is
-        // the check working on the wrong line but for the right reason.
-        let needle = concat!("crate", "::repo");
-        let src = include_str!("mod.rs");
-        let offenders: Vec<&str> = src
-            .lines()
-            .filter(|l| l.contains(needle))
-            .filter(|l| !l.contains("crate::repo::tests"))
-            .collect();
+        // This reads every file in the directory, not just this one. The first version read only
+        // `mod.rs` and passed while `cache.rs` called `repo::worktree` from four places - a test
+        // claiming more than it checked, which is the failure mode that made `cargo fmt --check` sit
+        // broken for months. A guard that covers one file in a tier of eleven is worse than none,
+        // because it reads like coverage.
+        //
+        // The needles are spelled apart so the check does not find itself. The separator is part of
+        // the needle: `crate::repo_dir` is a function in the crate root that has nothing to do with
+        // the repository layer, and matching the bare prefix reported it as a violation. A guard that
+        // cries wolf is one somebody switches off.
+        let upward = concat!("crate", "::repo", "::");
+        let fixture = concat!("crate", "::repo", "::tests");
+        // A second allowed shape: a `use` inside `#[cfg(test)]`. A test that checks what the storage
+        // layer wrote may read it back through the layer above, because the test is not a caller of
+        // the product. It is named here rather than filtered by a pattern, so adding one is a
+        // deliberate act that shows up in review.
+        let test_readback = concat!("use crate", "::repo", "::committed_tree;");
+
+        let mut offenders: Vec<String> = Vec::new();
+        for (name, src) in DIR_FILES {
+            for (n, line) in src.lines().enumerate() {
+                if line.contains(upward) && !line.contains(fixture) && !line.contains(test_readback)
+                {
+                    offenders.push(format!("{}:{}: {}", name, n + 1, line.trim()));
+                }
+            }
+        }
         assert!(
             offenders.is_empty(),
-            "the storage layer reaches up into repo: {:?}",
-            offenders
+            "the storage layer reaches up into repo:\n  {}",
+            offenders.join("\n  ")
         );
     }
 

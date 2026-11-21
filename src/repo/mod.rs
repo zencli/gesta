@@ -10,7 +10,6 @@ pub mod rebase;
 pub mod stash;
 pub mod submodule;
 pub mod subrepo;
-pub mod worktree;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
@@ -18,7 +17,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::repo::merge::{diff_hunks, merge3, MergeResult};
-use crate::repo::worktree::IgnoreRules;
+use crate::store::walk::IgnoreRules;
 use crate::store::{
     branch_head, current_branch, get_object, hash_at_point, hash_content, latest_hash, merge_base,
     new_changeset_id, put_object, put_object_against,
@@ -238,9 +237,9 @@ pub fn create_changeset_scoped(
             let content = if f.content.is_empty() {
                 // Could be a binary file or a cache hit. Read the bytes and
                 // classify.
-                match crate::repo::worktree::read_file(&root.join(&f.rel)) {
-                    crate::repo::worktree::ReadOutcome::Text(c) => c,
-                    crate::repo::worktree::ReadOutcome::Binary => {
+                match crate::store::walk::read_file(&root.join(&f.rel)) {
+                    crate::store::walk::ReadOutcome::Text(c) => c,
+                    crate::store::walk::ReadOutcome::Binary => {
                         let bytes = std::fs::read(root.join(&f.rel))?;
                         let _ = crate::store::put_object_bytes(conn, &bytes)?;
                         String::new()

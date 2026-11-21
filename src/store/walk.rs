@@ -1,5 +1,10 @@
-//! Worktree scanning: ignore rules, file walking, text/binary detection.
+//! Walking a working tree: ignore rules, file walking, text/binary detection.
+//!
+//! In the storage tier because the worktree cache is here and is the caller: it asks what is on
+//! disk to decide what to re-read. It sat in `repo`, which made `store` call up into the layer
+//! above it. Everything here is `fs` and a path comparison, with no knowledge of changesets.
 
+use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -530,7 +535,7 @@ pub fn scan_files_excluding(
                 if ign {
                     continue;
                 }
-                if crate::repo::subrepo::is_inside_sub(&rel, exclude) {
+                if is_inside_sub(&rel, exclude) {
                     continue;
                 }
                 stack.push((entry.path(), rel));
@@ -689,6 +694,73 @@ pub fn read_text(p: &Path) -> Option<String> {
         ReadOutcome::Text(s) => Some(s),
         _ => None,
     }
+}
+
+/// Is `rel` inside a subrepository, or the subrepository itself?
+pub fn is_inside_sub(rel: &str, subs: &[String]) -> bool {
+    subs.iter().any(|s| {
+        rel == s.as_str()
+            || rel
+                .strip_prefix(s.as_str())
+                .map(|rest| rest.starts_with('/'))
+                .unwrap_or(false)
+    })
+}
+
+/// Checkout paths of every subrepository, for the walk to skip.
+///
+/// Read straight from the table rather than through `subrepo::list`, because the walk is the caller
+/// and the storage tier must not depend on the layer above it. The table is the one `subrepo` writes.
+///
+/// A subrepository is a tracked path whose content lives in another repository. Scanning it would
+/// record the child's files as this repository's own, which is how a nested repository turns into a
+/// commit that swallows its child.
+fn subrepo_paths(conn: &Connection) -> Vec<String> {
+    let mut stmt = match conn.prepare("SELECT path FROM subrepos ORDER BY path") {
+        Ok(s) => s,
+        // The table exists from the first time a subrepository is added. A repository that has none
+        // has no table, and nothing to skip.
+        Err(_) => return Vec::new(),
+    };
+    let rows = match stmt.query_map([], |r| r.get::<_, String>(0)) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    rows.filter_map(|r| r.ok()).collect()
+}
+
+/// Checkout paths of every submodule, for the walk to skip.
+///
+/// Read from `.gitmodules`, which is the file the pointer lives in. A submodule's files belong to the
+/// child repository; recording them here would put another project's content in this one's history.
+fn submodule_paths(root: &Path) -> Vec<String> {
+    let path = root.join(".gitmodules");
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("path") {
+            if let Some(value) = rest.split_once('=').map(|(_, v)| v.trim()) {
+                if !value.is_empty() {
+                    out.push(value.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every path the walk must skip: subrepositories and submodules.
+///
+/// One list rather than two, because the walk descends once and a second caller remembering to merge
+/// them is a second place to forget.
+pub fn excluded_paths(conn: &Connection, root: &Path) -> Vec<String> {
+    let mut out = subrepo_paths(conn);
+    out.extend(submodule_paths(root));
+    out
 }
 
 #[cfg(test)]
