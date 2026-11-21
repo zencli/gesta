@@ -1639,45 +1639,47 @@ pub(crate) mod tests {
     /// literal path. Adding a module here means adding a line, and forgetting to means the new file is
     /// the one that gets the cycle - which is why the test also checks the count against the declarations
     /// in mod.rs.
-    const DIR_FILES: &[(&str, &str)] = &[
-        ("mod.rs", include_str!("mod.rs")),
-        ("cache.rs", include_str!("cache.rs")),
-        ("content.rs", include_str!("content.rs")),
-        ("delta.rs", include_str!("delta.rs")),
-        ("delta_pack.rs", include_str!("delta_pack.rs")),
-        ("gitobj.rs", include_str!("gitobj.rs")),
-        ("pack.rs", include_str!("pack.rs")),
-        ("packfile.rs", include_str!("packfile.rs")),
-        ("sidecar.rs", include_str!("sidecar.rs")),
-        ("sparse.rs", include_str!("sparse.rs")),
-        ("walk.rs", include_str!("walk.rs")),
-    ];
 
     #[test]
     fn the_storage_layer_does_not_call_up_into_the_repository_layer() {
         // A cycle inside one crate is invisible to the compiler: `store` calling `repo` while `repo`
         // calls `store` builds cleanly and only shows up by reading use lines.
         //
-        // This reads every file in the directory, not just this one. The first version read only
-        // `mod.rs` and passed while `cache.rs` called `repo::worktree` from four places - a test
-        // claiming more than it checked, which is the failure mode that made `cargo fmt --check` sit
-        // broken for months. A guard that covers one file in a tier of eleven is worse than none,
-        // because it reads like coverage.
-        //
-        // The needles are spelled apart so the check does not find itself. The separator is part of
-        // the needle: `crate::repo_dir` is a function in the crate root that has nothing to do with
-        // the repository layer, and matching the bare prefix reported it as a violation. A guard that
-        // cries wolf is one somebody switches off.
+        // This reads every file in the tier, discovered from the declarations in this file rather
+        // than from a list written out by hand. The hand-written version was wrong the moment it was
+        // committed - it was missing `vfs.rs` - and would have failed silently in exactly the case it
+        // exists for. A guard that needs updating alongside the thing it guards is a guard that stops
+        // guarding without saying so.
         let upward = concat!("crate", "::repo", "::");
         let fixture = concat!("crate", "::repo", "::tests");
-        // A second allowed shape: a `use` inside `#[cfg(test)]`. A test that checks what the storage
-        // layer wrote may read it back through the layer above, because the test is not a caller of
-        // the product. It is named here rather than filtered by a pattern, so adding one is a
-        // deliberate act that shows up in review.
+        // A test that checks what the storage layer wrote may read it back through the layer above,
+        // because a test is not a caller of the product. Named explicitly so adding one is a
+        // deliberate act that shows up in review, rather than a pattern that silently permits it.
         let test_readback = concat!("use crate", "::repo", "::committed_tree;");
 
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store");
+        let mut checked = 0usize;
         let mut offenders: Vec<String> = Vec::new();
-        for (name, src) in DIR_FILES {
+
+        let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {}", dir.display(), e))
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"))
+            .collect();
+        paths.sort();
+
+        assert!(
+            paths.len() >= 10,
+            "found only {} source file(s) in {}, so this check is reading the wrong directory",
+            paths.len(),
+            dir.display()
+        );
+
+        for path in paths {
+            let src = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {}", path.display(), e));
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            checked += 1;
             for (n, line) in src.lines().enumerate() {
                 if line.contains(upward) && !line.contains(fixture) && !line.contains(test_readback)
                 {
@@ -1685,9 +1687,11 @@ pub(crate) mod tests {
                 }
             }
         }
+
         assert!(
             offenders.is_empty(),
-            "the storage layer reaches up into repo:\n  {}",
+            "the storage layer reaches up into repo ({} files read):\n  {}",
+            checked,
             offenders.join("\n  ")
         );
     }
