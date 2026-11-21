@@ -1911,10 +1911,16 @@ def main():
             # doing: taking the first id from `changeset list` picks whichever changeset another
             # process created a moment ago, and `changeset create --json` returns a null id when the
             # tree has no change to record. Matching on the message this writer chose avoids both.
+            # Each writer records only its own file. Without `--path` every writer snapshots the
+            # WHOLE tree, so the second one to run sees the first one's file as its own change and
+            # absorbs it: twenty writers, twenty changesets, and one writer's work sitting inside
+            # another's. That is correct behaviour for a plain `create` and the wrong thing to
+            # measure here, which is why the count was 20 instead of 21 on a machine that really
+            # runs them at once.
             procs.append(
                 subprocess.Popen(
                     ["bash", "-lc",
-                     f"{ZF} changeset create w{i} --author p{i} >/dev/null 2>&1; "
+                     f"{ZF} changeset create w{i} --author p{i} --path w{i}.txt >/dev/null 2>&1; "
                      f"c=$({ZF} changeset list --json 2>/dev/null "
                      f"| python3 -c \"import json,sys; "
                      f"d=json.load(sys.stdin); "

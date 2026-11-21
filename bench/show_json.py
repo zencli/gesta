@@ -6,7 +6,12 @@ import shutil
 import subprocess
 import tempfile
 
-ZF = "/work/gesta/target/release/gesta"
+# Found relative to this file, and overridable, the way every other bench here does it. A hardcoded
+# path works in one container and fails on any other machine: this one said `/work/gesta`, which is
+# where I build, and CI checks out to `/home/runner/work/gesta/gesta`, so the step failed there with
+# `No such file or directory` while passing locally every single time.
+ZF = os.environ.get("ZF_BIN", os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "target", "release", "gesta"))
 BIN = b"\x00\x01\x02\xff\xfe\x80binary"
 
 
