@@ -3,64 +3,18 @@
 //! Server-side changesets, content-addressed compressed objects, derived blame
 //! and history, three-way merge, remote sync, and an operation log for undo.
 
-mod approval;
-mod attributes;
-mod audit;
-mod audit_forward;
-mod auth;
-mod backup;
-mod bisect;
-mod brief;
-mod cache;
 mod cli;
-mod cli_remote;
-mod clock;
-mod conflict;
-mod content;
-mod delta;
-mod delta_pack;
-mod error;
-mod git_bridge;
-mod gitobj;
-mod gitserver;
-mod grep;
-mod history;
-mod hooks;
-mod http;
-mod impact;
-mod json;
-mod keyring;
-#[cfg(feature = "regex")]
-mod leak;
-mod mcp;
-mod merge;
-mod ops;
-mod pack;
-mod packfile;
-mod privacy;
-mod protocol_v2;
-mod rebase;
-mod remote;
 mod repo;
-mod s3;
-mod secrets;
-mod sidecar;
-mod sign;
-mod sigv4;
-mod sparse;
-mod stash;
 mod store;
-mod submodule;
-mod subrepo;
-#[cfg(feature = "tls")]
-mod tls;
-#[cfg(windows)]
-mod vfs;
-mod worktree;
+mod support;
+mod transport;
 
 use clap::{Parser, Subcommand};
+use cli::cli_remote;
 use std::error::Error;
 use std::path::PathBuf;
+use support::clock;
+use support::error;
 
 use store::{init_schema, migrate, open_db};
 

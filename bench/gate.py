@@ -2007,7 +2007,7 @@ def main():
         # Every path that arrives from a client must be refused when it escapes
         # the repository: this is the one defect that turns a remote write into
         # an arbitrary file write.
-        text = open(os.path.join(ZF_DIR, "src/http.rs"), encoding="utf-8").read()
+        text = open(os.path.join(ZF_DIR, "src/transport/http.rs"), encoding="utf-8").read()
         guards = text.count('..') and "unsafe path" in text
         record("remote writes refuse a path that escapes the repository",
                bool(guards), "the ../ guard is missing from http.rs")
@@ -2331,7 +2331,7 @@ def main():
         import subprocess as _sp
         src = os.path.join(os.getcwd(), "src")
         hits = _sp.run(
-            ["grep", "-rn", "more (", os.path.join(src, "cli.rs"), os.path.join(src, "cli_remote.rs")],
+            ["grep", "-rn", "more (", os.path.join(src, "cli", "mod.rs"), os.path.join(src, "cli", "cli_remote.rs")],
             capture_output=True, text=True,
         )
         lines = [l for l in (hits.stdout or "").splitlines() if "more (" in l]
