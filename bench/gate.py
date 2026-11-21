@@ -4612,6 +4612,20 @@ def main():
             f"{ratio:.2f}x git" if m else (r[1] or "")[-300:],
         )
 
+    if want("large-attribute"):
+        # The sidecar already takes anything past 4 MB. This is the other direction: a path the
+        # repository declares large while it is still small, which is the case a threshold decides
+        # wrongly and then lives with.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'large_attr.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a large attribute moves a body out of the database",
+            r[0] == 0 and "8/8 large-attribute checks pass" in r[1],
+            (r[1] or "")[-400:],
+        )
+
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
 

@@ -10,7 +10,7 @@ use rusqlite::Connection;
 
 use crate::store::branch_head;
 use crate::store::tree_at;
-use crate::store::{new_changeset_id, put_object, put_object_bytes};
+use crate::store::{new_changeset_id, put_object, put_object_bytes_for};
 use crate::{bad, ZResult};
 
 /// A changeset built from caller-supplied content, with no working tree involved.
@@ -92,6 +92,7 @@ pub fn changeset_from_content(
     branch: &str,
     files: &[(String, String)],
     delete: &[String],
+    rules: Option<&crate::support::attributes::Rules>,
 ) -> ZResult<ContentChangeset> {
     let head = branch_head(conn, branch)?;
     // The base includes changesets still pending on this branch, not just the
@@ -122,7 +123,12 @@ pub fn changeset_from_content(
         // Raw bytes. Text files use the provided string.
         let new_hash = if content.is_empty() {
             let bytes = std::fs::read(path)?;
-            put_object_bytes(&tx, &bytes)?
+            // The rule is written against the path inside the repository; the caller passes the
+            // path on disk so the bytes can be read. Look the rule up by the tail that the tree
+            // knows, which is the last two components - enough for `*.bin` and `vendor/**`, and
+            // honest about being an approximation for a pattern anchored at the root.
+            let rel = relative_tail(path);
+            put_object_bytes_for(&tx, &bytes, Some(rel.as_str()), rules)?
         } else {
             put_object(&tx, content)?
         };
@@ -171,6 +177,25 @@ pub fn changeset_from_content(
     Ok(ContentChangeset { id, paths, skipped })
 }
 
+/// The repository-relative tail of a path on disk.
+///
+/// A `.gitattributes` pattern is written against the tree, and the caller holds an absolute path. A
+/// full resolution needs the repository root, which this function is not given; taking the file name
+/// and the one directory above covers the patterns people write (`*.bin`, `assets/**`) without
+/// pretending to handle an anchor at the root.
+fn relative_tail(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or(path);
+    match p
+        .parent()
+        .and_then(|d| d.file_name())
+        .and_then(|n| n.to_str())
+    {
+        Some(dir) => format!("{}/{}", dir, name),
+        None => name.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,11 +206,11 @@ mod tests {
     fn a_changeset_records_only_what_differs_from_the_head() {
         let conn = mem_db();
         let first = vec![("a.txt".to_string(), "one\n".to_string())];
-        let cs = changeset_from_content(&conn, "add", "agent", "main", &first, &[]).unwrap();
+        let cs = changeset_from_content(&conn, "add", "agent", "main", &first, &[], None).unwrap();
         assert_eq!(cs.paths, vec!["a.txt".to_string()]);
 
         // The same content again is not a change.
-        let again = changeset_from_content(&conn, "same", "agent", "main", &first, &[]);
+        let again = changeset_from_content(&conn, "same", "agent", "main", &first, &[], None);
         assert!(
             again.is_err(),
             "identical content must not create a changeset"
@@ -199,7 +224,8 @@ mod tests {
         // second API call lost track of what the first one wrote.
         let conn = mem_db();
         let files = vec![("src/app.py".to_string(), "print(1)\n".to_string())];
-        let cs = changeset_from_content(&conn, "queued", "agent", "main", &files, &[]).unwrap();
+        let cs =
+            changeset_from_content(&conn, "queued", "agent", "main", &files, &[], None).unwrap();
 
         let committed = committed_tree(&conn, "main").unwrap();
         assert!(
@@ -219,7 +245,7 @@ mod tests {
     fn a_second_changeset_can_delete_what_the_first_one_added() {
         let conn = mem_db();
         let files = vec![("doc.md".to_string(), "# doc\n".to_string())];
-        changeset_from_content(&conn, "add", "agent", "main", &files, &[]).unwrap();
+        changeset_from_content(&conn, "add", "agent", "main", &files, &[], None).unwrap();
 
         let del = changeset_from_content(
             &conn,
@@ -228,6 +254,7 @@ mod tests {
             "main",
             &[],
             &["doc.md".to_string()],
+            None,
         )
         .unwrap();
         assert_eq!(del.paths, vec!["doc.md".to_string()]);
@@ -254,6 +281,7 @@ mod tests {
             "main",
             &files,
             &["ghost.txt".to_string()],
+            None,
         )
         .unwrap();
         assert_eq!(r.paths, vec!["keep.txt".to_string()]);
@@ -266,10 +294,11 @@ mod tests {
         // changeset claims to rewrite a version that never existed.
         let conn = mem_db();
         let first = vec![("a.txt".to_string(), "one\n".to_string())];
-        changeset_from_content(&conn, "first", "agent", "main", &first, &[]).unwrap();
+        changeset_from_content(&conn, "first", "agent", "main", &first, &[], None).unwrap();
 
         let second = vec![("a.txt".to_string(), "two\n".to_string())];
-        let cs = changeset_from_content(&conn, "second", "agent", "main", &second, &[]).unwrap();
+        let cs =
+            changeset_from_content(&conn, "second", "agent", "main", &second, &[], None).unwrap();
 
         let old: Option<String> = conn
             .query_row(
@@ -288,7 +317,15 @@ mod tests {
     #[test]
     fn an_unknown_path_to_delete_is_refused_when_nothing_else_changed() {
         let conn = mem_db();
-        let r = changeset_from_content(&conn, "noop", "a", "main", &[], &["never.txt".to_string()]);
+        let r = changeset_from_content(
+            &conn,
+            "noop",
+            "a",
+            "main",
+            &[],
+            &["never.txt".to_string()],
+            None,
+        );
         // Nothing to record, so the changeset is refused rather than left empty.
         assert!(r.is_err());
     }
@@ -300,7 +337,7 @@ mod tests {
             ("a.txt".to_string(), "one\n".to_string()),
             ("a.txt".to_string(), "two\n".to_string()),
         ];
-        let r = changeset_from_content(&conn, "dupe", "a", "main", &files, &[]);
+        let r = changeset_from_content(&conn, "dupe", "a", "main", &files, &[], None);
         assert!(r.is_err(), "two contents for one path is ambiguous");
     }
 
@@ -315,6 +352,7 @@ mod tests {
             "main",
             &files,
             &["a.txt".to_string()],
+            None,
         );
         assert!(r.is_err());
     }

@@ -42,6 +42,13 @@ pub struct Rule {
     pub text: Option<Text>,
     /// The line ending to write to the working tree, if the rule names one.
     pub eol: Option<Eol>,
+    /// Whether the body lives beside the database instead of in a row.
+    ///
+    /// `large` and `-large`, which is what a repository uses to say that a path is big, or will be,
+    /// without waiting for it to cross the size threshold. A binary that is 3 MB today and 300 MB next
+    /// month is the case a threshold handles badly: it stores the small one inline and then copies the
+    /// row every time the large one is touched.
+    pub large: Option<bool>,
 }
 
 /// Which line ending a checkout gets.
@@ -173,6 +180,7 @@ impl Rules {
             };
             let mut text_attr = None;
             let mut eol = None;
+            let mut large = None;
             let mut saw_any = false;
             for attr in parts {
                 saw_any = true;
@@ -195,6 +203,10 @@ impl Rules {
                     }
                     // A `!attr` unsets it, which is how a file opts back out of a broad rule.
                     "!text" => text_attr = Some(Text::Unspecified),
+                    // `large` sends the body to the sidecar regardless of size; `-large` keeps it
+                    // inline, which is what a file whose name matches a broad rule needs.
+                    "large" => large = Some(true),
+                    "-large" => large = Some(false),
                     _ => continue,
                 }
             }
@@ -214,6 +226,7 @@ impl Rules {
                 matcher,
                 text: text_attr,
                 eol,
+                large,
             });
         }
     }
@@ -239,6 +252,20 @@ impl Rules {
             }
         }
         (text, eol, which)
+    }
+
+    /// Whether the rules send this path to the sidecar.
+    ///
+    /// Last matching rule wins, the same as every other attribute: a broad `*.bin large` with one
+    /// `!config.bin -large` after it has to read the way it looks.
+    pub fn lookup_large(&self, path: &str) -> Option<bool> {
+        let mut out = None;
+        for rule in &self.rules {
+            if rule.large.is_some() && rule.matcher.matches(path) {
+                out = rule.large;
+            }
+        }
+        out
     }
 
     /// Whether the rules are empty, which is the common case and worth not paying for.

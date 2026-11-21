@@ -20,7 +20,7 @@ use crate::repo::merge::{diff_hunks, merge3, MergeResult};
 use crate::store::walk::IgnoreRules;
 use crate::store::{
     branch_head, current_branch, get_object, hash_at_point, hash_content, latest_hash, merge_base,
-    new_changeset_id, put_object, put_object_against,
+    new_changeset_id, put_object, put_object_for,
 };
 use crate::{bad, now, repo_dir, ZResult};
 
@@ -241,7 +241,18 @@ pub fn create_changeset_scoped(
                     crate::store::walk::ReadOutcome::Text(c) => c,
                     crate::store::walk::ReadOutcome::Binary => {
                         let bytes = std::fs::read(root.join(&f.rel))?;
-                        let _ = crate::store::put_object_bytes(conn, &bytes)?;
+                        // The rules are already loaded here for the text/eol decisions; passing them
+                        // is what makes a `large` in `.gitattributes` decide instead of the 4 MB
+                        // threshold. Without this the attribute parsed and did nothing, which is
+                        // worse than not having it: `.gitattributes` is where a repository says a
+                        // path is big, and a rule that silently has no effect is a rule people keep
+                        // writing.
+                        let _ = crate::store::put_object_bytes_for(
+                            conn,
+                            &bytes,
+                            Some(f.rel.as_str()),
+                            Some(&attrs),
+                        )?;
                         String::new()
                     }
                     _ => continue,
@@ -283,7 +294,8 @@ pub fn create_changeset_scoped(
     for (rel, old, new, content) in &changes {
         // A delta against the previous version of this path is what keeps a
         // long editing history small. `old` is that previous version's hash.
-        put_object_against(&tx, content, old.as_deref())?;
+        // The path is here and the rules are here, so a text file the rules call large goes out too.
+        put_object_for(&tx, content, Some(rel), Some(&attrs), old.as_deref())?;
         tx.execute(
             "INSERT INTO changeset_files(changeset_id, path, old_hash, new_hash)
              VALUES(?1, ?2, ?3, ?4)",

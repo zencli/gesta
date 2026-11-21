@@ -480,6 +480,20 @@ pub fn hash_content(s: &str) -> String {
 /// Binary files use this: compression often inflates them and deltas are
 /// not meaningful for non-text content.
 pub fn put_object_bytes(conn: &Connection, bytes: &[u8]) -> ZResult<String> {
+    put_object_bytes_for(conn, bytes, None, None)
+}
+
+/// Store raw bytes, told which path they came from.
+///
+/// A `.gitattributes` rule can say a path is large before it is: a 3 MB binary named today that will
+/// be 300 MB next month is stored inline by a threshold and copied by every backup from then on. With
+/// the path, the rule decides and the threshold is the fallback.
+pub fn put_object_bytes_for(
+    conn: &Connection,
+    bytes: &[u8],
+    path: Option<&str>,
+    rules: Option<&crate::support::attributes::Rules>,
+) -> ZResult<String> {
     let h = hash_bytes(bytes);
     let exists: Option<i64> = conn
         .query_row("SELECT 1 FROM objects WHERE hash = ?1", params![h], |r| {
@@ -493,7 +507,15 @@ pub fn put_object_bytes(conn: &Connection, bytes: &[u8]) -> ZResult<String> {
     // blob of tens of megabytes is copied by every operation that touches the page: a backup, a
     // VACUUM, a read of one row. The sidecar column is the whole difference and every reader already
     // goes through get_object_bytes, which asks the sidecar first.
-    if crate::store::sidecar::is_large(bytes.len()) {
+    // A rule wins over the threshold in both directions: `large` sends a small body out, `-large`
+    // keeps a big one in.
+    let send_out = match (path, rules) {
+        (Some(p), Some(r)) => r
+            .lookup_large(p)
+            .unwrap_or_else(|| crate::store::sidecar::is_large(bytes.len())),
+        _ => crate::store::sidecar::is_large(bytes.len()),
+    };
+    if send_out {
         if let Some(root) = db_root(conn) {
             crate::store::sidecar::write(&root, &h, bytes)?;
             conn.execute(
@@ -547,6 +569,32 @@ fn decompress(blob: &[u8]) -> ZResult<String> {
 /// row bigger than the text itself; small objects are stored raw instead.
 pub fn put_object(conn: &Connection, content: &str) -> ZResult<String> {
     put_object_against(conn, content, None)
+}
+
+/// Store text with the path it came from, so a `large` rule applies to it too.
+///
+/// `put_object_against` compresses and may delta, and never considers the sidecar. That is right for
+/// the ordinary case and wrong for a generated file that is 20 MB of UTF-8: the rule says the path is
+/// big, and a rule that only moves binaries is one nobody means.
+pub fn put_object_for(
+    conn: &Connection,
+    content: &str,
+    path: Option<&str>,
+    rules: Option<&crate::support::attributes::Rules>,
+    base: Option<&str>,
+) -> ZResult<String> {
+    let send_out = match (path, rules) {
+        (Some(p), Some(r)) => r
+            .lookup_large(p)
+            .unwrap_or_else(|| crate::store::sidecar::is_large(content.len())),
+        _ => crate::store::sidecar::is_large(content.len()),
+    };
+    if !send_out {
+        return put_object_against(conn, content, base);
+    }
+    // A delta against another object is meaningless for something that is leaving the database: the
+    // reader of a sidecar asks for a whole file, and a sidecar holding a delta would need the base.
+    put_object_bytes_for(conn, content.as_bytes(), path, rules)
 }
 
 /// Store `content`, optionally as a delta against `base`.
