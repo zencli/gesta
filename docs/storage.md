@@ -112,3 +112,49 @@ whole vault took 5,371 ms before and 1,229 ms after.
 
 The general rule: a row that repeats a value which has one home is the largest cost in a database,
 and no amount of making that row smaller competes with not writing it.
+
+## Re-measured, and what 11% buys
+
+The 6.6x above was taken before blame became ranges. Measured again on the current build, 1000 files of
+seven bytes costs 856 KB, split across five tables that each hold one row per path:
+
+| Table | Bytes | Share |
+|---|---:|---:|
+| `file_versions` | 110,592 | 12.9% |
+| `changeset_files` | 106,496 | 12.4% |
+| `worktree_cache` | 102,400 | 12.0% |
+| `branch_tree` | 94,208 | 11.0% |
+| `blame_ranges` | 40,960 | 4.8% |
+| indexes (five) | 118,784 | 13.9% |
+
+`objects` holds one row for all 1000 files, because seven identical bodies dedup to one. The cost is
+not the object store at all; it is five rows of about a hundred bytes holding seven bytes each.
+
+### The one change that measured worth doing
+
+A hash is stored as 64 characters of hex. As a 32-byte blob it is half the width, and the saving across
+`worktree_cache`, `branch_tree`, `file_versions` and `objects` measured at 94 KB on 856 KB: **11.0%**.
+
+That is worth doing and has not been done, because every one of those tables is read and written
+through a `String` and the change reaches roughly fifty call sites. An 11% saving does not justify
+rewriting the type of the value the whole storage layer passes around, on a codebase where the tests
+pass and the next change is expected to be small. It is recorded here so the next person to look at
+disk usage does not have to measure it again.
+
+`bench/hash_size.py` reproduces the 11% in seconds by rewriting the hash column of a copy into a blob
+and comparing the vacuumed files. It changes nothing.
+
+### What would actually move the number
+
+The rows are the problem, not the bytes in them. Two candidates, neither implemented:
+
+1. **One row per path rather than per version.** `file_versions` and `blame_ranges` grow with history.
+   A repository edited a thousand times holds a thousand rows per path. Keeping the newest and a
+   bounded chain would cut both; it costs the ability to ask about any older version, which `history`
+   does today.
+2. **A denser row format.** SQLite's per-row overhead is what makes seven bytes cost a hundred.
+   Storing a tree as one serialized value per branch, the way git does, trades per-path queries for a
+   much smaller file.
+
+Both are schema changes and both lose a capability. A storage figure that is smaller because a feature
+disappeared is not an improvement, and neither was done.

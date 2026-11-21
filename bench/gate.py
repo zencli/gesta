@@ -4586,6 +4586,32 @@ def main():
             (r[1] or "")[-400:],
         )
 
+    if want("storage-cost"):
+        # The ratio in docs/storage.md is a claim about this build. A document that drifts from the code
+        # is a document nobody trusts, and this is the cheapest way to keep the two in step.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tiny_files.py')}",
+            cwd=ZF_DIR,
+            timeout=600,
+        )
+        # A ratio that has grown past the recorded figure means the schema changed shape; a ratio that
+        # has fallen means the document is stale. Either is worth failing on, so the check pins the
+        # claim rather than the number.
+        m = re.search(r"tiny: 1000 files.*\n\s+git\s+([\d,]+) bytes\n\s+gesta\s+([\d,]+) bytes", r[1])
+        ok = r[0] == 0 and m is not None
+        ratio = 0.0
+        if m:
+            git_b = int(m.group(1).replace(",", ""))
+            gesta_b = int(m.group(2).replace(",", ""))
+            ratio = gesta_b / git_b if git_b else 0.0
+            # 14x is the measured figure; a regression past 18 is a new row per path, not noise.
+            ok = ok and ratio < 18.0
+        record(
+            "a tree of tiny files stays within the recorded storage ratio",
+            ok,
+            f"{ratio:.2f}x git" if m else (r[1] or "")[-300:],
+        )
+
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
 
