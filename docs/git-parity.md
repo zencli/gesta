@@ -614,14 +614,18 @@ is a difference from git that a person will notice.
   receives is not the same shape.
 - **Submodules** in git's sense. `sub` records a pointer to a child repository, which covers the
   common case with different semantics.
-- **`git stash --patch`.** `stash` takes the whole working set; there is no way to stash part of it.
+- **Hunk-level stashing.** `stash save --path` takes named files, which covers the case that matters
+  when two unrelated edits are in one tree. There is no way to take part of one file; that needs a
+  hunk picker, and the answer here is to split the edit into two files rather than to build one.
 - **The forge ecosystem.** GitHub, GitLab and the rest speak git's protocol. `git push` is the
   bridge, and it is the one place a repository still needs the git binary.
 
-Three entries that used to be on this list are done, and are recorded here rather than deleted so the
-next reader can tell they were considered: `bisect run` drives a whole search from one command
-(exit 0 good, else bad, 125 skip), `worktree` gives a second working tree over one store, and `notes`
-attaches an annotation to a changeset without changing it.
+Entries that used to be on this list are done, and are recorded here rather than deleted so the next
+reader can tell they were considered: `bisect run` drives a whole search from one command (exit 0 good,
+else bad, 125 skip), `worktree` gives a second working tree over one store, `notes` attaches an
+annotation to a changeset without changing it, and `stash save --path` sets aside named files without
+disturbing the rest of the tree. What is left of that last one is hunk-level selection, which is a
+different thing and is listed above.
 
 ## What "100% replacement" would mean, honestly
 
