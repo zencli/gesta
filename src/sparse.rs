@@ -127,7 +127,7 @@ pub fn checkout_sparse(
         Some(h) => h,
         None => return Err(bad(format!("branch {} has no changesets", branch))),
     };
-    let tree = crate::repo::tree_at(conn, &head)?;
+    let tree = crate::store::tree_at(conn, &head)?;
 
     let mut written = 0usize;
     let mut kept = 0usize;

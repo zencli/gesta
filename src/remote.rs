@@ -1282,7 +1282,7 @@ mod tests {
 
         let full = build_bundle(&conn, "main", &HashSet::new()).unwrap();
         // A snapshot is what makes a shallow clone able to restore the working tree.
-        let head_tree = crate::repo::tree_at(&conn, "csh11").unwrap();
+        let head_tree = crate::store::tree_at(&conn, "csh11").unwrap();
         let mut with_snapshot = full.clone();
         with_snapshot.snapshot = head_tree.clone();
         let carried: HashSet<String> = with_snapshot

@@ -1,0 +1,9 @@
+# Git stores LF. This repository is edited on Windows, where the default is to write CRLF, and the
+# mismatch made every patch script that rewrote a file report thousands of changed lines when it had
+# changed three. The rule below is what stops that: the worktree may use either ending, the object
+# database always has LF, and a diff shows the edit rather than the line-ending noise.
+* text=auto eol=lf
+
+# Archives a release publishes carry whatever the platform expects, so they are left alone.
+*.zip binary
+*.tar.gz binary

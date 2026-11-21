@@ -375,7 +375,7 @@ fn push_s3(conn: &Connection, url: &str, branch: &str) -> ZResult<()> {
     // Without it a shallow clone cannot rebuild the working tree, because the
     // changesets that created the older files are exactly what a shallow cut removes.
     if let Some(head) = bundle.head.clone() {
-        bundle.snapshot = repo::tree_at(conn, &head)?;
+        bundle.snapshot = crate::store::tree_at(conn, &head)?;
         // Every object the head tree names has to travel, even when no changeset in
         // the bundle mentions it. Those are exactly the objects a shallow cut would
         // otherwise leave behind.
@@ -779,7 +779,7 @@ pub fn cmd_fsck(prune: bool, worktree: bool) -> ZResult<()> {
         // Compare as sets of (path, hash). The row counts alone cannot tell a
         // stale tree from a fresh one: one row against one row with a different
         // hash is exactly the drift this is looking for.
-        let rebuilt = crate::repo::tree_at(&conn, head)?;
+        let rebuilt = crate::store::tree_at(&conn, head)?;
         let mut stored: Vec<(String, String)> = {
             let mut stmt =
                 conn.prepare("SELECT path, hash FROM branch_tree WHERE branch = ?1 ORDER BY path")?;
@@ -824,7 +824,7 @@ pub fn cmd_fsck(prune: bool, worktree: bool) -> ZResult<()> {
             if name != &current {
                 continue;
             }
-            let expected = crate::repo::tree_at(&conn, head)?;
+            let expected = crate::store::tree_at(&conn, head)?;
             for (path, hash) in &expected {
                 // A sparse checkout leaves paths out on purpose, so their absence is
                 // correct rather than damage.
@@ -2151,7 +2151,7 @@ pub fn cmd_secret_scan(history: bool, json: bool) -> ZResult<()> {
     } else {
         let branch = current_branch(&conn)?;
         let files = match branch_head(&conn, &branch)? {
-            Some(h) => crate::repo::tree_at(&conn, &h)?,
+            Some(h) => crate::store::tree_at(&conn, &h)?,
             None => Vec::new(),
         };
         for (path, hash) in &files {

@@ -8,8 +8,8 @@
 
 use rusqlite::Connection;
 
-use crate::repo::tree_at;
 use crate::store::branch_head;
+use crate::store::tree_at;
 use crate::store::{new_changeset_id, put_object, put_object_bytes};
 use crate::{bad, ZResult};
 

@@ -1399,7 +1399,7 @@ pub fn refresh_branch_tree(conn: &Connection, branch: &str) -> ZResult<()> {
     conn.execute("DELETE FROM branch_tree WHERE branch = ?1", params![branch])?;
     let head = branch_head(conn, branch)?;
     let Some(head) = head else { return Ok(()) };
-    let files = crate::repo::tree_at(conn, &head)?;
+    let files = tree_at(conn, &head)?;
     let mut stmt =
         conn.prepare("INSERT OR REPLACE INTO branch_tree(branch, path, hash) VALUES(?1, ?2, ?3)")?;
     for (path, hash) in &files {
@@ -1456,7 +1456,7 @@ pub fn gc(conn: &Connection) -> ZResult<u64> {
     for row in rows {
         let cs = row?;
         reachable.insert(cs.clone());
-        let tree = crate::repo::tree_at(conn, &cs)?;
+        let tree = tree_at(conn, &cs)?;
         for (_, hash) in tree {
             reachable.insert(hash);
         }
@@ -1468,7 +1468,7 @@ pub fn gc(conn: &Connection) -> ZResult<u64> {
     for row in rows {
         let cs = row?;
         reachable.insert(cs.clone());
-        let tree = crate::repo::tree_at(conn, &cs)?;
+        let tree = tree_at(conn, &cs)?;
         for (_, hash) in tree {
             reachable.insert(hash);
         }
@@ -1521,9 +1521,108 @@ pub fn gc(conn: &Connection) -> ZResult<u64> {
     Ok(deleted)
 }
 
+/// Every path a changeset's tree holds, with its hash, sorted by path.
+///
+/// Lives here rather than beside the other tree helpers because everything it reads is in this
+/// module: `ancestors_bfs`, `in_placeholders`, the changeset_files query. It sat in `repo` instead,
+/// which made `store` call up into `repo` while `repo` called down into `store`. That cycle is
+/// invisible to the compiler, because this is one crate.
+pub fn tree_at(conn: &Connection, changeset: &str) -> ZResult<Vec<(String, String)>> {
+    let reachable = ancestors_bfs(conn, changeset)?;
+    if reachable.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Walk the reachable changesets newest first, taking the first row seen for
+    // each path. The order is the distance from `changeset`, not the clock:
+    // changesets made in one burst share a timestamp to the second, and ordering
+    // by time then picks an arbitrary winner. That produced a wrong tree whenever
+    // a path was deleted and later added back in the same second, which is what a
+    // test caught.
+    //
+    // `ancestors_bfs` returns the id itself first, then its parents level by
+    // level, so the index is the distance from the head.
+    let rank: std::collections::HashMap<&str, usize> = reachable
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
+
+    let placeholders = in_placeholders(reachable.len());
+    let sql = format!(
+        "SELECT cf.changeset_id, cf.path, cf.new_hash FROM changeset_files cf
+         WHERE cf.changeset_id IN ({})",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<&dyn rusqlite::ToSql> = reachable
+        .iter()
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
+    let rows = stmt
+        .query_map(params.as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // Nearest to the head wins. A null hash is a deletion, which also wins over
+    // anything older for that path.
+    let mut seen: std::collections::HashMap<String, (usize, Option<String>)> =
+        std::collections::HashMap::new();
+    for (cs, path, hash) in rows {
+        let d = match rank.get(cs.as_str()) {
+            Some(d) => *d,
+            None => continue,
+        };
+        match seen.get(&path) {
+            Some((best, _)) if *best <= d => {}
+            _ => {
+                seen.insert(path, (d, hash));
+            }
+        }
+    }
+
+    let mut files: Vec<(String, String)> = seen
+        .into_iter()
+        .filter_map(|(p, (_, h))| h.map(|hash| (p, hash)))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn the_storage_layer_does_not_call_up_into_the_repository_layer() {
+        // A cycle inside one crate is invisible to the compiler: `store` calling `repo` while
+        // `repo` calls `store` builds cleanly and only shows up by reading use lines. It was real
+        // here, through `tree_at`, and it is the kind of thing that comes back the moment somebody
+        // adds a fourth call. Reading this file is the only check that costs nothing at build time.
+        //
+        // The one exception is a test helper below: `crate::repo::tests::commit_files` builds a
+        // fixture, and a fixture using the layer above it makes the test shorter without making
+        // the product depend upwards.
+        // The needle is spelled apart so this test does not find itself: the first run did, which is
+        // the check working on the wrong line but for the right reason.
+        let needle = concat!("crate", "::repo");
+        let src = include_str!("store.rs");
+        let offenders: Vec<&str> = src
+            .lines()
+            .filter(|l| l.contains(needle))
+            .filter(|l| !l.contains("crate::repo::tests"))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "the storage layer reaches up into repo: {:?}",
+            offenders
+        );
+    }
 
     #[test]
     fn gc_removes_unreachable_objects() {

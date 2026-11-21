@@ -360,7 +360,7 @@ fn export_into(conn: &Connection, repo: &Repo, branch: Option<&str>) -> ZResult<
 /// this order wrong writes a root tree with only the files at the top level, which is what git
 /// then shows as "path does not exist" while every object is present.
 fn write_tree_for(conn: &Connection, repo: &Repo, changeset: &str) -> ZResult<String> {
-    let files = crate::repo::tree_at(conn, changeset)?;
+    let files = crate::store::tree_at(conn, changeset)?;
     if files.is_empty() {
         return Err(bad(format!(
             "changeset {} has no files, so there is no tree to write",
@@ -766,7 +766,7 @@ mod tests {
         // The store must hold the content, not the git object name: they are different hashes and
         // putting one where the other belongs made an import look fine and read nothing.
         let head = store::branch_head(&conn, "main").unwrap().unwrap();
-        let tree = crate::repo::tree_at(&conn, &head).unwrap();
+        let tree = crate::store::tree_at(&conn, &head).unwrap();
         let b = tree
             .iter()
             .find(|(p, _)| p == "b.txt")
@@ -946,7 +946,7 @@ mod tests {
         let conn = crate::store::tests::mem_db();
         import(&conn, &src, None).unwrap();
         let head = store::branch_head(&conn, "main").unwrap().unwrap();
-        let tree = crate::repo::tree_at(&conn, &head).unwrap();
+        let tree = crate::store::tree_at(&conn, &head).unwrap();
         assert_eq!(
             tree.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
             vec!["a/b/c.rs"],

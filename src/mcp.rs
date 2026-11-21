@@ -554,7 +554,7 @@ fn tool_ls(conn: &Connection, args: &Json) -> Result<Json, String> {
     let cs = crate::store::resolve_rev(conn, &rev)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("no such branch, tag or changeset: {}", rev))?;
-    let mut tree: Vec<(String, String)> = crate::repo::tree_at(conn, &cs)
+    let mut tree: Vec<(String, String)> = crate::store::tree_at(conn, &cs)
         .map_err(|e| e.to_string())?
         .into_iter()
         .collect();

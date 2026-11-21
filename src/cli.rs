@@ -1183,7 +1183,7 @@ fn ls_entries(
             })?
         }
     };
-    let mut tree: Vec<(String, String)> = crate::repo::tree_at(conn, &head)?.into_iter().collect();
+    let mut tree: Vec<(String, String)> = crate::store::tree_at(conn, &head)?.into_iter().collect();
     tree.sort_by(|a, b| a.0.cmp(&b.0));
     if let Some(p) = prefix {
         let p = crate::normalise(p);
@@ -3563,7 +3563,7 @@ pub fn cmd_review_json(
     let steps = crate::repo::review_stack(&conn, from, target)?;
     // The same tree the text form reads, so the two cannot disagree about what a change affects.
     let tree = match crate::store::branch_head(&conn, target)? {
-        Some(head) => crate::repo::tree_at(&conn, &head)?,
+        Some(head) => crate::store::tree_at(&conn, &head)?,
         None => Vec::new(),
     };
 
@@ -3717,7 +3717,7 @@ pub fn cmd_review(from: Option<&str>, to: Option<&str>, min_risk: Option<&str>) 
         // about what depended on it, and the failures that hurt are the ones where the change
         // looks complete and a file nobody touched stops working.
         if let Some(head) = crate::store::branch_head(&conn, target)? {
-            let tree = crate::repo::tree_at(&conn, &head)?;
+            let tree = crate::store::tree_at(&conn, &head)?;
             match crate::impact::stale_references(&conn, &step.files, &tree) {
                 Ok(stale) if !stale.is_empty() => {
                     println!(

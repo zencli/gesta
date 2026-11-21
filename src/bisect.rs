@@ -175,7 +175,7 @@ pub fn clear(conn: &Connection) -> ZResult<()> {
 
 /// Write `changeset` onto the working tree, tracked files only.
 fn checkout(conn: &Connection, root: &Path, changeset: &str) -> ZResult<usize> {
-    let files = repo::tree_at(conn, changeset)?;
+    let files = crate::store::tree_at(conn, changeset)?;
     let mut written = 0usize;
     for (path, hash) in &files {
         let content = crate::store::get_object(conn, hash)?;

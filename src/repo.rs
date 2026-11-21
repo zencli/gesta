@@ -1458,73 +1458,6 @@ pub fn checkout_file(
 /// `changeset_files` is the authority here, not `file_versions`: it records the
 /// new hash of every touch, including deletions as `new_hash IS NULL`, so one
 /// ranked scan answers the whole tree.
-pub fn tree_at(conn: &Connection, changeset: &str) -> ZResult<Vec<(String, String)>> {
-    let reachable = crate::store::ancestors_bfs(conn, changeset)?;
-    if reachable.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Walk the reachable changesets newest first, taking the first row seen for
-    // each path. The order is the distance from `changeset`, not the clock:
-    // changesets made in one burst share a timestamp to the second, and ordering
-    // by time then picks an arbitrary winner. That produced a wrong tree whenever
-    // a path was deleted and later added back in the same second, which is what a
-    // test caught.
-    //
-    // `ancestors_bfs` returns the id itself first, then its parents level by
-    // level, so the index is the distance from the head.
-    let rank: std::collections::HashMap<&str, usize> = reachable
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (id.as_str(), i))
-        .collect();
-
-    let placeholders = crate::store::in_placeholders(reachable.len());
-    let sql = format!(
-        "SELECT cf.changeset_id, cf.path, cf.new_hash FROM changeset_files cf
-         WHERE cf.changeset_id IN ({})",
-        placeholders
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let params: Vec<&dyn rusqlite::ToSql> = reachable
-        .iter()
-        .map(|s| s as &dyn rusqlite::ToSql)
-        .collect();
-    let rows = stmt
-        .query_map(params.as_slice(), |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    // Nearest to the head wins. A null hash is a deletion, which also wins over
-    // anything older for that path.
-    let mut seen: std::collections::HashMap<String, (usize, Option<String>)> =
-        std::collections::HashMap::new();
-    for (cs, path, hash) in rows {
-        let d = match rank.get(cs.as_str()) {
-            Some(d) => *d,
-            None => continue,
-        };
-        match seen.get(&path) {
-            Some((best, _)) if *best <= d => {}
-            _ => {
-                seen.insert(path, (d, hash));
-            }
-        }
-    }
-
-    let mut files: Vec<(String, String)> = seen
-        .into_iter()
-        .filter_map(|(p, (_, h))| h.map(|hash| (p, hash)))
-        .collect();
-    files.sort();
-    Ok(files)
-}
-
 /// Every path on `branch` with its committed hash, in one query.
 pub fn committed_tree(
     conn: &Connection,
@@ -1557,7 +1490,7 @@ pub fn committed_tree(
         // an older build. Rebuild once and keep it, so the slow path runs at most
         // one time per branch.
         if let Some(head) = branch_head(conn, branch)? {
-            let files = tree_at(conn, &head)?;
+            let files = crate::store::tree_at(conn, &head)?;
             let tx = conn.unchecked_transaction()?;
             {
                 let mut ins = tx.prepare(
@@ -1584,7 +1517,7 @@ pub fn materialise(conn: &Connection, root: &Path, branch: &str) -> ZResult<usiz
     // back to the first changeset's parent, and `status` then reported all of them as new files,
     // which reads as if the undo had not happened.
     let files: Vec<(String, String)> = match branch_head(conn, branch)? {
-        Some(head) => tree_at(conn, &head)?,
+        Some(head) => crate::store::tree_at(conn, &head)?,
         None => Vec::new(),
     };
 
@@ -1651,7 +1584,7 @@ pub fn restore_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult
     // The tree at `head` is the newest version of every path reachable from it,
     // not just the paths that `head` itself touched. Reading file_versions for
     // the head changeset alone loses every file added by an earlier changeset.
-    let files = tree_at(conn, &head)?;
+    let files = crate::store::tree_at(conn, &head)?;
 
     let attrs = crate::attributes::Rules::load(root);
     let mut written = 0usize;
@@ -1740,7 +1673,7 @@ pub fn diff_revs(
             Some(r) => {
                 let id = crate::store::resolve_rev(conn, r)?
                     .ok_or_else(|| bad(format!("no such revision: {}", r)))?;
-                tree_at(conn, &id)
+                crate::store::tree_at(conn, &id)
             }
         }
     }
@@ -2721,7 +2654,7 @@ pub(crate) mod tests {
         .unwrap();
         commit_one(&conn, "cs2").unwrap();
 
-        let tree = tree_at(&conn, "cs2").unwrap();
+        let tree = crate::store::tree_at(&conn, "cs2").unwrap();
         let paths: Vec<&str> = tree.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(
             paths,
@@ -2730,7 +2663,7 @@ pub(crate) mod tests {
         );
 
         // The earlier changeset still sees both.
-        let old = tree_at(&conn, "cs1").unwrap();
+        let old = crate::store::tree_at(&conn, "cs1").unwrap();
         assert_eq!(old.len(), 2, "history keeps the file it had");
     }
 
@@ -2974,7 +2907,7 @@ pub(crate) mod tests {
     fn assert_tree_is_honest(conn: &Connection, branch: &str) {
         let head = crate::store::branch_head(conn, branch).unwrap();
         let mut expected = match head {
-            Some(h) => tree_at(conn, &h).unwrap(),
+            Some(h) => crate::store::tree_at(conn, &h).unwrap(),
             None => Vec::new(),
         };
         expected.sort();
@@ -3465,7 +3398,7 @@ pub(crate) mod tests {
         let fresh = crate::store::branch_head(&conn, "main").unwrap();
         land_branch(&conn, &root, "right", "main", fresh.as_deref(), "b").unwrap();
         let final_head = crate::store::branch_head(&conn, "main").unwrap().unwrap();
-        let tree = tree_at(&conn, &final_head).unwrap();
+        let tree = crate::store::tree_at(&conn, &final_head).unwrap();
         let names: Vec<&str> = tree.iter().map(|(p, _)| p.as_str()).collect();
         assert!(names.contains(&"l.txt"), "left is missing from {:?}", names);
         assert!(
