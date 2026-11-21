@@ -1,9 +1,13 @@
 # Why packing small objects did not help
 
-A tree of 1000 tiny files costs 6.6x git in disk. The obvious fix is to pack several
-small bodies into one row, so the row header and the index entry are paid once per
-thousand objects rather than once per object. That fix was built and measured, and it
-made the repository **larger**: 6.6x became 7.7x.
+A tree of 1000 tiny files costs **14.9x** git in disk on the current build: 856 KB against 103 KB.
+That figure was 6.6x when this document was written, and the later section "Re-measured, and what 11%
+buys" explains where the difference came from and what would and would not close it. Every 6.6x below
+is the number as measured at the time of the experiment being described, not a current claim.
+
+The obvious fix is to pack several small bodies into one row, so the row header and the index entry
+are paid once per thousand objects rather than once per object. That fix was built and measured, and
+it made the repository **larger**: 6.6x became 7.7x at the time.
 
 This records the measurement, because the reasoning was sound and the result was not.
 
@@ -52,7 +56,7 @@ A pointer into a segment is a hash, two integers and a row header, which is more
 seven bytes it replaces. Packing wins when the bodies are large enough that the row
 overhead is small against them, and that is exactly when compression has already made the
 saving. The workload where packing would pay, bodies of a few hundred bytes, is not the
-workload that costs 6.6x.
+workload that cost 6.6x when it was measured.
 
 ## What the numbers say to do instead
 
@@ -77,7 +81,7 @@ A real fix is fewer rows, not smaller ones. Two candidates, neither implemented:
    the tree as one serialized value per branch, the way git does, trades the ability to
    query a single path for a much smaller file.
 
-Both are schema changes and both lose a capability. Neither has been done. The 6.6x in this
+Both are schema changes and both lose a capability. Neither has been done. The ratio in this
 section was measured on small files before the blame table was rewritten as ranges; see the next
 section, and `docs/git-parity.md` for the figure on a real tree (2.3x against a packed git).
 
@@ -86,7 +90,7 @@ section, and `docs/git-parity.md` for the figure on a real tree (2.3x against a 
 Measured on this project: 118 files, 62,824 blame rows, one distinct changeset. The table repeated
 the same changeset id, author and timestamp once per line of every file, and its two indexes doubled
 the cost. `dbstat` put blame at 3,944,448 bytes plus 4,412,800 bytes of index, against 622,592 bytes
-for the objects themselves. The disk figure this project reported as 6.6x and 10.2x was mostly this
+for the objects themselves. The disk figures this project reported as 6.6x and 10.2x were mostly this
 one table, which is why both of those numbers were retired once the ranges landed: on 11,301 files
 the table is now 0.9 MB, 1.2% of the database, and the remaining ratio is compression.
 

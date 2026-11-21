@@ -31,3 +31,15 @@ Thumbs.db
 
 # Harness output: one record per run, and a run is not source.
 bench/harness/runs/
+
+# Working files a session writes and forgets: a patch script, a commit message held in a file, a
+# probe. They are named with a leading dot so they sort out of the way, and one of them reached a
+# commit anyway because `.gitignore` did not say so.
+.fix*.py
+.msg*.txt
+.pr*.py
+.probe*.py
+.gate_*.py
+.t_*.py
+.*.sh
+
