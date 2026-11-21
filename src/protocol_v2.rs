@@ -102,7 +102,11 @@ fn ref_line(name: &str, sha: &str, symref_target: Option<&str>) -> Vec<u8> {
 /// - `symrefs`: report what `HEAD` points at, as `symref-target:`.
 /// - `ref-prefix <prefix>`: only refs under these prefixes. A client that clones sends one prefix.
 /// - `unborn`: report the branch a clone asked for even when it has no commit yet.
-pub fn ls_refs(body: &[u8], refs: &[(String, String)], head_branch: Option<&str>) -> ZResult<Vec<u8>> {
+pub fn ls_refs(
+    body: &[u8],
+    refs: &[(String, String)],
+    head_branch: Option<&str>,
+) -> ZResult<Vec<u8>> {
     let lines = read_pkt_lines(body);
     let mut want_symrefs = false;
     let mut want_unborn = false;
@@ -135,7 +139,11 @@ pub fn ls_refs(body: &[u8], refs: &[(String, String)], head_branch: Option<&str>
             out.extend_from_slice(&ref_line(
                 "HEAD",
                 sha,
-                if want_symrefs { Some(target.as_str()) } else { None },
+                if want_symrefs {
+                    Some(target.as_str())
+                } else {
+                    None
+                },
             ));
         }
     }
@@ -318,9 +326,14 @@ mod tests {
             ("main".to_string(), "a".repeat(40)),
             ("dev".to_string(), "b".repeat(40)),
         ];
-        let body = [pkt_line(b"command=ls-refs\n"), pkt_line(b"agent=git/2.40\n"),
-                    crate::gitserver::flush(), pkt_line(b"symrefs\n"),
-                    crate::gitserver::flush()].concat();
+        let body = [
+            pkt_line(b"command=ls-refs\n"),
+            pkt_line(b"agent=git/2.40\n"),
+            crate::gitserver::flush(),
+            pkt_line(b"symrefs\n"),
+            crate::gitserver::flush(),
+        ]
+        .concat();
         let out = ls_refs(&body, &refs, Some("main")).unwrap();
         let text = String::from_utf8_lossy(&out).to_string();
         assert!(text.contains("refs/heads/main"), "{}", text);
@@ -338,21 +351,33 @@ mod tests {
             ("main".to_string(), "a".repeat(40)),
             ("feature/x".to_string(), "b".repeat(40)),
         ];
-        let body = [pkt_line(b"command=ls-refs\n"), crate::gitserver::flush(),
-                    pkt_line(b"ref-prefix refs/heads/feature/\n"),
-                    crate::gitserver::flush()].concat();
+        let body = [
+            pkt_line(b"command=ls-refs\n"),
+            crate::gitserver::flush(),
+            pkt_line(b"ref-prefix refs/heads/feature/\n"),
+            crate::gitserver::flush(),
+        ]
+        .concat();
         let out = ls_refs(&body, &refs, Some("main")).unwrap();
         let text = String::from_utf8_lossy(&out).to_string();
         assert!(text.contains("feature/x"), "{}", text);
-        assert!(!text.contains("refs/heads/main "), "prefix ignored: {}", text);
+        assert!(
+            !text.contains("refs/heads/main "),
+            "prefix ignored: {}",
+            text
+        );
     }
 
     #[test]
     fn an_unborn_branch_is_named_with_zeroes() {
-        let body = [pkt_line(b"command=ls-refs\n"), crate::gitserver::flush(),
-                    pkt_line(b"unborn\n"),
-                    pkt_line(b"ref-prefix refs/heads/main\n"),
-                    crate::gitserver::flush()].concat();
+        let body = [
+            pkt_line(b"command=ls-refs\n"),
+            crate::gitserver::flush(),
+            pkt_line(b"unborn\n"),
+            pkt_line(b"ref-prefix refs/heads/main\n"),
+            crate::gitserver::flush(),
+        ]
+        .concat();
         let out = ls_refs(&body, &[], None).unwrap();
         let text = String::from_utf8_lossy(&out).to_string();
         assert!(text.contains("refs/heads/main"), "{}", text);

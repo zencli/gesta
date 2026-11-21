@@ -14,7 +14,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use crate::store::{branch_head, get_object, hash_content, put_object, open_db, init_schema};
+use crate::store::{branch_head, get_object, hash_content, init_schema, open_db, put_object};
 use crate::{bad, now, repo_dir, ZResult};
 
 /// Everything a peer needs to catch up on one branch.
@@ -95,7 +95,10 @@ impl Bundle {
         let mut s = String::new();
         s.push_str("gesta-bundle 1\n");
         s.push_str(&format!("branch\t{}\n", self.branch));
-        s.push_str(&format!("head\t{}\n", self.head.clone().unwrap_or_else(|| "-".into())));
+        s.push_str(&format!(
+            "head\t{}\n",
+            self.head.clone().unwrap_or_else(|| "-".into())
+        ));
         if let Some(root) = &self.shallow_root {
             s.push_str(&format!("shallow\t{}\n", root));
         }
@@ -108,12 +111,25 @@ impl Bundle {
                 enc(&c.message),
                 c.parent.clone().unwrap_or_else(|| "-".into()),
                 c.parent2.clone().unwrap_or_else(|| "-".into()),
-                c.session.clone().map(|v| enc(&v)).unwrap_or_else(|| "-".into()),
-                c.intent.clone().map(|v| enc(&v)).unwrap_or_else(|| "-".into())
+                c.session
+                    .clone()
+                    .map(|v| enc(&v))
+                    .unwrap_or_else(|| "-".into()),
+                c.intent
+                    .clone()
+                    .map(|v| enc(&v))
+                    .unwrap_or_else(|| "-".into())
             ));
         }
         for (path, ver, hash, cs, ts) in &self.versions {
-            s.push_str(&format!("fv\t{}\t{}\t{}\t{}\t{}\n", enc(path), ver, hash, cs, ts));
+            s.push_str(&format!(
+                "fv\t{}\t{}\t{}\t{}\t{}\n",
+                enc(path),
+                ver,
+                hash,
+                cs,
+                ts
+            ));
         }
         for (cs, path, old, new) in &self.files {
             s.push_str(&format!(
@@ -128,7 +144,11 @@ impl Bundle {
             s.push_str(&format!("sn\t{}\t{}\n", enc(path), hash));
         }
         for (hash, content) in &self.objects {
-            s.push_str(&format!("ob\t{}\t{}\n", hash, enc_base64(content.as_bytes())));
+            s.push_str(&format!(
+                "ob\t{}\t{}\n",
+                hash,
+                enc_base64(content.as_bytes())
+            ));
         }
         for (hash, bytes) in &self.binaries {
             s.push_str(&format!("bn\t{}\t{}\n", hash, enc_base64(bytes)));
@@ -153,8 +173,8 @@ impl Bundle {
         let mut lines = text.lines();
         match lines.next() {
             // Bundles written before the rename carry the old header. Refusing them
-        // would strand every archive made by an earlier build.
-        Some("gesta-bundle 1") | Some("zenforge-bundle 1") => {}
+            // would strand every archive made by an earlier build.
+            Some("gesta-bundle 1") | Some("zenforge-bundle 1") => {}
             _ => return Err(bad("unrecognised bundle header")),
         }
 
@@ -185,8 +205,16 @@ impl Bundle {
                     message: dec_str(message),
                     author: dec_str(author),
                     created_at: ts.parse().unwrap_or(0),
-                    parent: if *p1 == "-" { None } else { Some(p1.to_string()) },
-                    parent2: if *p2 == "-" { None } else { Some(p2.to_string()) },
+                    parent: if *p1 == "-" {
+                        None
+                    } else {
+                        Some(p1.to_string())
+                    },
+                    parent2: if *p2 == "-" {
+                        None
+                    } else {
+                        Some(p2.to_string())
+                    },
                     session: None,
                     intent: None,
                 }),
@@ -196,8 +224,16 @@ impl Bundle {
                         message: dec_str(message),
                         author: dec_str(author),
                         created_at: ts.parse().unwrap_or(0),
-                        parent: if *p1 == "-" { None } else { Some(p1.to_string()) },
-                        parent2: if *p2 == "-" { None } else { Some(p2.to_string()) },
+                        parent: if *p1 == "-" {
+                            None
+                        } else {
+                            Some(p1.to_string())
+                        },
+                        parent2: if *p2 == "-" {
+                            None
+                        } else {
+                            Some(p2.to_string())
+                        },
                         session: if *session == "-" {
                             None
                         } else {
@@ -220,8 +256,16 @@ impl Bundle {
                 ["cf", cs, path, old, new] => b.files.push((
                     cs.to_string(),
                     dec_str(path),
-                    if *old == "-" { None } else { Some(old.to_string()) },
-                    if *new == "-" { None } else { Some(new.to_string()) },
+                    if *old == "-" {
+                        None
+                    } else {
+                        Some(old.to_string())
+                    },
+                    if *new == "-" {
+                        None
+                    } else {
+                        Some(new.to_string())
+                    },
                 )),
                 ["sn", path, hash] => b.snapshot.push((dec_str(path), hash.to_string())),
                 ["dl", hash, base, ops] => {
@@ -256,7 +300,10 @@ impl Bundle {
 }
 
 fn enc(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n").replace('\r', "\\r")
+    s.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 fn dec_str(s: &str) -> String {
@@ -294,8 +341,16 @@ fn enc_base64(bytes: &[u8]) -> String {
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -338,11 +393,7 @@ pub fn dec_base64(s: &str) -> Option<Vec<u8>> {
 /// Depth first over the parent links, emitting a node after its parents. The
 /// visited set also breaks any cycle, which a corrupted database could contain and
 /// which must not hang an upload.
-fn topo_order(
-    conn: &Connection,
-    head: &str,
-    wanted: &HashSet<String>,
-) -> ZResult<Vec<String>> {
+fn topo_order(conn: &Connection, head: &str, wanted: &HashSet<String>) -> ZResult<Vec<String>> {
     fn visit(
         conn: &Connection,
         id: &str,
@@ -376,10 +427,7 @@ fn topo_order(
 /// operations are carried on the wire, because an insert's text already appears in a
 /// whole object somewhere in the bundle; a delta with an insert is therefore sent
 /// whole rather than risk a receiver that cannot rebuild it.
-fn stored_delta(
-    conn: &Connection,
-    hash: &str,
-) -> ZResult<Option<(String, Vec<crate::delta::Op>)>> {
+fn stored_delta(conn: &Connection, hash: &str) -> ZResult<Option<(String, Vec<crate::delta::Op>)>> {
     let row: Option<(String, Vec<u8>)> = conn
         .query_row(
             "SELECT base, payload FROM deltas WHERE hash = ?1",
@@ -397,8 +445,6 @@ fn stored_delta(
         .ok_or_else(|| bad(format!("delta for {} is unreadable", hash)))?;
     Ok(Some((base, ops)))
 }
-
-
 
 pub fn build_bundle(conn: &Connection, branch: &str, have: &HashSet<String>) -> ZResult<Bundle> {
     let head = branch_head(conn, branch)?;
@@ -523,9 +569,7 @@ pub fn build_bundle(conn: &Connection, branch: &str, have: &HashSet<String>) -> 
                 // the message said the object was missing while it was present and readable.
                 match crate::store::get_object_bytes(conn, hash) {
                     Ok(bytes) => b.binaries.push((hash.clone(), bytes)),
-                    Err(_) => {
-                        return Err(bad(format!("cannot bundle missing object {}", hash)))
-                    }
+                    Err(_) => return Err(bad(format!("cannot bundle missing object {}", hash))),
                 }
                 continue;
             }
@@ -612,7 +656,11 @@ pub fn apply_bundle_opts(conn: &Connection, b: &Bundle, move_branch: bool) -> ZR
 
     for c in &b.changesets {
         let exists: Option<i64> = tx
-            .query_row("SELECT 1 FROM changesets WHERE id = ?1", params![c.id], |r| r.get(0))
+            .query_row(
+                "SELECT 1 FROM changesets WHERE id = ?1",
+                params![c.id],
+                |r| r.get(0),
+            )
             .optional()?;
         if exists.is_some() {
             continue;
@@ -689,8 +737,6 @@ pub fn apply_bundle_opts(conn: &Connection, b: &Bundle, move_branch: bool) -> ZR
 pub fn apply_bundle(conn: &Connection, b: &Bundle) -> ZResult<usize> {
     apply_bundle_opts(conn, b, true)
 }
-
-
 
 /// Normalise a user supplied remote into a filesystem path.
 pub fn resolve_remote(url: &str) -> std::path::PathBuf {
@@ -850,7 +896,8 @@ mod tests {
             params![h],
         )
         .unwrap();
-        conn.execute("UPDATE branches SET head='cs1' WHERE name='main'", []).unwrap();
+        conn.execute("UPDATE branches SET head='cs1' WHERE name='main'", [])
+            .unwrap();
 
         let bundle = build_bundle(&conn, "main", &HashSet::new()).unwrap();
         let bytes = bundle.encode().unwrap();
@@ -889,7 +936,9 @@ mod tests {
                 params![h],
             )
             .unwrap();
-        source.execute("UPDATE branches SET head='cs1' WHERE name='main'", []).unwrap();
+        source
+            .execute("UPDATE branches SET head='cs1' WHERE name='main'", [])
+            .unwrap();
 
         let bundle = build_bundle(&source, "main", &HashSet::new()).unwrap();
         let bytes = bundle.encode().unwrap();
@@ -921,12 +970,18 @@ mod tests {
                 params![h],
             )
             .unwrap();
-        source.execute("UPDATE branches SET head='cs1' WHERE name='main'", []).unwrap();
+        source
+            .execute("UPDATE branches SET head='cs1' WHERE name='main'", [])
+            .unwrap();
 
         let bundle = build_bundle(&source, "main", &HashSet::new()).unwrap();
         let dest = mem_db();
         assert_eq!(apply_bundle(&dest, &bundle).unwrap(), 1);
-        assert_eq!(apply_bundle(&dest, &bundle).unwrap(), 0, "second apply is a no-op");
+        assert_eq!(
+            apply_bundle(&dest, &bundle).unwrap(),
+            0,
+            "second apply is a no-op"
+        );
     }
 
     #[test]
@@ -969,14 +1024,18 @@ mod tests {
             )
             .unwrap();
         }
-        conn.execute("UPDATE branches SET head='cs2' WHERE name='main'", []).unwrap();
+        conn.execute("UPDATE branches SET head='cs2' WHERE name='main'", [])
+            .unwrap();
 
         let mut have = HashSet::new();
         have.insert("cs1".to_string());
         let b = build_bundle(&conn, "main", &have).unwrap();
         assert_eq!(b.changesets.len(), 1, "peer already has cs1");
         assert_eq!(b.changesets[0].id, "cs2");
-        assert!(!b.objects.iter().any(|(h, _)| h == &h1), "cs1 content not resent");
+        assert!(
+            !b.objects.iter().any(|(h, _)| h == &h1),
+            "cs1 content not resent"
+        );
     }
     /// A bundle must carry every changeset reachable from the head, in an order a
     /// receiver can apply. A depth-first walk happens to work for two commits and
@@ -1008,8 +1067,14 @@ mod tests {
             b.changesets.len()
         );
         // Oldest first, so the receiver applies a parent before its child.
-        assert_eq!(b.changesets.first().map(|c| c.id.clone()), Some(ids[0].clone()));
-        assert_eq!(b.changesets.last().map(|c| c.id.clone()), Some(ids[11].clone()));
+        assert_eq!(
+            b.changesets.first().map(|c| c.id.clone()),
+            Some(ids[0].clone())
+        );
+        assert_eq!(
+            b.changesets.last().map(|c| c.id.clone()),
+            Some(ids[11].clone())
+        );
         assert_eq!(b.head.as_deref(), Some(ids[11].as_str()));
     }
     /// Across a merge, a parent can sit deeper than a child on the other side, so
@@ -1035,7 +1100,12 @@ mod tests {
         }
 
         let reachable = crate::store::ancestors_bfs(&conn, "merge").unwrap();
-        assert_eq!(reachable.len(), 4, "expected four changesets, got {:?}", reachable);
+        assert_eq!(
+            reachable.len(),
+            4,
+            "expected four changesets, got {:?}",
+            reachable
+        );
         let wanted: HashSet<String> = reachable.into_iter().collect();
         let order = topo_order(&conn, "merge", &wanted).unwrap();
 
@@ -1043,12 +1113,23 @@ mod tests {
         for (i, id) in order.iter().enumerate() {
             pos.insert(id.clone(), i);
         }
-        assert_eq!(order.len(), 4, "every reachable changeset must be listed, got {:?}", order);
+        assert_eq!(
+            order.len(),
+            4,
+            "every reachable changeset must be listed, got {:?}",
+            order
+        );
         for (i, id) in order.iter().enumerate() {
             let (p1, p2) = crate::store::parents_of_public(&conn, id).unwrap();
             for p in [p1, p2].into_iter().flatten() {
                 if let Some(pi) = pos.get(&p) {
-                    assert!(*pi < i, "parent {} of {} came after it in {:?}", p, id, order);
+                    assert!(
+                        *pi < i,
+                        "parent {} of {} came after it in {:?}",
+                        p,
+                        id,
+                        order
+                    );
                 }
             }
         }
@@ -1087,7 +1168,11 @@ mod tests {
             let hash =
                 crate::store::put_object_against(&src, &content, prev_hash.as_deref()).unwrap();
             let id = format!("csver{:02}", v);
-            let parent = if v == 0 { None } else { Some(format!("csver{:02}", v - 1)) };
+            let parent = if v == 0 {
+                None
+            } else {
+                Some(format!("csver{:02}", v - 1))
+            };
             src.execute(
                 "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
                  VALUES(?1,?2,'a',?3,'committed',?4,'main')",
@@ -1120,7 +1205,11 @@ mod tests {
         for (hash, base, _) in &bundle.deltas {
             let known = bundle.objects.iter().any(|(h, _)| h == base)
                 || bundle.deltas.iter().any(|(h, _, _)| h == base);
-            assert!(known, "delta {} points at base {} which is not in the bundle", hash, base);
+            assert!(
+                known,
+                "delta {} points at base {} which is not in the bundle",
+                hash, base
+            );
         }
 
         // Reverse the deltas so a dependency appears after its dependant, then apply.
@@ -1137,7 +1226,8 @@ mod tests {
             assert_eq!(got, expect, "rebuilt object {} differs", hash);
         }
         // The newest version must be readable and correct on the receiving side.
-        let newest = crate::store::get_object(&dest, &crate::store::hash_content(&body(9))).unwrap();
+        let newest =
+            crate::store::get_object(&dest, &crate::store::hash_content(&body(9))).unwrap();
         assert_eq!(newest, body(9));
     }
     /// A shallow cut has to keep two things alive: the head snapshot, and every object a
@@ -1163,7 +1253,11 @@ mod tests {
             let hash =
                 crate::store::put_object_against(&conn, &content, prev_hash.as_deref()).unwrap();
             let id = format!("csh{:02}", v);
-            let parent = if v == 0 { None } else { Some(format!("csh{:02}", v - 1)) };
+            let parent = if v == 0 {
+                None
+            } else {
+                Some(format!("csh{:02}", v - 1))
+            };
             conn.execute(
                 "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
                  VALUES(?1,?2,'a',?3,'committed',?4,'main')",
@@ -1238,7 +1332,10 @@ mod tests {
         for (_, hash) in &head_tree {
             let got = crate::store::get_object(&dest, hash).unwrap();
             let expect = crate::store::get_object(&conn, hash).unwrap();
-            assert_eq!(got, expect, "an object from the snapshot differs after the cut");
+            assert_eq!(
+                got, expect,
+                "an object from the snapshot differs after the cut"
+            );
         }
     }
 
@@ -1250,7 +1347,10 @@ mod tests {
         let full = build_bundle(&conn, "main", &HashSet::new()).unwrap();
         let same = truncate_bundle(&full, 99).unwrap();
         assert_eq!(same.changesets.len(), full.changesets.len());
-        assert!(same.shallow_root.is_none(), "nothing was cut, so nothing is shallow");
+        assert!(
+            same.shallow_root.is_none(),
+            "nothing was cut, so nothing is shallow"
+        );
     }
     /// Deepening adds history below the boundary without moving the head or losing the
     /// working tree. It also has to leave the boundary honest: a clone that is still cut
@@ -1260,7 +1360,11 @@ mod tests {
         let conn = mem_db();
         for v in 0..8 {
             let id = format!("csd{:02}", v);
-            let parent = if v == 0 { None } else { Some(format!("csd{:02}", v - 1)) };
+            let parent = if v == 0 {
+                None
+            } else {
+                Some(format!("csd{:02}", v - 1))
+            };
             conn.execute(
                 "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
                  VALUES(?1,?2,'a',?3,'committed',?4,'main')",
@@ -1350,7 +1454,10 @@ mod tests {
         let wire = b.encode().unwrap();
         let back = Bundle::decode(&wire).unwrap();
         assert_eq!(back.changesets[0].session.as_deref(), Some("sess-7"));
-        assert_eq!(back.changesets[0].intent.as_deref(), Some("add the fixture"));
+        assert_eq!(
+            back.changesets[0].intent.as_deref(),
+            Some("add the fixture")
+        );
 
         // And it lands in a fresh repository.
         let dest = mem_db();

@@ -205,12 +205,19 @@ mod tests {
     fn an_event_reaches_the_collector() {
         let (url, handle) = one_shot_collector();
         let f = Forwarder::start(url, Some("t".to_string()));
-        assert!(f.send("{\"decision\":\"no-token\"}\n"), "the queue should accept it");
+        assert!(
+            f.send("{\"decision\":\"no-token\"}\n"),
+            "the queue should accept it"
+        );
         // The collector thread returns what it read, so the assertion is about the bytes on the wire
         // rather than about our own return value.
         let seen = handle.join().unwrap();
         assert!(seen.contains("POST /audit"), "request line: {}", seen);
-        assert!(seen.contains("Authorization: Bearer t"), "auth header: {}", seen);
+        assert!(
+            seen.contains("Authorization: Bearer t"),
+            "auth header: {}",
+            seen
+        );
         assert!(seen.contains("no-token"), "body: {}", seen);
     }
 
@@ -243,7 +250,11 @@ mod tests {
             }
         }
         let (_, _, dropped) = f.stats();
-        assert!(accepted <= QUEUE_DEPTH + 1, "accepted {} which is past the depth", accepted);
+        assert!(
+            accepted <= QUEUE_DEPTH + 1,
+            "accepted {} which is past the depth",
+            accepted
+        );
         assert!(dropped > 0, "a full queue must be counted, not hidden");
         drop(listener);
     }

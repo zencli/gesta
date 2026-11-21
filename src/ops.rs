@@ -20,18 +20,26 @@ impl RepoSnapshot {
     pub fn capture(conn: &Connection) -> ZResult<RepoSnapshot> {
         let branches: Vec<(String, Option<String>)> = {
             let mut stmt = conn.prepare("SELECT name, head FROM branches ORDER BY name")?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
         let tags: Vec<(String, String)> = {
             let mut stmt = conn.prepare("SELECT name, changeset_id FROM tags ORDER BY name")?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
         let current_branch = crate::store::current_branch(conn)?;
-        Ok(RepoSnapshot { branches, current_branch, tags })
+        Ok(RepoSnapshot {
+            branches,
+            current_branch,
+            tags,
+        })
     }
 
     pub fn restore(&self, conn: &Connection) -> ZResult<()> {
@@ -50,17 +58,15 @@ impl RepoSnapshot {
         let keep: Vec<String> = self.branches.iter().map(|(n, _)| n.clone()).collect();
         let existing: Vec<String> = {
             let mut stmt = conn.prepare("SELECT name FROM branches")?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
         for name in existing {
             if !keep.contains(&name) {
                 conn.execute("DELETE FROM branches WHERE name = ?1", params![name])?;
-                conn.execute(
-                    "DELETE FROM branch_tree WHERE branch = ?1",
-                    params![name],
-                )?;
+                conn.execute("DELETE FROM branch_tree WHERE branch = ?1", params![name])?;
             }
         }
         conn.execute("DELETE FROM tags", [])?;
@@ -78,7 +84,11 @@ impl RepoSnapshot {
         let mut s = String::new();
         s.push_str(&format!("B\t{}\n", self.current_branch));
         for (n, h) in &self.branches {
-            s.push_str(&format!("R\t{}\t{}\n", n, h.clone().unwrap_or_else(|| "-".into())));
+            s.push_str(&format!(
+                "R\t{}\t{}\n",
+                n,
+                h.clone().unwrap_or_else(|| "-".into())
+            ));
         }
         for (n, c) in &self.tags {
             s.push_str(&format!("T\t{}\t{}\n", n, c));
@@ -87,14 +97,19 @@ impl RepoSnapshot {
     }
 
     fn decode(s: &str) -> ZResult<RepoSnapshot> {
-        let mut snap = RepoSnapshot { branches: Vec::new(), current_branch: "main".into(), tags: Vec::new() };
+        let mut snap = RepoSnapshot {
+            branches: Vec::new(),
+            current_branch: "main".into(),
+            tags: Vec::new(),
+        };
         for line in s.lines() {
             let f: Vec<&str> = line.split('\t').collect();
             match f.as_slice() {
                 ["B", b] => snap.current_branch = b.to_string(),
-                ["R", n, h] => snap
-                    .branches
-                    .push((n.to_string(), if *h == "-" { None } else { Some(h.to_string()) })),
+                ["R", n, h] => snap.branches.push((
+                    n.to_string(),
+                    if *h == "-" { None } else { Some(h.to_string()) },
+                )),
                 ["T", n, c] => snap.tags.push((n.to_string(), c.to_string())),
                 _ => {}
             }
@@ -108,10 +123,17 @@ impl RepoSnapshot {
 /// Undo restores the snapshot of the operation before this one, which is the only reading
 /// that stays true whether a command records before or after it acts. This function records
 /// after, so the row describes what the operation produced.
-pub fn record(conn: &Connection, kind: &str, target: Option<&str>, detail: Option<&str>) -> ZResult<i64> {
+pub fn record(
+    conn: &Connection,
+    kind: &str,
+    target: Option<&str>,
+    detail: Option<&str>,
+) -> ZResult<i64> {
     let snap = RepoSnapshot::capture(conn)?;
     let parent: Option<i64> = conn
-        .query_row("SELECT MAX(id) FROM operations", [], |r| r.get::<_, Option<i64>>(0))
+        .query_row("SELECT MAX(id) FROM operations", [], |r| {
+            r.get::<_, Option<i64>>(0)
+        })
         .optional()?
         .flatten();
     conn.execute(
@@ -183,7 +205,7 @@ pub fn undo(conn: &Connection, root: &std::path::Path) -> ZResult<String> {
 
     let Some((id, kind, target)) = last else {
         return Err(bad(
-            "nothing to undo: every operation is already undone".to_string(),
+            "nothing to undo: every operation is already undone".to_string()
         ));
     };
 
@@ -212,7 +234,10 @@ pub fn undo(conn: &Connection, root: &std::path::Path) -> ZResult<String> {
     }
     // The row stays and is marked, so a second undo walks further back and a redo can step
     // forward. Deleting it made undo one way while claiming to be reversible both ways.
-    tx.execute("UPDATE operations SET undone = 1 WHERE id = ?1", params![id])?;
+    tx.execute(
+        "UPDATE operations SET undone = 1 WHERE id = ?1",
+        params![id],
+    )?;
     tx.commit()?;
 
     // The head moved, so the disk has to follow. Skipping this left a file the head claims
@@ -230,7 +255,6 @@ pub fn undo(conn: &Connection, root: &std::path::Path) -> ZResult<String> {
         what, id, written
     ))
 }
-
 
 /// Put back the most recently undone operation.
 pub fn redo(conn: &Connection, root: &std::path::Path) -> ZResult<String> {
@@ -277,7 +301,10 @@ pub fn redo(conn: &Connection, root: &std::path::Path) -> ZResult<String> {
             }
         }
     }
-    tx.execute("UPDATE operations SET undone = 0 WHERE id = ?1", params![id])?;
+    tx.execute(
+        "UPDATE operations SET undone = 0 WHERE id = ?1",
+        params![id],
+    )?;
     tx.commit()?;
 
     let branch: String = crate::store::current_branch(conn)?;
@@ -328,9 +355,11 @@ mod tests {
 
         // Exactly what the CLI does: move the head, then record. So each row holds the state
         // the operation produced, and undo walks to the previous row.
-        conn.execute("UPDATE branches SET head='cs1' WHERE name='main'", []).unwrap();
+        conn.execute("UPDATE branches SET head='cs1' WHERE name='main'", [])
+            .unwrap();
         record(&conn, "commit", Some("cs1"), None).unwrap();
-        conn.execute("UPDATE branches SET head='cs2' WHERE name='main'", []).unwrap();
+        conn.execute("UPDATE branches SET head='cs2' WHERE name='main'", [])
+            .unwrap();
         record(&conn, "commit", Some("cs2"), None).unwrap();
 
         let msg = undo(&conn, &dir).unwrap();
@@ -373,10 +402,15 @@ mod tests {
 
         undo(&conn, &dir).unwrap();
         let exists: Option<String> = conn
-            .query_row("SELECT name FROM branches WHERE name='dev'", [], |r| r.get(0))
+            .query_row("SELECT name FROM branches WHERE name='dev'", [], |r| {
+                r.get(0)
+            })
             .optional()
             .unwrap();
-        assert_eq!(exists, None, "a branch created after the snapshot is removed by undo");
+        assert_eq!(
+            exists, None,
+            "a branch created after the snapshot is removed by undo"
+        );
     }
 
     #[test]
@@ -399,7 +433,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         // Two commits, the second deleting a file.
-        crate::repo::tests::commit_files(&conn, "u1", "one", &[("keep.txt", "k\n"), ("gone.txt", "g\n")]);
+        crate::repo::tests::commit_files(
+            &conn,
+            "u1",
+            "one",
+            &[("keep.txt", "k\n"), ("gone.txt", "g\n")],
+        );
         crate::store::set_branch_head(&conn, "main", "u1").unwrap();
         crate::repo::materialise(&conn, &dir, "main").unwrap();
         assert!(dir.join("gone.txt").exists());
@@ -501,7 +540,10 @@ mod tests {
 
         undo(&conn, &dir).unwrap();
 
-        assert!(!dir.join("a.txt").exists(), "a.txt survived an undo to an empty branch");
+        assert!(
+            !dir.join("a.txt").exists(),
+            "a.txt survived an undo to an empty branch"
+        );
         assert!(!dir.join("d").join("b.txt").exists(), "d/b.txt survived");
         assert_eq!(
             crate::store::branch_head(&conn, "main").unwrap(),
@@ -512,7 +554,10 @@ mod tests {
         // And redo puts both back, which is what makes undo reversible rather than destructive.
         redo(&conn, &dir).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "v1\n");
-        assert_eq!(std::fs::read_to_string(dir.join("d").join("b.txt")).unwrap(), "v2\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("d").join("b.txt")).unwrap(),
+            "v2\n"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

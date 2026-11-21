@@ -12,8 +12,8 @@ use rusqlite::Connection;
 
 use crate::json::{self, field, Json};
 use crate::store::{branch_head, current_branch, get_object, hash_at_point};
-use crate::{history, repo, store};
 use crate::ZResult;
+use crate::{history, repo, store};
 
 /// Protocol version this server implements.
 pub const PROTOCOL_VERSION: &str = "2026-07-28";
@@ -215,7 +215,11 @@ pub fn handle_line(root: &Path, line: &str) -> Option<Json> {
     let req = match json::parse(line) {
         Ok(v) => v,
         Err(e) => {
-            return Some(error_response(Json::Null, -32700, &format!("parse error: {}", e)));
+            return Some(error_response(
+                Json::Null,
+                -32700,
+                &format!("parse error: {}", e),
+            ));
         }
     };
 
@@ -301,7 +305,10 @@ fn error_response(id: Json, code: i64, message: &str) -> Json {
         ("id", id),
         (
             "error",
-            Json::obj(vec![("code", Json::Int(code)), ("message", Json::str(message))]),
+            Json::obj(vec![
+                ("code", Json::Int(code)),
+                ("message", Json::str(message)),
+            ]),
         ),
     ])
 }
@@ -311,7 +318,10 @@ fn initialize_result() -> Json {
         ("protocolVersion", Json::str(PROTOCOL_VERSION)),
         (
             "capabilities",
-            Json::obj(vec![("tools", Json::obj(vec![("listChanged", Json::Bool(false))]))]),
+            Json::obj(vec![(
+                "tools",
+                Json::obj(vec![("listChanged", Json::Bool(false))]),
+            )]),
         ),
         (
             "serverInfo",
@@ -344,7 +354,10 @@ fn call_tool(root: &Path, params: &Json) -> Result<Json, ToolError> {
     // Tools are named for the project. A client configured before the rename
     // still sends the old prefix, so it is mapped onto the same handler rather
     // than failing with "unknown tool".
-    let name = name.strip_prefix("zenforge_").map(|rest| format!("gesta_{}", rest)).unwrap_or(name.to_string());
+    let name = name
+        .strip_prefix("zenforge_")
+        .map(|rest| format!("gesta_{}", rest))
+        .unwrap_or(name.to_string());
     let name = name.as_str();
 
     let value = match name {
@@ -401,7 +414,9 @@ fn call_tool(root: &Path, params: &Json) -> Result<Json, ToolError> {
 }
 
 fn arg_str(args: &Json, key: &str) -> Option<String> {
-    field(args, key).and_then(json::as_str).map(|s| s.to_string())
+    field(args, key)
+        .and_then(json::as_str)
+        .map(|s| s.to_string())
 }
 
 fn tool_brief(conn: &Connection, root: &Path) -> Result<Json, String> {
@@ -410,7 +425,9 @@ fn tool_brief(conn: &Connection, root: &Path) -> Result<Json, String> {
 }
 
 fn tool_fix(conn: &Connection, root: &Path, args: &Json) -> Result<Json, String> {
-    let stash = field(args, "stash").and_then(json::as_bool).unwrap_or(false);
+    let stash = field(args, "stash")
+        .and_then(json::as_bool)
+        .unwrap_or(false);
     let fixed = crate::brief::fix_with(
         conn,
         root,
@@ -426,14 +443,17 @@ fn tool_grep(conn: &Connection, root: &Path, args: &Json) -> Result<Json, String
     let needle = field(args, "pattern")
         .and_then(json::as_str)
         .ok_or("gesta_grep needs a pattern".to_string())?;
-    let history = field(args, "history").and_then(json::as_bool).unwrap_or(false);
+    let history = field(args, "history")
+        .and_then(json::as_bool)
+        .unwrap_or(false);
     let word = field(args, "word").and_then(json::as_bool).unwrap_or(false);
     let ignore_case = field(args, "ignore_case")
         .and_then(json::as_bool)
         .unwrap_or(false);
     let path = field(args, "path").and_then(json::as_str);
 
-    let pattern = crate::grep::Pattern::new(needle, ignore_case, word).map_err(|e| e.to_string())?;
+    let pattern =
+        crate::grep::Pattern::new(needle, ignore_case, word).map_err(|e| e.to_string())?;
     let hits = if history {
         crate::grep::search_history(conn, &pattern, path, 5000)
     } else {
@@ -479,7 +499,8 @@ fn tool_status(conn: &Connection) -> Result<Json, String> {
                 ]))
             })
             .map_err(|e| e.to_string())?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?
     };
 
     let tracked = {
@@ -498,7 +519,10 @@ fn tool_status(conn: &Connection) -> Result<Json, String> {
 }
 
 fn tool_log(conn: &Connection, args: &Json) -> Result<Json, String> {
-    let limit = field(args, "limit").and_then(json::as_i64).unwrap_or(20).clamp(1, 1000);
+    let limit = field(args, "limit")
+        .and_then(json::as_i64)
+        .unwrap_or(20)
+        .clamp(1, 1000);
     let mut stmt = conn
         .prepare(
             "SELECT id, message, author, created_at, status FROM changesets
@@ -516,7 +540,9 @@ fn tool_log(conn: &Connection, args: &Json) -> Result<Json, String> {
             ]))
         })
         .map_err(|e| e.to_string())?;
-    let out = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+    let out = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
     Ok(Json::arr(out))
 }
 
@@ -536,9 +562,7 @@ fn tool_ls(conn: &Connection, args: &Json) -> Result<Json, String> {
     if let Some(prefix) = arg_str(args, "path") {
         let p = crate::normalise(&prefix);
         let p = p.trim_end_matches('/');
-        tree.retain(|(path, _)| {
-            path == p || path.starts_with(&format!("{}/", p))
-        });
+        tree.retain(|(path, _)| path == p || path.starts_with(&format!("{}/", p)));
     }
     Ok(Json::obj(vec![
         (
@@ -589,7 +613,9 @@ fn tool_blame(conn: &Connection, args: &Json) -> Result<Json, String> {
             ]))
         })
         .map_err(|e| e.to_string())?;
-    let out = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+    let out = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
     if out.is_empty() {
         return Err(format!("no blame data for {}", path));
     }
@@ -618,7 +644,10 @@ fn tool_diff(conn: &Connection, root: &Path, args: &Json) -> Result<Json, String
                                         "removed",
                                         Json::arr(removed.into_iter().map(Json::str).collect()),
                                     ),
-                                    ("added", Json::arr(added.into_iter().map(Json::str).collect())),
+                                    (
+                                        "added",
+                                        Json::arr(added.into_iter().map(Json::str).collect()),
+                                    ),
                                 ])
                             })
                             .collect(),
@@ -646,9 +675,18 @@ fn tool_diff(conn: &Connection, root: &Path, args: &Json) -> Result<Json, String
             let d = repo::diff_worktree(conn, root, &branch).map_err(|e| e.to_string())?;
             Ok(Json::obj(vec![
                 ("branch", Json::str(branch)),
-                ("added", Json::arr(d.added.into_iter().map(Json::str).collect())),
-                ("modified", Json::arr(d.modified.into_iter().map(Json::str).collect())),
-                ("deleted", Json::arr(d.deleted.into_iter().map(Json::str).collect())),
+                (
+                    "added",
+                    Json::arr(d.added.into_iter().map(Json::str).collect()),
+                ),
+                (
+                    "modified",
+                    Json::arr(d.modified.into_iter().map(Json::str).collect()),
+                ),
+                (
+                    "deleted",
+                    Json::arr(d.deleted.into_iter().map(Json::str).collect()),
+                ),
                 (
                     "skipped_binary",
                     Json::arr(d.skipped_binary.into_iter().map(Json::str).collect()),
@@ -658,7 +696,6 @@ fn tool_diff(conn: &Connection, root: &Path, args: &Json) -> Result<Json, String
         }
     }
 }
-
 
 fn tool_merge_conflicts(conn: &Connection, root: &Path, args: &Json) -> Result<Json, String> {
     let source = arg_str(args, "source").ok_or("params: merge_conflicts needs a source branch")?;
@@ -673,7 +710,9 @@ fn tool_merge_conflicts(conn: &Connection, root: &Path, args: &Json) -> Result<J
 fn tool_create_changeset(conn: &Connection, root: &Path, args: &Json) -> Result<Json, String> {
     let message = arg_str(args, "message").ok_or("params: create_changeset needs a message")?;
     let author = arg_str(args, "author").unwrap_or_else(|| "agent".to_string());
-    match store::with_retry(|| repo::create_changeset(conn, root, &message, &author)).map_err(|e| e.to_string())? {
+    match store::with_retry(|| repo::create_changeset(conn, root, &message, &author))
+        .map_err(|e| e.to_string())?
+    {
         None => Ok(Json::obj(vec![
             ("created", Json::Bool(false)),
             ("reason", Json::str("working tree matches the branch head")),
@@ -689,13 +728,19 @@ fn tool_create_changeset(conn: &Connection, root: &Path, args: &Json) -> Result<
                         .map(|(path, old, _)| {
                             Json::obj(vec![
                                 ("path", Json::str(path)),
-                                ("kind", Json::str(if old.is_none() { "added" } else { "modified" })),
+                                (
+                                    "kind",
+                                    Json::str(if old.is_none() { "added" } else { "modified" }),
+                                ),
                             ])
                         })
                         .collect(),
                 ),
             ),
-            ("deleted", Json::arr(cs.deleted.into_iter().map(Json::str).collect())),
+            (
+                "deleted",
+                Json::arr(cs.deleted.into_iter().map(Json::str).collect()),
+            ),
         ])),
     }
 }
@@ -740,7 +785,10 @@ mod tests {
     #[test]
     fn initialize_reports_the_protocol_and_identity() {
         let d = tmp_repo("init");
-        let r = rpc(&d, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+        let r = rpc(
+            &d,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        );
         let result = field(&r, "result").unwrap();
         assert_eq!(
             json::as_str(field(result, "protocolVersion").unwrap()),
@@ -759,7 +807,11 @@ mod tests {
             Json::Arr(items) => items.clone(),
             _ => panic!("tools must be an array"),
         };
-        assert!(tools.len() >= 7, "expected the full tool set, got {}", tools.len());
+        assert!(
+            tools.len() >= 7,
+            "expected the full tool set, got {}",
+            tools.len()
+        );
         for t in &tools {
             assert!(field(t, "name").is_some());
             assert!(field(t, "inputSchema").is_some());
@@ -770,7 +822,11 @@ mod tests {
     #[test]
     fn a_notification_gets_no_response() {
         let d = tmp_repo("notif");
-        assert!(handle_line(&d, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
+        assert!(handle_line(
+            &d,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+        )
+        .is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -835,7 +891,11 @@ mod tests {
         let conn = store::open_db(&d).unwrap();
         repo::create_changeset(&conn, &d, "add", "t").unwrap();
         let pending: String = conn
-            .query_row("SELECT id FROM changesets WHERE status='pending'", [], |r| r.get(0))
+            .query_row(
+                "SELECT id FROM changesets WHERE status='pending'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         repo::commit_one(&conn, &pending).unwrap();
         drop(conn);
@@ -846,7 +906,10 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"gesta_read_file","arguments":{"path":"a.txt"}}}"#,
         );
         let sc = field(field(&r, "result").unwrap(), "structuredContent").unwrap();
-        assert_eq!(json::as_str(field(sc, "content").unwrap()), Some("line one\n"));
+        assert_eq!(
+            json::as_str(field(sc, "content").unwrap()),
+            Some("line one\n")
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -867,7 +930,11 @@ mod tests {
         let declared: Vec<String> = match tool_definitions() {
             Json::Arr(items) => items
                 .iter()
-                .filter_map(|t| field(t, "name").and_then(json::as_str).map(|s| s.to_string()))
+                .filter_map(|t| {
+                    field(t, "name")
+                        .and_then(json::as_str)
+                        .map(|s| s.to_string())
+                })
                 .collect(),
             _ => Vec::new(),
         };

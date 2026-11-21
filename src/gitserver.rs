@@ -139,7 +139,9 @@ fn reachable_from(entries: &[Entry], have: &[String]) -> std::collections::HashS
         if !seen.insert(sha.clone()) {
             continue;
         }
-        let Some(e) = by_sha.get(sha.as_str()) else { continue };
+        let Some(e) = by_sha.get(sha.as_str()) else {
+            continue;
+        };
         match e.kind {
             // A commit names its tree and its parents.
             1 => {
@@ -193,7 +195,9 @@ pub fn write_pack(entries: &[Entry]) -> ZResult<Vec<u8>> {
         // A delta replaces the body and changes the type to OFS_DELTA, with the distance to the base
         // written between the header and the compressed bytes.
         let (kind, body, base_distance) = match bases.get(&i) {
-            Some((base_index, delta)) => (6u8, delta.as_slice(), Some(start - offsets[*base_index])),
+            Some((base_index, delta)) => {
+                (6u8, delta.as_slice(), Some(start - offsets[*base_index]))
+            }
             None => (e.kind, e.body.as_slice(), None),
         };
 
@@ -240,9 +244,7 @@ pub fn write_pack(entries: &[Entry]) -> ZResult<Vec<u8>> {
 /// Only blobs are considered, and only against a blob that already travelled: a delta names its base
 /// by a backward distance, so the base has to come first in the pack. Tree and commit objects are
 /// small and their text is mostly hashes, which delta poorly.
-fn pick_delta_bases(
-    entries: &[Entry],
-) -> std::collections::HashMap<usize, (usize, Vec<u8>)> {
+fn pick_delta_bases(entries: &[Entry]) -> std::collections::HashMap<usize, (usize, Vec<u8>)> {
     // How deep a delta chain may go. Git's own pack of this history reaches 34 levels, so a low cap
     // is not a quality improvement: at 8 the pack grew from 3703 to 4147 KiB and held 36 deltas
     // instead of 688. A cap exists to bound how many steps a client walks for one object, and git's
@@ -286,12 +288,10 @@ fn pick_delta_bases(
             }
         }
         let depth = match &chosen {
-            Some((base, _)) => {
-                by_band
-                    .get(&band)
-                    .and_then(|c| c.iter().find(|(idx, _)| idx == base).map(|(_, d)| d + 1))
-                    .unwrap_or(1)
-            }
+            Some((base, _)) => by_band
+                .get(&band)
+                .and_then(|c| c.iter().find(|(idx, _)| idx == base).map(|(_, d)| d + 1))
+                .unwrap_or(1),
             None => 0,
         };
         if let Some((base, delta)) = chosen {
@@ -306,8 +306,6 @@ fn pick_delta_bases(
 fn sha1(data: &[u8]) -> [u8; 20] {
     crate::gitobj::sha1_raw(data)
 }
-
-
 
 /// What the server has, for a client that is about to ask for it.
 ///
@@ -329,7 +327,8 @@ pub fn advertise(root: &std::path::Path) -> ZResult<Vec<u8>> {
     if lines.is_empty() {
         // A client needs at least one ref to ask for. An empty repository advertises the
         // capabilities line with no refs, which git reads as "nothing to clone".
-        let mut empty = pkt_line(b"0000000000000000000000000000000000000000 capabilities^{}\0agent=gesta\n");
+        let mut empty =
+            pkt_line(b"0000000000000000000000000000000000000000 capabilities^{}\0agent=gesta\n");
         empty.extend_from_slice(&flush());
         out.extend_from_slice(&empty);
         return Ok(out);
@@ -533,7 +532,10 @@ pub fn split_push(body: &[u8]) -> ZResult<(Vec<PushCommand>, Vec<u8>)> {
         let new = parts.next().unwrap_or("").to_string();
         let name = parts.next().unwrap_or("").to_string();
         if old.len() != 40 || new.len() != 40 || name.is_empty() {
-            return Err(bad(format!("a push named a ref in a shape that is not one: {}", line)));
+            return Err(bad(format!(
+                "a push named a ref in a shape that is not one: {}",
+                line
+            )));
         }
         commands.push(PushCommand { old, new, name });
     }
@@ -572,7 +574,12 @@ pub fn receive_pack_allowing(
             }
             None => false,
         })
-        .map(|c| c.name.strip_prefix("refs/heads/").unwrap_or(&c.name).to_string())
+        .map(|c| {
+            c.name
+                .strip_prefix("refs/heads/")
+                .unwrap_or(&c.name)
+                .to_string()
+        })
         .collect();
     if commands.is_empty() {
         return Ok(flush());
@@ -741,8 +748,7 @@ pub fn receive_pack_allowing(
         for c in &commands {
             let branch_dir = scratch.join("refs").join("heads");
             std::fs::create_dir_all(&branch_dir)?;
-            let ref_file =
-                branch_dir.join(c.name.strip_prefix("refs/heads/").unwrap_or(&c.name));
+            let ref_file = branch_dir.join(c.name.strip_prefix("refs/heads/").unwrap_or(&c.name));
             std::fs::write(&ref_file, format!("{}\n", c.new))?;
         }
 
@@ -754,7 +760,12 @@ pub fn receive_pack_allowing(
         // wrong one: it lists every ref the client offered, whether the server ever had it or not.
         let existed: Vec<String> = commands
             .iter()
-            .map(|c| c.name.strip_prefix("refs/heads/").unwrap_or(&c.name).to_string())
+            .map(|c| {
+                c.name
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(&c.name)
+                    .to_string()
+            })
             .filter(|b| {
                 conn.query_row(
                     "SELECT COUNT(*) FROM branches WHERE name = ?1",
@@ -772,7 +783,11 @@ pub fn receive_pack_allowing(
         let before: Vec<(String, Option<String>, Option<String>)> = commands
             .iter()
             .map(|c| {
-                let branch = c.name.strip_prefix("refs/heads/").unwrap_or(&c.name).to_string();
+                let branch = c
+                    .name
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(&c.name)
+                    .to_string();
                 let head = crate::store::branch_head(&conn, &branch).ok().flatten();
                 let sha = head.as_ref().and_then(|id| {
                     conn.query_row(
@@ -797,7 +812,10 @@ pub fn receive_pack_allowing(
             // belongs to the repository, and a refused push to it must leave it alone.
             let existed_before = existed.iter().any(|b| b == name);
             if !existed_before {
-                let _ = conn.execute("DELETE FROM branches WHERE name = ?1", rusqlite::params![name]);
+                let _ = conn.execute(
+                    "DELETE FROM branches WHERE name = ?1",
+                    rusqlite::params![name],
+                );
             }
         }
 
@@ -817,11 +835,8 @@ pub fn receive_pack_allowing(
                 if !permitted(&branch) {
                     out.extend_from_slice(
                         pkt_line(
-                            format!(
-                                "ng {} this token may not write that branch\n",
-                                c.name
-                            )
-                            .as_bytes(),
+                            format!("ng {} this token may not write that branch\n", c.name)
+                                .as_bytes(),
                         )
                         .as_slice(),
                     );
@@ -933,7 +948,10 @@ pub fn receive_pack_allowing(
                     );
                     continue;
                 }
-                conn.execute("DELETE FROM branches WHERE name = ?1", rusqlite::params![branch])?;
+                conn.execute(
+                    "DELETE FROM branches WHERE name = ?1",
+                    rusqlite::params![branch],
+                )?;
                 // The derived tree goes with the branch: leaving it would make a branch created
                 // later under the same name start from a tree nobody wrote.
                 conn.execute(
@@ -986,7 +1004,12 @@ pub fn receive_pack_allowing(
                     crate::store::refresh_branch_tree(&conn, &branch)?;
                     // A push is where a branch moves for somebody else's work, which is the event
                     // an operator most wants in one place.
-                    crate::audit::local::push(root, &branch, pusher, &format!("{} -> {}", c.old, c.new));
+                    crate::audit::local::push(
+                        root,
+                        &branch,
+                        pusher,
+                        &format!("{} -> {}", c.old, c.new),
+                    );
                     out.extend_from_slice(&pkt_line(format!("ok {}\n", c.name).as_bytes()));
                 }
                 None => {
@@ -1021,15 +1044,20 @@ pub fn advertise_receive(root: &std::path::Path) -> ZResult<Vec<u8>> {
         // A push to a repository with no branches still needs an advertisement, and git writes the
         // capabilities on a zero-id line when there is nothing to advertise.
         let zero = "0".repeat(40);
-        lines.push((zero.clone(), format!("{} capabilities^{{}}\0report-status", zero)));
+        lines.push((
+            zero.clone(),
+            format!("{} capabilities^{{}}\0report-status", zero),
+        ));
     }
     // `delete-refs` is advertised because a push whose new id is all zeroes is a deletion and this
     // server now performs it. Advertising a capability the code does not honour is worse than not
     // advertising it: a client would send a deletion and be told the push succeeded.
-    out.extend_from_slice(&ref_advertisement(&lines, &["report-status", "delete-refs"]));
+    out.extend_from_slice(&ref_advertisement(
+        &lines,
+        &["report-status", "delete-refs"],
+    ));
     Ok(out)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1074,7 +1102,11 @@ mod tests {
     #[test]
     fn a_pkt_line_counts_its_own_header() {
         let got = pkt_line(b"hello\n");
-        assert_eq!(&got[..4], b"000a", "6 bytes of payload plus a 4 byte header");
+        assert_eq!(
+            &got[..4],
+            b"000a",
+            "6 bytes of payload plus a 4 byte header"
+        );
         assert_eq!(&got[4..], b"hello\n");
     }
 
@@ -1092,11 +1124,17 @@ mod tests {
         let out = ref_advertisement(&refs, &["ofs-delta", "side-band-64k"]);
         let text = String::from_utf8_lossy(&out);
         let first = text.split('\n').next().unwrap();
-        assert!(first.contains('\0'), "the first line needs the capabilities");
+        assert!(
+            first.contains('\0'),
+            "the first line needs the capabilities"
+        );
         assert!(first.contains("ofs-delta"));
         // Only the first. A client reads capabilities once.
         let second = text.split('\n').nth(1).unwrap();
-        assert!(!second.contains('\0'), "capabilities belong to one line only");
+        assert!(
+            !second.contains('\0'),
+            "capabilities belong to one line only"
+        );
         assert!(out.ends_with(b"0000"));
     }
 
@@ -1125,7 +1163,10 @@ mod tests {
         let pack = write_pack(&entries).unwrap();
         assert_eq!(&pack[..4], b"PACK");
         assert_eq!(u32::from_be_bytes([pack[4], pack[5], pack[6], pack[7]]), 2);
-        assert_eq!(u32::from_be_bytes([pack[8], pack[9], pack[10], pack[11]]), 1);
+        assert_eq!(
+            u32::from_be_bytes([pack[8], pack[9], pack[10], pack[11]]),
+            1
+        );
         // Four header bytes, four version, four count, then the object, then a 20 byte checksum.
         assert!(pack.len() > 12 + 20);
     }
@@ -1173,10 +1214,14 @@ mod tests {
         )
         .unwrap();
         std::fs::write(d.join("a.txt"), "one\n").unwrap();
-        let first = crate::repo::create_changeset(&conn, &d, "first", "t").unwrap().unwrap();
+        let first = crate::repo::create_changeset(&conn, &d, "first", "t")
+            .unwrap()
+            .unwrap();
         crate::repo::commit_one(&conn, &first.id).unwrap();
         let head: String = conn
-            .query_row("SELECT head FROM branches WHERE name = 'main'", [], |r| r.get(0))
+            .query_row("SELECT head FROM branches WHERE name = 'main'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         for name in ["keep", "gone"] {
             conn.execute(
@@ -1190,14 +1235,18 @@ mod tests {
         // The client believes `gone` is at a commit it never fetched, so pass zeros for `old`, which is
         // what a client sends when it has not seen the ref.
         let zero = "0".repeat(40);
-        let cmd = format!("{} {} refs/heads/gone\0 report-status delete-refs", zero, zero);
+        let cmd = format!(
+            "{} {} refs/heads/gone\0 report-status delete-refs",
+            zero, zero
+        );
         let mut body = Vec::new();
         let payload = cmd.as_bytes();
         body.extend_from_slice(format!("{:04x}", payload.len() + 4).as_bytes());
         body.extend_from_slice(payload);
         body.extend_from_slice(b"0000");
 
-        let reply = receive_pack_allowing(&d, &body, None, "tester").expect("a deletion needs no pack");
+        let reply =
+            receive_pack_allowing(&d, &body, None, "tester").expect("a deletion needs no pack");
         let text = String::from_utf8_lossy(&reply);
         assert!(text.contains("ok refs/heads/gone"), "reply: {}", text);
 
@@ -1209,7 +1258,11 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(left, vec!["keep".to_string(), "main".to_string()], "gone must be deleted");
+        assert_eq!(
+            left,
+            vec!["keep".to_string(), "main".to_string()],
+            "gone must be deleted"
+        );
 
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -1231,14 +1284,19 @@ mod tests {
         )
         .unwrap();
         std::fs::write(d.join("a.txt"), "one\n").unwrap();
-        let first = crate::repo::create_changeset(&conn, &d, "first", "t").unwrap().unwrap();
+        let first = crate::repo::create_changeset(&conn, &d, "first", "t")
+            .unwrap()
+            .unwrap();
         crate::repo::commit_one(&conn, &first.id).unwrap();
         conn.execute("UPDATE branches SET name = 'only' WHERE name = 'main'", [])
             .unwrap();
         drop(conn);
 
         let zero = "0".repeat(40);
-        let cmd = format!("{} {} refs/heads/only\0 report-status delete-refs", zero, zero);
+        let cmd = format!(
+            "{} {} refs/heads/only\0 report-status delete-refs",
+            zero, zero
+        );
         let mut body = Vec::new();
         let payload = cmd.as_bytes();
         body.extend_from_slice(format!("{:04x}", payload.len() + 4).as_bytes());
@@ -1251,7 +1309,9 @@ mod tests {
         assert!(text.contains("last branch"), "reply: {}", text);
 
         let conn = crate::store::open_db(&d).unwrap();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM branches", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM branches", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1, "the last branch must still be there");
 
         let _ = std::fs::remove_dir_all(&d);

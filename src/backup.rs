@@ -56,7 +56,16 @@ pub fn contents(conn: &Connection) -> ZResult<Contents> {
            (SELECT COUNT(*) FROM file_versions),
            (SELECT COUNT(*) FROM blame_ranges)",
         [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        },
     )?;
     Ok(Contents {
         changesets: counts.0,
@@ -132,12 +141,15 @@ pub fn verify(file: &std::path::Path) -> ZResult<Contents> {
             file.display()
         )));
     }
-    let conn = Connection::open(file)
-        .map_err(|e| crate::backup::bad_err(format!("{} is not a database: {}", file.display(), e)))?;
+    let conn = Connection::open(file).map_err(|e| {
+        crate::backup::bad_err(format!("{} is not a database: {}", file.display(), e))
+    })?;
 
     let integrity: String = conn
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
-        .map_err(|e| crate::backup::bad_err(format!("{} could not be read: {}", file.display(), e)))?;
+        .map_err(|e| {
+            crate::backup::bad_err(format!("{} could not be read: {}", file.display(), e))
+        })?;
     if integrity != "ok" {
         return Err(crate::backup::bad_err(format!(
             "{} failed its integrity check: {}",

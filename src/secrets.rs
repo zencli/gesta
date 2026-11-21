@@ -73,11 +73,7 @@ impl SecretStore {
         match fs::read_to_string(&self.path) {
             Ok(text) => decode(&text, &self.passphrase),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-            Err(e) => Err(bad(format!(
-                "cannot read {}: {}",
-                self.path.display(),
-                e
-            ))),
+            Err(e) => Err(bad(format!("cannot read {}: {}", self.path.display(), e))),
         }
     }
 
@@ -296,7 +292,10 @@ mod tests {
         bytes[0] ^= 1;
         *ct = hex::encode(&bytes);
         let edited = parts.join(" ");
-        assert!(decode(&edited, "p").is_err(), "an edited store must be refused");
+        assert!(
+            decode(&edited, "p").is_err(),
+            "an edited store must be refused"
+        );
     }
 
     #[test]

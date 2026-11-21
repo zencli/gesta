@@ -20,7 +20,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-
 use crate::auth::{is_loopback, Auth, Role};
 use crate::remote::{self, Bundle};
 use crate::store::{ancestors, branch_head, init_schema, open_db};
@@ -49,7 +48,10 @@ impl Request {
     }
 
     pub fn param(&self, key: &str) -> Option<&str> {
-        self.query.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        self.query
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -158,7 +160,10 @@ pub fn parse_head(buf: &[u8]) -> ZResult<RequestHead> {
     let mut lines = head.split("\r\n");
     let request_line = lines.next().ok_or_else(|| bad("empty request"))?;
     let mut parts = request_line.split_whitespace();
-    let method = parts.next().ok_or_else(|| bad("missing method"))?.to_string();
+    let method = parts
+        .next()
+        .ok_or_else(|| bad("missing method"))?
+        .to_string();
     let target = parts.next().ok_or_else(|| bad("missing path"))?.to_string();
 
     if method.len() > 16 || target.len() > 8192 {
@@ -177,7 +182,13 @@ pub fn parse_head(buf: &[u8]) -> ZResult<RequestHead> {
         None => (target, Vec::new()),
     };
 
-    Ok(RequestHead { method, path, query, headers, consumed: end + 4 })
+    Ok(RequestHead {
+        method,
+        path,
+        query,
+        headers,
+        consumed: end + 4,
+    })
 }
 
 pub fn parse_query(q: &str) -> Vec<(String, String)> {
@@ -231,7 +242,9 @@ fn url_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{:02X}", b)),
         }
     }
@@ -282,7 +295,12 @@ pub fn parse_http_url(url: &str) -> ZResult<HttpUrl> {
     if host.is_empty() {
         return Err(bad("empty host in url"));
     }
-    Ok(HttpUrl { host, port, base_path, tls })
+    Ok(HttpUrl {
+        host,
+        port,
+        base_path,
+        tls,
+    })
 }
 
 pub fn is_http_url(url: &str) -> bool {
@@ -344,25 +362,24 @@ pub fn request_with_pin(
         stream.read_to_end(&mut raw)?;
     }
 
-    let split = find_subslice(&raw, b"\r\n\r\n")
-        .ok_or_else(|| bad("response has no end of headers"))?;
-    let head_text = std::str::from_utf8(&raw[..split]).map_err(|_| bad("response head not UTF-8"))?;
+    let split =
+        find_subslice(&raw, b"\r\n\r\n").ok_or_else(|| bad("response has no end of headers"))?;
+    let head_text =
+        std::str::from_utf8(&raw[..split]).map_err(|_| bad("response head not UTF-8"))?;
     let status = head_text
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or_else(|| bad("response has no status code"))?;
 
-    let declared = head_text
-        .split("\r\n")
-        .find_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            if k.eq_ignore_ascii_case("content-length") {
-                v.trim().parse::<usize>().ok()
-            } else {
-                None
-            }
-        });
+    let declared = head_text.split("\r\n").find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        if k.eq_ignore_ascii_case("content-length") {
+            v.trim().parse::<usize>().ok()
+        } else {
+            None
+        }
+    });
 
     let payload = raw[split + 4..].to_vec();
     let payload = match declared {
@@ -389,7 +406,11 @@ fn build_request_head(
     let mut head = format!(
         "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: */*\r\n",
         method,
-        if u.base_path.is_empty() { "/".to_string() } else { u.base_path.clone() },
+        if u.base_path.is_empty() {
+            "/".to_string()
+        } else {
+            u.base_path.clone()
+        },
         u.host
     );
     if let Some(tok) = token {
@@ -627,7 +648,8 @@ fn read_request_generic<S: Read>(stream: &mut S) -> ZResult<Request> {
     let path = head.path;
     let query = head.query;
 
-    let head_text = std::str::from_utf8(&buf[..head_end]).map_err(|_| bad("headers are not UTF-8"))?;
+    let head_text =
+        std::str::from_utf8(&buf[..head_end]).map_err(|_| bad("headers are not UTF-8"))?;
     let want: usize = head_text
         .split("\r\n")
         .filter_map(|l| l.split_once(':'))
@@ -648,7 +670,14 @@ fn read_request_generic<S: Read>(stream: &mut S) -> ZResult<Request> {
     }
     body.truncate(want);
 
-    Ok(Request { method, path, query, body, authorization, git_protocol })
+    Ok(Request {
+        method,
+        path,
+        query,
+        body,
+        authorization,
+        git_protocol,
+    })
 }
 
 /// Dispatch one request. Kept separate from socket code so routes and access
@@ -730,7 +759,7 @@ pub fn route(
                         401,
                         "Unauthorized",
                         format!("token for {} expired", name),
-                    )
+                    );
                 }
                 Some(crate::auth::AuthOutcome::Granted(g)) => {
                     // A real token asking for more than it has. The name is recorded because this is
@@ -751,7 +780,7 @@ pub fn route(
                         403,
                         "Forbidden",
                         format!("token does not grant {:?} access", needed),
-                    )
+                    );
                 }
                 None | Some(crate::auth::AuthOutcome::Unknown) => {
                     // A short sleep blunts online guessing without needing state
@@ -808,11 +837,22 @@ pub fn route(
             let branch = req.param("branch").unwrap_or("main");
             let have: HashSet<String> = req
                 .param("have")
-                .map(|h| h.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+                .map(|h| {
+                    h.split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .collect()
+                })
                 .unwrap_or_default();
             match fetch_bundle(root, branch, &have) {
                 Ok(Some(bytes)) => {
-                    log_access(root, &who, "bundle", branch, &format!("{} bytes", bytes.len()));
+                    log_access(
+                        root,
+                        &who,
+                        "bundle",
+                        branch,
+                        &format!("{} bytes", bytes.len()),
+                    );
                     Response::ok_binary(bytes)
                 }
                 Ok(None) => Response::error(404, "Not Found", format!("no branch {}", branch)),
@@ -851,23 +891,44 @@ pub fn route(
                     }
                     match crate::gitserver::advertise(root) {
                         Ok(body) => {
-                            log_access(root, &who, "git-info-refs", p, &format!("{} bytes", body.len()));
-                            Response::ok_with_type(body, "application/x-git-upload-pack-advertisement")
+                            log_access(
+                                root,
+                                &who,
+                                "git-info-refs",
+                                p,
+                                &format!("{} bytes", body.len()),
+                            );
+                            Response::ok_with_type(
+                                body,
+                                "application/x-git-upload-pack-advertisement",
+                            )
                         }
                         Err(e) => Response::error(500, "Internal Server Error", e.to_string()),
                     }
                 }
                 "git-receive-pack" => match crate::gitserver::advertise_receive(root) {
                     Ok(bytes) => {
-                        log_access(root, &who, "git-receive-pack-advert", p, &format!("{} bytes", bytes.len()));
-                        Response::ok_with_type(bytes, "application/x-git-receive-pack-advertisement")
+                        log_access(
+                            root,
+                            &who,
+                            "git-receive-pack-advert",
+                            p,
+                            &format!("{} bytes", bytes.len()),
+                        );
+                        Response::ok_with_type(
+                            bytes,
+                            "application/x-git-receive-pack-advertisement",
+                        )
                     }
                     Err(e) => Response::error(500, "Internal Server Error", e.to_string()),
                 },
                 other => Response::error(
                     403,
                     "Forbidden",
-                    format!("service {} is not served here (git-upload-pack and git-receive-pack are)", other),
+                    format!(
+                        "service {} is not served here (git-upload-pack and git-receive-pack are)",
+                        other
+                    ),
                 ),
             }
         }
@@ -882,7 +943,13 @@ pub fn route(
                 check.as_ref().map(|f| f as &dyn Fn(&str) -> bool);
             match crate::gitserver::receive_pack_allowing(root, &req.body, allowed, &who) {
                 Ok(bytes) => {
-                    log_access(root, &who, "git-receive-pack", p, &format!("{} bytes", bytes.len()));
+                    log_access(
+                        root,
+                        &who,
+                        "git-receive-pack",
+                        p,
+                        &format!("{} bytes", bytes.len()),
+                    );
                     Response::ok_with_type(bytes, "application/x-git-receive-pack-result")
                 }
                 // A pack that could not be unpacked is the client's bytes, not our failure. The
@@ -921,10 +988,7 @@ pub fn route(
                                 p,
                                 &format!("{} bytes", bytes.len()),
                             );
-                            Response::ok_with_type(
-                                bytes,
-                                "application/x-git-upload-pack-result",
-                            )
+                            Response::ok_with_type(bytes, "application/x-git-upload-pack-result")
                         }
                         Err(e) => Response::error(500, "Internal Server Error", e.to_string()),
                     }
@@ -983,10 +1047,7 @@ pub fn route(
                                 p,
                                 &format!("{} bytes", bytes.len()),
                             );
-                            Response::ok_with_type(
-                                bytes,
-                                "application/x-git-upload-pack-result",
-                            )
+                            Response::ok_with_type(bytes, "application/x-git-upload-pack-result")
                         }
                         Err(e) => Response::error(500, "Internal Server Error", e.to_string()),
                     }
@@ -998,13 +1059,19 @@ pub fn route(
                     )
                 }
             } else {
-            match crate::gitserver::upload_pack(root, &req.body) {
-                Ok(body) => {
-                    log_access(root, &who, "git-upload-pack", p, &format!("{} bytes", body.len()));
-                    Response::ok_with_type(body, "application/x-git-upload-pack-result")
+                match crate::gitserver::upload_pack(root, &req.body) {
+                    Ok(body) => {
+                        log_access(
+                            root,
+                            &who,
+                            "git-upload-pack",
+                            p,
+                            &format!("{} bytes", body.len()),
+                        );
+                        Response::ok_with_type(body, "application/x-git-upload-pack-result")
+                    }
+                    Err(e) => Response::error(500, "Internal Server Error", e.to_string()),
                 }
-                Err(e) => Response::error(500, "Internal Server Error", e.to_string()),
-            }
             }
         }
         ("GET", "/v1/file") => {
@@ -1056,7 +1123,13 @@ pub fn route(
             match crate::store::hash_at_point(&conn, &path, &resolved) {
                 Ok(Some(hash)) => match crate::store::get_object(&conn, &hash) {
                     Ok(content) => {
-                        log_access(root, &who, "file", &path, &format!("{} bytes", content.len()));
+                        log_access(
+                            root,
+                            &who,
+                            "file",
+                            &path,
+                            &format!("{} bytes", content.len()),
+                        );
                         Response::ok_text(content)
                     }
                     Err(e) => Response::error(500, "Internal Server Error", e.to_string()),
@@ -1119,7 +1192,6 @@ fn decode_basic_token(value: &str) -> Option<String> {
     Some(token.to_string())
 }
 
-
 /// Why a changeset request was refused.
 enum ChangeErr {
     Bad(String),
@@ -1148,9 +1220,15 @@ fn create_changeset_from_json(
     let message = field(payload, "message")
         .and_then(json::as_str)
         .ok_or_else(|| ChangeErr::Bad("message is required".into()))?;
-    let author = field(payload, "author").and_then(json::as_str).unwrap_or(who);
-    let branch = field(payload, "branch").and_then(json::as_str).unwrap_or("main");
-    let commit = field(payload, "commit").map(|v| matches!(v, Json::Bool(true))).unwrap_or(false);
+    let author = field(payload, "author")
+        .and_then(json::as_str)
+        .unwrap_or(who);
+    let branch = field(payload, "branch")
+        .and_then(json::as_str)
+        .unwrap_or("main");
+    let commit = field(payload, "commit")
+        .map(|v| matches!(v, Json::Bool(true)))
+        .unwrap_or(false);
 
     let mut files: Vec<(String, String)> = Vec::new();
     if let Some(Json::Arr(items)) = field(payload, "files") {
@@ -1208,7 +1286,10 @@ fn create_changeset_from_json(
         ("id", Json::str(result.id.clone())),
         ("branch", Json::str(branch.to_string())),
         ("files", Json::int(result.paths.len() as i64)),
-        ("paths", Json::arr(result.paths.iter().cloned().map(Json::str).collect())),
+        (
+            "paths",
+            Json::arr(result.paths.iter().cloned().map(Json::str).collect()),
+        ),
         (
             "skipped",
             Json::arr(result.skipped.iter().cloned().map(Json::str).collect()),
@@ -1231,11 +1312,17 @@ fn list_branches(root: &Path) -> ZResult<String> {
     let conn = open_db(root)?;
     init_schema(&conn)?;
     let mut stmt = conn.prepare("SELECT name, head FROM branches ORDER BY name")?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+    })?;
     let mut out = String::new();
     for r in rows {
         let (name, head) = r?;
-        out.push_str(&format!("{}\t{}\n", name, head.unwrap_or_else(|| "-".into())));
+        out.push_str(&format!(
+            "{}\t{}\n",
+            name,
+            head.unwrap_or_else(|| "-".into())
+        ));
     }
     Ok(out)
 }
@@ -1360,7 +1447,11 @@ pub fn request_with_headers(
     let mut head = format!(
         "{} {} HTTP/1.1\r\nConnection: close\r\n",
         method,
-        if u.base_path.is_empty() { "/".to_string() } else { u.base_path.clone() }
+        if u.base_path.is_empty() {
+            "/".to_string()
+        } else {
+            u.base_path.clone()
+        }
     );
     // A caller that signs Content-Length has to send the same value, so it is
     // passed in and not added again here. Two of them make nginx answer 400 with
@@ -1467,7 +1558,10 @@ mod tests {
     #[test]
     fn parses_http_url_with_and_without_port() {
         let u = parse_http_url("http://example.com:8787/repo").unwrap();
-        assert_eq!((u.host.as_str(), u.port, u.base_path.as_str()), ("example.com", 8787, "/repo"));
+        assert_eq!(
+            (u.host.as_str(), u.port, u.base_path.as_str()),
+            ("example.com", 8787, "/repo")
+        );
 
         let u = parse_http_url("http://127.0.0.1").unwrap();
         assert_eq!((u.host.as_str(), u.port), ("127.0.0.1", 80));
@@ -1512,7 +1606,12 @@ mod tests {
             authorization: None,
             git_protocol: None,
         };
-        let resp = route(Path::new("/tmp/does-not-matter"), &req, &Auth::from_entries(&[]), None);
+        let resp = route(
+            Path::new("/tmp/does-not-matter"),
+            &req,
+            &Auth::from_entries(&[]),
+            None,
+        );
         assert_eq!(resp.status, 405);
     }
 
@@ -1526,7 +1625,12 @@ mod tests {
             authorization: None,
             git_protocol: None,
         };
-        let resp = route(Path::new("/tmp/does-not-matter"), &req, &Auth::from_entries(&[]), None);
+        let resp = route(
+            Path::new("/tmp/does-not-matter"),
+            &req,
+            &Auth::from_entries(&[]),
+            None,
+        );
         assert_eq!(resp.status, 405);
     }
 
@@ -1540,15 +1644,27 @@ mod tests {
             authorization: None,
             git_protocol: None,
         };
-        let resp = route(Path::new("/tmp/does-not-matter"), &req, &Auth::from_entries(&[]), None);
+        let resp = route(
+            Path::new("/tmp/does-not-matter"),
+            &req,
+            &Auth::from_entries(&[]),
+            None,
+        );
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, b"ok".to_vec());
     }
 
     #[test]
     fn bundle_url_encodes_branch_and_have_list() {
-        let u = bundle_url("http://localhost:8787/", "feature/x", &["cs1".into(), "cs2".into()]);
-        assert_eq!(u, "http://localhost:8787/v1/bundle?branch=feature%2Fx&have=cs1%2Ccs2");
+        let u = bundle_url(
+            "http://localhost:8787/",
+            "feature/x",
+            &["cs1".into(), "cs2".into()],
+        );
+        assert_eq!(
+            u,
+            "http://localhost:8787/v1/bundle?branch=feature%2Fx&have=cs1%2Ccs2"
+        );
     }
 
     #[test]
@@ -1614,7 +1730,8 @@ fn strip_v0_framing(raw: &[u8]) -> Vec<u8> {
 pub fn open_repo_for_serve(root: &Path) -> ZResult<ServedRepository> {
     let conn = crate::store::open_db(root)?;
     let names: Vec<String> = {
-        let mut stmt = conn.prepare("SELECT name FROM branches WHERE head IS NOT NULL ORDER BY name")?;
+        let mut stmt =
+            conn.prepare("SELECT name FROM branches WHERE head IS NOT NULL ORDER BY name")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
@@ -1657,7 +1774,6 @@ pub fn open_repo_for_serve(root: &Path) -> ZResult<ServedRepository> {
     Ok(ServedRepository { refs, objects })
 }
 
-
 #[cfg(test)]
 mod serve_tests {
     #[test]
@@ -1690,7 +1806,11 @@ mod serve_tests {
         let exported = dir.join("out");
         crate::git_bridge::export(&conn, &exported, None).unwrap();
         let repo = crate::gitobj::Repo::open(&exported);
-        assert!(repo.is_ok(), "the export is not a git repository: {:?}", repo.err());
+        assert!(
+            repo.is_ok(),
+            "the export is not a git repository: {:?}",
+            repo.err()
+        );
         let repo = repo.unwrap();
         let objects = repo.all_objects().unwrap();
         assert!(!objects.is_empty(), "the export holds no objects");

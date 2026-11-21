@@ -8,8 +8,8 @@
 
 use rusqlite::Connection;
 
-use crate::store::branch_head;
 use crate::repo::tree_at;
+use crate::store::branch_head;
 use crate::store::{new_changeset_id, put_object, put_object_bytes};
 use crate::{bad, ZResult};
 
@@ -41,7 +41,8 @@ pub fn effective_tree(
     conn: &Connection,
     branch: &str,
 ) -> ZResult<std::collections::HashMap<String, Option<String>>> {
-    let mut out: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+    let mut out: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
 
     if let Some(head) = branch_head(conn, branch)? {
         for (path, hash) in tree_at(conn, &head)? {
@@ -185,7 +186,10 @@ mod tests {
 
         // The same content again is not a change.
         let again = changeset_from_content(&conn, "same", "agent", "main", &first, &[]);
-        assert!(again.is_err(), "identical content must not create a changeset");
+        assert!(
+            again.is_err(),
+            "identical content must not create a changeset"
+        );
     }
 
     #[test]
@@ -198,7 +202,10 @@ mod tests {
         let cs = changeset_from_content(&conn, "queued", "agent", "main", &files, &[]).unwrap();
 
         let committed = committed_tree(&conn, "main").unwrap();
-        assert!(!committed.contains_key("src/app.py"), "head tree must not have it yet");
+        assert!(
+            !committed.contains_key("src/app.py"),
+            "head tree must not have it yet"
+        );
 
         let effective = effective_tree(&conn, "main").unwrap();
         assert!(
@@ -214,10 +221,20 @@ mod tests {
         let files = vec![("doc.md".to_string(), "# doc\n".to_string())];
         changeset_from_content(&conn, "add", "agent", "main", &files, &[]).unwrap();
 
-        let del = changeset_from_content(&conn, "remove", "agent", "main", &[], &["doc.md".to_string()])
-            .unwrap();
+        let del = changeset_from_content(
+            &conn,
+            "remove",
+            "agent",
+            "main",
+            &[],
+            &["doc.md".to_string()],
+        )
+        .unwrap();
         assert_eq!(del.paths, vec!["doc.md".to_string()]);
-        assert!(del.skipped.is_empty(), "the path existed, so nothing was skipped");
+        assert!(
+            del.skipped.is_empty(),
+            "the path existed, so nothing was skipped"
+        );
 
         let effective = effective_tree(&conn, "main").unwrap();
         assert!(
@@ -230,8 +247,15 @@ mod tests {
     fn deleting_a_path_that_does_not_exist_is_reported_not_silently_dropped() {
         let conn = mem_db();
         let files = vec![("keep.txt".to_string(), "x\n".to_string())];
-        let r = changeset_from_content(&conn, "one", "a", "main", &files, &["ghost.txt".to_string()])
-            .unwrap();
+        let r = changeset_from_content(
+            &conn,
+            "one",
+            "a",
+            "main",
+            &files,
+            &["ghost.txt".to_string()],
+        )
+        .unwrap();
         assert_eq!(r.paths, vec!["keep.txt".to_string()]);
         assert_eq!(r.skipped, vec!["ghost.txt".to_string()]);
     }
@@ -284,7 +308,14 @@ mod tests {
     fn a_path_that_is_both_written_and_deleted_is_refused() {
         let conn = mem_db();
         let files = vec![("a.txt".to_string(), "one\n".to_string())];
-        let r = changeset_from_content(&conn, "conflict", "a", "main", &files, &["a.txt".to_string()]);
+        let r = changeset_from_content(
+            &conn,
+            "conflict",
+            "a",
+            "main",
+            &files,
+            &["a.txt".to_string()],
+        );
         assert!(r.is_err());
     }
 }

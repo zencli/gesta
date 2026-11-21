@@ -328,7 +328,10 @@ mod tests {
     fn a_regex_matches_more_than_a_literal_does() {
         let body = "fn read_config() {}\nfn write_config() {}\n";
         let literal = Pattern::new("fn .*_config", false, false).unwrap();
-        assert!(literal.scan("a", body, "").is_empty(), "a literal found a pattern");
+        assert!(
+            literal.scan("a", body, "").is_empty(),
+            "a literal found a pattern"
+        );
 
         let re = Pattern::regex("fn [a-z]+_config", false, false).unwrap();
         assert_eq!(re.scan("a", body, "").len(), 2);

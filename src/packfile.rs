@@ -114,8 +114,8 @@ impl Pack {
             )));
         }
         let fanout_at = 8;
-        let count = be32(&idx, fanout_at + 255 * 4).ok_or_else(|| bad("index fanout is truncated"))?
-            as usize;
+        let count = be32(&idx, fanout_at + 255 * 4)
+            .ok_or_else(|| bad("index fanout is truncated"))? as usize;
         let names_at = fanout_at + 256 * 4;
         let crc_at = names_at + count * 20;
         let offsets_at = crc_at + count * 4;
@@ -127,8 +127,8 @@ impl Pack {
                 idx.get(name_at..name_at + 20)
                     .ok_or_else(|| bad("index names are truncated"))?,
             );
-            let raw = be32(&idx, offsets_at + i * 4)
-                .ok_or_else(|| bad("index offsets are truncated"))?;
+            let raw =
+                be32(&idx, offsets_at + i * 4).ok_or_else(|| bad("index offsets are truncated"))?;
             // The high bit means the offset does not fit in 32 bits and lives in the 8 byte
             // table at the end, at the index given by the low 31 bits.
             let offset = if raw & 0x8000_0000 != 0 {
@@ -194,7 +194,10 @@ impl Pack {
                     .ok_or_else(|| bad("delta points before the start of the pack"))?;
                 let base = self.resolve(bytes, base_offset, depth + 1)?;
                 let data = apply_delta(&base.data, &delta)?;
-                Ok(Packed { kind: base.kind, data })
+                Ok(Packed {
+                    kind: base.kind,
+                    data,
+                })
             }
             Kind::RefDelta => {
                 let name = bytes
@@ -210,7 +213,10 @@ impl Pack {
                 if let Some(&base_offset) = self.offsets.get(&base_hash) {
                     let base = self.resolve(bytes, base_offset, depth + 1)?;
                     let data = apply_delta(&base.data, &delta)?;
-                    return Ok(Packed { kind: base.kind, data });
+                    return Ok(Packed {
+                        kind: base.kind,
+                        data,
+                    });
                 }
                 Err(bad(format!(
                     "delta in {} needs object {}, which is not in this pack",
@@ -393,9 +399,9 @@ fn be32(bytes: &[u8], at: usize) -> Option<u32> {
 }
 
 fn be64(bytes: &[u8], at: usize) -> Option<u64> {
-    bytes.get(at..at + 8).map(|s| {
-        u64::from_be_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]])
-    })
+    bytes
+        .get(at..at + 8)
+        .map(|s| u64::from_be_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
 }
 
 #[cfg(test)]

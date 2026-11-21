@@ -105,7 +105,9 @@ pub fn read(conn: &Connection, group: i64, offset: u64, length: u64) -> ZResult<
             |r| r.get(0),
         )
         .optional()?;
-    let Some(packed) = packed else { return Ok(None) };
+    let Some(packed) = packed else {
+        return Ok(None);
+    };
     let whole = crate::store::decompress_bytes(&packed)?;
     let start = offset as usize;
     let end = start.saturating_add(length as usize);
@@ -330,7 +332,10 @@ mod tests {
             crate::store::put_object(&conn, &body(i)).unwrap();
         }
         let (groups, _) = repack(&conn).unwrap();
-        assert_eq!(groups, 0, "a tiny store paid for a mechanism it does not need");
+        assert_eq!(
+            groups, 0,
+            "a tiny store paid for a mechanism it does not need"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

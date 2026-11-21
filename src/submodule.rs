@@ -97,12 +97,18 @@ pub fn write_gitmodules(root: &Path, subs: &HashMap<String, Submodule>) -> ZResu
         content.push_str(&format!("    path = {}\n", sub.path));
         content.push_str(&format!("    url = {}\n", sub.url));
         if let Some(branch) = &sub.branch {
-            content.push_str(&format!("    branch = {}
-", branch));
+            content.push_str(&format!(
+                "    branch = {}
+",
+                branch
+            ));
         }
         if let Some(commit) = &sub.commit {
-            content.push_str(&format!("    commit = {}
-", commit));
+            content.push_str(&format!(
+                "    commit = {}
+",
+                commit
+            ));
         }
         content.push('\n');
     }
@@ -133,7 +139,11 @@ pub fn submodule_init(root: &Path) -> ZResult<Vec<String>> {
         // Checkout the pinned commit if we have one
         if let Some(commit) = &sub.commit {
             let mut cmd = std::process::Command::new("git");
-            cmd.arg("-C").arg(&dest).arg("checkout").arg("--quiet").arg(commit);
+            cmd.arg("-C")
+                .arg(&dest)
+                .arg("checkout")
+                .arg("--quiet")
+                .arg(commit);
             let status = cmd.status()?;
             if !status.success() {
                 return Err(bad(format!(
@@ -157,13 +167,21 @@ pub fn submodule_update(root: &Path) -> ZResult<Vec<String>> {
         }
         if let Some(commit) = &sub.commit {
             let mut cmd = std::process::Command::new("git");
-            cmd.arg("-C").arg(&dest).arg("fetch").arg("--quiet").arg("origin");
+            cmd.arg("-C")
+                .arg(&dest)
+                .arg("fetch")
+                .arg("--quiet")
+                .arg("origin");
             let status = cmd.status()?;
             if !status.success() {
                 return Err(bad(format!("failed to fetch submodule {}", sub.path)));
             }
             let mut cmd = std::process::Command::new("git");
-            cmd.arg("-C").arg(&dest).arg("checkout").arg("--quiet").arg(commit);
+            cmd.arg("-C")
+                .arg(&dest)
+                .arg("checkout")
+                .arg("--quiet")
+                .arg(commit);
             let status = cmd.status()?;
             if !status.success() {
                 return Err(bad(format!(

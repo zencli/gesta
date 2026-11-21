@@ -18,7 +18,7 @@
 //! key, a dynamic import, a string built by concatenation, or a rename that keeps the old name
 //! alive in an alias. Those need a type system or a running program.
 
-use crate::{ZResult};
+use crate::ZResult;
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 
@@ -42,12 +42,69 @@ pub struct Stale {
 /// change, so reporting them would bury the real findings under noise and teach a reader to
 /// ignore the output.
 const NOISE: &[&str] = &[
-    "self", "this", "data", "value", "result", "item", "items", "index", "name", "id", "key",
-    "true", "false", "null", "none", "undefined", "string", "number", "object", "array", "error",
-    "message", "response", "request", "config", "options", "args", "params", "args", "len", "type",
-    "new", "default", "main", "test", "tests", "expect", "assert", "print", "println", "return",
-    "import", "export", "from", "function", "class", "struct", "enum", "impl", "const", "static",
-    "public", "private", "void", "int", "bool", "str", "vec", "some", "ok", "err", "map", "filter",
+    "self",
+    "this",
+    "data",
+    "value",
+    "result",
+    "item",
+    "items",
+    "index",
+    "name",
+    "id",
+    "key",
+    "true",
+    "false",
+    "null",
+    "none",
+    "undefined",
+    "string",
+    "number",
+    "object",
+    "array",
+    "error",
+    "message",
+    "response",
+    "request",
+    "config",
+    "options",
+    "args",
+    "params",
+    "args",
+    "len",
+    "type",
+    "new",
+    "default",
+    "main",
+    "test",
+    "tests",
+    "expect",
+    "assert",
+    "print",
+    "println",
+    "return",
+    "import",
+    "export",
+    "from",
+    "function",
+    "class",
+    "struct",
+    "enum",
+    "impl",
+    "const",
+    "static",
+    "public",
+    "private",
+    "void",
+    "int",
+    "bool",
+    "str",
+    "vec",
+    "some",
+    "ok",
+    "err",
+    "map",
+    "filter",
 ];
 
 /// Identifiers in a line: runs of letters, digits and underscores, at least three characters.
@@ -112,7 +169,6 @@ fn is_noise(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     NOISE.contains(&lower.as_str()) || name.len() < 4
 }
-
 
 /// What a search could not see, counted rather than guessed at.
 ///
@@ -263,7 +319,12 @@ mod tests {
         let hash = crate::store::put_object(&conn, &body).unwrap();
         let tree = vec![("src/view.rs".to_string(), hash)];
         let stale = stale_references(&conn, &changed, &tree).unwrap();
-        assert_eq!(stale.len(), 1, "expected one stale reference, got {:?}", stale);
+        assert_eq!(
+            stale.len(),
+            1,
+            "expected one stale reference, got {:?}",
+            stale
+        );
         assert_eq!(stale[0].name, "userName");
         assert_eq!(stale[0].path, "src/view.rs");
         assert_eq!(stale[0].line, 2);
@@ -337,7 +398,11 @@ mod tests {
         let hash = crate::store::put_object(&conn, &body).unwrap();
         let tree = vec![("src/b.rs".to_string(), hash)];
         let stale = stale_references(&conn, &changed, &tree).unwrap();
-        assert_eq!(stale.len(), 1, "a name used three times is one unfinished file");
+        assert_eq!(
+            stale.len(),
+            1,
+            "a name used three times is one unfinished file"
+        );
     }
 
     #[test]

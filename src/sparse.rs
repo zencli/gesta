@@ -83,7 +83,10 @@ impl SparseScope {
         if self.patterns.is_empty() {
             return tree.into_iter().cloned().collect();
         }
-        tree.into_iter().filter(|p| self.contains(p)).cloned().collect()
+        tree.into_iter()
+            .filter(|p| self.contains(p))
+            .cloned()
+            .collect()
     }
 }
 
@@ -157,7 +160,9 @@ mod tests {
 
     #[test]
     fn a_directory_pattern_covers_its_subtree() {
-        let s = SparseScope { patterns: vec!["crates/api".into()] };
+        let s = SparseScope {
+            patterns: vec!["crates/api".into()],
+        };
         assert!(s.contains("crates/api"));
         assert!(s.contains("crates/api/src/main.rs"));
         assert!(!s.contains("crates/web/src/main.rs"));
@@ -167,7 +172,9 @@ mod tests {
 
     #[test]
     fn a_glob_pattern_matches_across_depths() {
-        let s = SparseScope { patterns: vec!["docs/**".into()] };
+        let s = SparseScope {
+            patterns: vec!["docs/**".into()],
+        };
         assert!(s.contains("docs/a.md"));
         assert!(s.contains("docs/deep/nested/b.md"));
         assert!(!s.contains("src/a.rs"));
@@ -175,7 +182,9 @@ mod tests {
 
     #[test]
     fn a_bare_name_pattern_matches_at_any_depth() {
-        let s = SparseScope { patterns: vec!["*.md".into()] };
+        let s = SparseScope {
+            patterns: vec!["*.md".into()],
+        };
         assert!(s.contains("README.md"));
         assert!(s.contains("docs/guide.md"));
         assert!(!s.contains("src/main.rs"));
@@ -183,7 +192,9 @@ mod tests {
 
     #[test]
     fn filtering_a_tree_keeps_only_in_scope_paths() {
-        let s = SparseScope { patterns: vec!["src/**".into()] };
+        let s = SparseScope {
+            patterns: vec!["src/**".into()],
+        };
         let tree = [
             "src/a.rs".to_string(),
             "docs/b.md".to_string(),
@@ -197,7 +208,9 @@ mod tests {
     fn a_scope_survives_a_save_and_load() {
         let conn = crate::store::tests::mem_db();
         assert!(SparseScope::load(&conn).unwrap().is_empty());
-        let s = SparseScope { patterns: vec!["src/**".into(), "docs".into()] };
+        let s = SparseScope {
+            patterns: vec!["src/**".into(), "docs".into()],
+        };
         s.save(&conn).unwrap();
         assert_eq!(SparseScope::load(&conn).unwrap(), s);
         SparseScope::clear(&conn).unwrap();
@@ -206,7 +219,9 @@ mod tests {
 
     #[test]
     fn two_patterns_combine_rather_than_replacing() {
-        let s = SparseScope { patterns: vec!["src/**".into(), "tests/**".into()] };
+        let s = SparseScope {
+            patterns: vec!["src/**".into(), "tests/**".into()],
+        };
         assert!(s.contains("src/a.rs"));
         assert!(s.contains("tests/b.rs"));
         assert!(!s.contains("docs/c.md"));

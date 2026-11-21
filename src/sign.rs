@@ -135,10 +135,10 @@ pub fn verify(
     parent: Option<&str>,
     signature_hex: &str,
 ) -> ZResult<()> {
-    let public = hex::decode(public_hex.trim())
-        .map_err(|_| bad("the public key is not valid hex"))?;
-    let signature = hex::decode(signature_hex.trim())
-        .map_err(|_| bad("the signature is not valid hex"))?;
+    let public =
+        hex::decode(public_hex.trim()).map_err(|_| bad("the public key is not valid hex"))?;
+    let signature =
+        hex::decode(signature_hex.trim()).map_err(|_| bad("the signature is not valid hex"))?;
     let payload = signed_payload(id, message, author, parent);
     UnparsedPublicKey::new(&ring::signature::ED25519, &public)
         .verify(&payload, &signature)
@@ -164,8 +164,15 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let key = SigningKey::generate(&path).unwrap();
         let sig = key.sign_changeset("csabc", "a message", "alice", Some("csparent"));
-        verify(&key.public_hex(), "csabc", "a message", "alice", Some("csparent"), &sig)
-            .expect("a signature made by this key must verify");
+        verify(
+            &key.public_hex(),
+            "csabc",
+            "a message",
+            "alice",
+            Some("csparent"),
+            &sig,
+        )
+        .expect("a signature made by this key must verify");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -175,9 +182,16 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let key = SigningKey::generate(&path).unwrap();
         let sig = key.sign_changeset("csabc", "the real message", "alice", None);
-        let err = verify(&key.public_hex(), "csabc", "a different message", "alice", None, &sig)
-            .unwrap_err()
-            .to_string();
+        let err = verify(
+            &key.public_hex(),
+            "csabc",
+            "a different message",
+            "alice",
+            None,
+            &sig,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("does not match"), "unhelpful message: {}", err);
         let _ = std::fs::remove_file(&path);
     }
@@ -232,7 +246,11 @@ mod tests {
             Ok(_) => panic!("replacing a key silently would strand every signature it made"),
             Err(e) => {
                 let text = e.to_string();
-                assert!(text.contains("already exists"), "unhelpful message: {}", text);
+                assert!(
+                    text.contains("already exists"),
+                    "unhelpful message: {}",
+                    text
+                );
             }
         }
         let _ = std::fs::remove_file(&path);

@@ -55,14 +55,15 @@ pub fn encode(base: &str, new: &str) -> Option<Vec<Op>> {
         // become one Copy rather than many.
         let mut run = 0usize;
         let mut k = mi;
-        while k < matches.len()
-            && matches[k].0 == ai_start + run
-            && matches[k].1 == bi_start + run
+        while k < matches.len() && matches[k].0 == ai_start + run && matches[k].1 == bi_start + run
         {
             run += 1;
             k += 1;
         }
-        ops.push(Op::Copy { start: ai_start, count: run });
+        ops.push(Op::Copy {
+            start: ai_start,
+            count: run,
+        });
         bi = bi_start + run;
         mi = k;
     }
@@ -283,8 +284,12 @@ mod tests {
     #[test]
     fn an_unrelated_file_produces_no_useful_delta() {
         // Two files with nothing in common: correct but not worth storing.
-        let base = (0..50).map(|i| format!("alpha {}\n", i)).collect::<String>();
-        let new = (0..50).map(|i| format!("omega {}\n", i)).collect::<String>();
+        let base = (0..50)
+            .map(|i| format!("alpha {}\n", i))
+            .collect::<String>();
+        let new = (0..50)
+            .map(|i| format!("omega {}\n", i))
+            .collect::<String>();
         match encode(&base, &new) {
             None => {}
             Some(ops) => {
@@ -305,7 +310,10 @@ mod tests {
     #[test]
     fn a_corrupt_delta_returns_none_instead_of_panicking() {
         // Copy past the end of the base.
-        let ops = vec![Op::Copy { start: 500, count: 10 }];
+        let ops = vec![Op::Copy {
+            start: 500,
+            count: 10,
+        }];
         assert_eq!(apply("one\ntwo\n", &ops), None);
 
         // A truncated byte stream.

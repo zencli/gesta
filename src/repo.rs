@@ -1,14 +1,14 @@
 //! Changeset lifecycle, blame derivation, merge, checkout.
 
 use rusqlite::{params, Connection, OptionalExtension};
-use std::fs;
 use std::collections::HashSet;
+use std::fs;
 use std::path::Path;
 
 use crate::merge::{diff_hunks, merge3, MergeResult};
 use crate::store::{
-    branch_head, current_branch, get_object, hash_at_point, hash_content, latest_hash,
-    merge_base, new_changeset_id, put_object, put_object_against,
+    branch_head, current_branch, get_object, hash_at_point, hash_content, latest_hash, merge_base,
+    new_changeset_id, put_object, put_object_against,
 };
 use crate::worktree::IgnoreRules;
 use crate::{bad, now, repo_dir, ZResult};
@@ -100,7 +100,11 @@ pub fn diff_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult<Wo
     if let Some(first) = scanned.unreadable.first() {
         // A file that cannot be read cannot be compared, so reporting it as
         // unchanged or missing would be a lie either way.
-        return Err(bad(format!("cannot read {} ({} more)", first, scanned.unreadable.len() - 1)));
+        return Err(bad(format!(
+            "cannot read {} ({} more)",
+            first,
+            scanned.unreadable.len() - 1
+        )));
     }
     d.skipped_binary = scanned.skipped_binary;
     d.cached = scanned.cached;
@@ -142,7 +146,6 @@ pub struct NewChangeset {
     pub skipped: Vec<String>,
 }
 
-
 pub fn create_changeset(
     conn: &Connection,
     root: &Path,
@@ -172,11 +175,9 @@ pub fn create_changeset_scoped(
         if wanted.is_empty() {
             return true;
         }
-        wanted.iter().any(|w| {
-            rel == w
-                || rel.starts_with(&format!("{w}/"))
-                || w.is_empty()
-        })
+        wanted
+            .iter()
+            .any(|w| rel == w || rel.starts_with(&format!("{w}/")) || w.is_empty())
     };
     let branch = current_branch(conn)?;
     let rules = load_ignore_rules(root, conn)?;
@@ -192,7 +193,11 @@ pub fn create_changeset_scoped(
     let attrs = crate::attributes::Rules::load(root);
     let scanned = crate::cache::scan_with_cache(conn, root, &rules, &attrs)?;
     if let Some(first) = scanned.unreadable.first() {
-        return Err(bad(format!("cannot read {} ({} more)", first, scanned.unreadable.len() - 1)));
+        return Err(bad(format!(
+            "cannot read {} ({} more)",
+            first,
+            scanned.unreadable.len() - 1
+        )));
     }
     // Two files on disk can name one repository path only if a name means something different
     // from what the store thinks a separator is. Say which two, rather than letting the insert
@@ -284,7 +289,12 @@ pub fn create_changeset_scoped(
     }
     tx.commit()?;
 
-    Ok(Some(NewChangeset { id, files, deleted, skipped }))
+    Ok(Some(NewChangeset {
+        id,
+        files,
+        deleted,
+        skipped,
+    }))
 }
 
 /// Commit one pending changeset. Returns files written; `0` means it was
@@ -297,7 +307,8 @@ pub fn commit_one(conn: &Connection, id: &str) -> ZResult<usize> {
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )
         .optional()?;
-    let (status, branch) = row.ok_or_else(|| crate::error::Error::not_found(format!("no such changeset: {}", id)))?;
+    let (status, branch) =
+        row.ok_or_else(|| crate::error::Error::not_found(format!("no such changeset: {}", id)))?;
     if status == "committed" {
         return Ok(0);
     }
@@ -307,14 +318,15 @@ pub fn commit_one(conn: &Connection, id: &str) -> ZResult<usize> {
             "SELECT path, old_hash, new_hash FROM changeset_files
              WHERE changeset_id = ?1 ORDER BY path",
         )?;
-        let rows = stmt.query_map(params![id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, Option<String>>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = stmt
+            .query_map(params![id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
 
@@ -326,7 +338,10 @@ pub fn commit_one(conn: &Connection, id: &str) -> ZResult<usize> {
     // or orphans an earlier one.
     let head_now = branch_head(&tx, &branch)?;
     if head_now.as_deref() != Some(id) {
-        tx.execute("UPDATE changesets SET parent = ?1 WHERE id = ?2", params![head_now, id])?;
+        tx.execute(
+            "UPDATE changesets SET parent = ?1 WHERE id = ?2",
+            params![head_now, id],
+        )?;
     }
 
     let mut written = 0usize;
@@ -371,7 +386,10 @@ pub fn commit_one(conn: &Connection, id: &str) -> ZResult<usize> {
         }
     }
 
-    tx.execute("UPDATE changesets SET status = 'committed' WHERE id = ?1", params![id])?;
+    tx.execute(
+        "UPDATE changesets SET status = 'committed' WHERE id = ?1",
+        params![id],
+    )?;
     crate::store::set_branch_head(&tx, &branch, id)?;
 
     recompute_blame(&tx, &touched)?;
@@ -550,8 +568,9 @@ fn recompute_blame_at(conn: &Connection, path: &str, hash: &str) -> ZResult<()> 
         }
     }
     conn.execute("DELETE FROM blame_ranges WHERE path = ?1", params![path])?;
-    let mut ins =
-        conn.prepare("INSERT INTO blame_ranges(path, start_line, end_line, changeset_id) VALUES(?1,?2,?3,?4)")?;
+    let mut ins = conn.prepare(
+        "INSERT INTO blame_ranges(path, start_line, end_line, changeset_id) VALUES(?1,?2,?3,?4)",
+    )?;
     for (start, end, cs) in ranges {
         ins.execute(params![path, start, end, cs])?;
     }
@@ -637,7 +656,6 @@ pub fn recompute_blame(conn: &Connection, files: &[(String, String)]) -> ZResult
         // passes index by line number. It is built by expanding ranges rather than by cloning per
         // line, so a file written in one commit costs one range and one pass, not one range and
         // N clones.
-
 
         // The version before this one. Its lines tell which of the previous blame
         // rows still describe a line that survived.
@@ -756,8 +774,8 @@ pub fn recompute_blame(conn: &Connection, files: &[(String, String)]) -> ZResult
 
         // The span covered by the ranges that differ. A range present in one list and not the other
         // is inside it, so deleting the span and rewriting it leaves both lists in agreement.
-        let first_diff = (0..ranges.len().max(stored.len()))
-            .find(|k| ranges.get(*k) != stored.get(*k));
+        let first_diff =
+            (0..ranges.len().max(stored.len())).find(|k| ranges.get(*k) != stored.get(*k));
         let Some(first_diff) = first_diff else {
             return Ok(());
         };
@@ -787,8 +805,6 @@ pub fn recompute_blame(conn: &Connection, files: &[(String, String)]) -> ZResult
     }
     Ok(())
 }
-
-
 
 /// Append a conflict copy of a file so a failed merge never loses the other side.
 pub fn write_conflict_copy(root: &Path, path: &str, theirs: &str) -> ZResult<String> {
@@ -847,7 +863,9 @@ pub fn merge_preview(
         None => std::collections::HashSet::new(),
     };
 
-    let collect = |ids: &[String], exclude: &std::collections::HashSet<String>| -> ZResult<Vec<String>> {
+    let collect = |ids: &[String],
+                   exclude: &std::collections::HashSet<String>|
+     -> ZResult<Vec<String>> {
         let mut out = std::collections::HashSet::new();
         let mut stmt = conn.prepare("SELECT path FROM changeset_files WHERE changeset_id = ?1")?;
         for id in ids {
@@ -909,17 +927,32 @@ pub fn merge_branch(
     let tgt_head = branch_head(conn, target)?;
 
     let Some(src_head) = src_head else {
-        return Ok(MergeOutcome { applied: Vec::new(), conflicts: Vec::new(), reports: Vec::new(), merge_changeset: None });
+        return Ok(MergeOutcome {
+            applied: Vec::new(),
+            conflicts: Vec::new(),
+            reports: Vec::new(),
+            merge_changeset: None,
+        });
     };
     if Some(src_head.clone()) == tgt_head {
-        return Ok(MergeOutcome { applied: Vec::new(), conflicts: Vec::new(), reports: Vec::new(), merge_changeset: None });
+        return Ok(MergeOutcome {
+            applied: Vec::new(),
+            conflicts: Vec::new(),
+            reports: Vec::new(),
+            merge_changeset: None,
+        });
     }
 
     // Fast-forward when the target is already an ancestor of the source.
     if let Some(t) = &tgt_head {
         let tgt_anc = crate::store::ancestors(conn, t)?;
         if tgt_anc.contains(&src_head) {
-            return Ok(MergeOutcome { applied: Vec::new(), conflicts: Vec::new(), reports: Vec::new(), merge_changeset: None });
+            return Ok(MergeOutcome {
+                applied: Vec::new(),
+                conflicts: Vec::new(),
+                reports: Vec::new(),
+                merge_changeset: None,
+            });
         }
         let src_anc = crate::store::ancestors(conn, &src_head)?;
         if src_anc.contains(t) {
@@ -953,7 +986,9 @@ pub fn merge_branch(
         None => std::collections::HashSet::new(),
     };
 
-    let collect = |ids: &[String], exclude: &std::collections::HashSet<String>| -> ZResult<Vec<String>> {
+    let collect = |ids: &[String],
+                   exclude: &std::collections::HashSet<String>|
+     -> ZResult<Vec<String>> {
         let mut out = std::collections::HashSet::new();
         let mut stmt = conn.prepare("SELECT path FROM changeset_files WHERE changeset_id = ?1")?;
         for id in ids {
@@ -1037,7 +1072,12 @@ pub fn merge_branch(
             }
             fs::write(&target_path, text)?;
         }
-        return Ok(MergeOutcome { applied: Vec::new(), conflicts, reports, merge_changeset: None });
+        return Ok(MergeOutcome {
+            applied: Vec::new(),
+            conflicts,
+            reports,
+            merge_changeset: None,
+        });
     }
 
     // Record the merge as a changeset with two parents.
@@ -1093,7 +1133,12 @@ pub fn merge_branch(
         .collect();
     recompute_blame(conn, &touched)?;
 
-    Ok(MergeOutcome { applied: vec![id.clone()], conflicts: Vec::new(), reports: Vec::new(), merge_changeset: Some(id) })
+    Ok(MergeOutcome {
+        applied: vec![id.clone()],
+        conflicts: Vec::new(),
+        reports: Vec::new(),
+        merge_changeset: Some(id),
+    })
 }
 
 /// Apply the change one changeset made onto the current branch.
@@ -1238,7 +1283,11 @@ pub fn cherry_pick(
         )
         .unwrap_or_else(|_| "picked".to_string());
 
-    let id = new_changeset_id(conn, &format!("pick {}: {}", &source_id[..source_id.len().min(14)], msg), author)?;
+    let id = new_changeset_id(
+        conn,
+        &format!("pick {}: {}", &source_id[..source_id.len().min(14)], msg),
+        author,
+    )?;
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "INSERT INTO changesets(id, message, author, created_at, status, parent, parent2, branch)
@@ -1315,9 +1364,11 @@ pub fn cherry_pick(
 /// Diff two changesets (or a changeset against its first parent).
 pub fn changeset_diff(conn: &Connection, id: &str) -> ZResult<Vec<FileDiff>> {
     let parent: Option<String> = conn
-        .query_row("SELECT parent FROM changesets WHERE id = ?1", params![id], |r| {
-            r.get::<_, Option<String>>(0)
-        })
+        .query_row(
+            "SELECT parent FROM changesets WHERE id = ?1",
+            params![id],
+            |r| r.get::<_, Option<String>>(0),
+        )
         .optional()?
         .flatten();
 
@@ -1326,14 +1377,15 @@ pub fn changeset_diff(conn: &Connection, id: &str) -> ZResult<Vec<FileDiff>> {
             "SELECT path, old_hash, new_hash FROM changeset_files
              WHERE changeset_id = ?1 ORDER BY path",
         )?;
-        let rows = stmt.query_map(params![id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, Option<String>>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = stmt
+            .query_map(params![id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
 
@@ -1434,8 +1486,10 @@ pub fn tree_at(conn: &Connection, changeset: &str) -> ZResult<Vec<(String, Strin
         placeholders
     );
     let mut stmt = conn.prepare(&sql)?;
-    let params: Vec<&dyn rusqlite::ToSql> =
-        reachable.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let params: Vec<&dyn rusqlite::ToSql> = reachable
+        .iter()
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
     let rows = stmt
         .query_map(params.as_slice(), |r| {
             Ok((
@@ -1521,7 +1575,6 @@ pub fn committed_tree(
     }
     Ok(out)
 }
-
 
 /// Write every file of `branch` to disk. Used after a push and after a clone so
 /// the working tree never lags behind the branch head.
@@ -1633,8 +1686,6 @@ pub fn restore_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult
     Ok((written, removed))
 }
 
-
-
 /// One path's change between two revisions: the lines removed and the lines added.
 pub type PathDiff = (String, Vec<String>, Vec<String>);
 
@@ -1678,14 +1729,17 @@ pub fn parent_of(conn: &Connection, rev: &str) -> ZResult<Option<String>> {
 /// The command therefore resolves the parent itself; `diff_revs` keeps the strict reading because a
 /// caller that means the empty tree says so with an explicit `--from`, and a function that guessed
 /// would be unusable for the case that needs it.
-pub fn diff_revs(conn: &Connection, from: Option<&str>, to: Option<&str>) -> ZResult<Vec<PathDiff>> {
+pub fn diff_revs(
+    conn: &Connection,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> ZResult<Vec<PathDiff>> {
     fn tree_of(conn: &Connection, rev: Option<&str>) -> ZResult<Vec<(String, String)>> {
         match rev {
             None => Ok(Vec::new()),
             Some(r) => {
-                let id = crate::store::resolve_rev(conn, r)?.ok_or_else(|| {
-                    bad(format!("no such revision: {}", r))
-                })?;
+                let id = crate::store::resolve_rev(conn, r)?
+                    .ok_or_else(|| bad(format!("no such revision: {}", r)))?;
                 tree_at(conn, &id)
             }
         }
@@ -1887,8 +1941,12 @@ pub fn score_change_calibrated(
         if name.contains("test") || name.contains("spec") || lower.contains("/tests/") {
             has_test = true;
         }
-        if name == "cargo.toml" || name == "cargo.lock" || name == "package.json"
-            || name == "package-lock.json" || name == "requirements.txt" || name == "go.mod"
+        if name == "cargo.toml"
+            || name == "cargo.lock"
+            || name == "package.json"
+            || name == "package-lock.json"
+            || name == "requirements.txt"
+            || name == "go.mod"
         {
             has_dep = true;
         }
@@ -1928,7 +1986,8 @@ pub fn score_change_calibrated(
     }
 
     if r.reasons.is_empty() {
-        r.reasons.push("small, text only, tests present or not needed".to_string());
+        r.reasons
+            .push("small, text only, tests present or not needed".to_string());
     }
     Ok(r)
 }
@@ -1990,7 +2049,13 @@ impl RevertHistory {
     /// The comparison is coarse on purpose: a size band, whether a test was touched, and
     /// whether a manifest was touched. A finer match would find nothing in a small
     /// repository and would be pretending to know more than the data supports.
-    fn shapes_matching(&self, paths: &[&str], lines: usize, has_test: bool, has_dep: bool) -> usize {
+    fn shapes_matching(
+        &self,
+        paths: &[&str],
+        lines: usize,
+        has_test: bool,
+        has_dep: bool,
+    ) -> usize {
         let band = |n: usize| match n {
             0..=100 => 0,
             101..=400 => 1,
@@ -2028,11 +2093,7 @@ fn file_hash_at(conn: &Connection, path: &str) -> ZResult<Option<String>> {
 /// steps, and a reviewer wants each step separately, in order, rather than the net
 /// effect. Comparing the endpoints alone loses the intermediate reasoning, which is
 /// most of what there is to review when an agent wrote the change.
-pub fn review_stack(
-    conn: &Connection,
-    from: Option<&str>,
-    to: &str,
-) -> ZResult<Vec<StackStep>> {
+pub fn review_stack(conn: &Connection, from: Option<&str>, to: &str) -> ZResult<Vec<StackStep>> {
     let head = crate::store::resolve_rev(conn, to)?
         .ok_or_else(|| bad(format!("no such revision: {}", to)))?;
 
@@ -2127,144 +2188,149 @@ pub fn land_branch(
     merge_branch(conn, root, source, target, author)
 }
 
+#[test]
+fn blame_survives_a_line_inserted_in_the_middle() {
+    // The rewrite only touches the span whose owner changed. A prefix and suffix that kept
+    // their author must stay untouched, and the inserted line must belong to the commit that
+    // added it, not to the one before.
+    let d = std::env::temp_dir().join(format!("gesta-blame-mid-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join(".gesta")).unwrap();
+    let conn = crate::store::open_db(&d).unwrap();
+    crate::store::init_schema(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, 0, NULL)",
+        [],
+    )
+    .unwrap();
 
-    #[test]
-    fn blame_survives_a_line_inserted_in_the_middle() {
-        // The rewrite only touches the span whose owner changed. A prefix and suffix that kept
-        // their author must stay untouched, and the inserted line must belong to the commit that
-        // added it, not to the one before.
-        let d = std::env::temp_dir().join(format!("gesta-blame-mid-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(d.join(".gesta")).unwrap();
-        let conn = crate::store::open_db(&d).unwrap();
-        crate::store::init_schema(&conn).unwrap();
-        conn.execute(
-            "INSERT INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, 0, NULL)",
-            [],
-        )
-        .unwrap();
-
-        let steps = [
-            ("1\n2\n3\n4\n5\n", "alice"),
-            ("1\nNEW\n2\n3\n4\n5\n", "bob"),
-            ("1\nNEW\n2\n4\n5\n", "carol"),
-            ("1\nNEW\n2\n4\n5\n6\n", "dave"),
-        ];
-        for (content, author) in steps {
-            std::fs::write(d.join("f.txt"), content).unwrap();
-            crate::repo::create_changeset(&conn, &d, "step", author).unwrap();
-            let id: String = conn
-                .query_row(
-                    "SELECT id FROM changesets WHERE status='pending' ORDER BY created_at DESC LIMIT 1",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            crate::repo::commit_one(&conn, &id).unwrap();
-        }
-
-        // Read the ranges back and expand them, which is what `blame` prints.
-        let mut stmt = conn
-            .prepare(
-                "SELECT b.start_line, b.end_line, c.author FROM blame_ranges b
-                 JOIN changesets c ON c.id = b.changeset_id
-                 WHERE b.path = 'f.txt' ORDER BY b.start_line",
+    let steps = [
+        ("1\n2\n3\n4\n5\n", "alice"),
+        ("1\nNEW\n2\n3\n4\n5\n", "bob"),
+        ("1\nNEW\n2\n4\n5\n", "carol"),
+        ("1\nNEW\n2\n4\n5\n6\n", "dave"),
+    ];
+    for (content, author) in steps {
+        std::fs::write(d.join("f.txt"), content).unwrap();
+        crate::repo::create_changeset(&conn, &d, "step", author).unwrap();
+        let id: String = conn
+            .query_row(
+                "SELECT id FROM changesets WHERE status='pending' ORDER BY created_at DESC LIMIT 1",
+                [],
+                |r| r.get(0),
             )
             .unwrap();
+        crate::repo::commit_one(&conn, &id).unwrap();
+    }
+
+    // Read the ranges back and expand them, which is what `blame` prints.
+    let mut stmt = conn
+        .prepare(
+            "SELECT b.start_line, b.end_line, c.author FROM blame_ranges b
+                 JOIN changesets c ON c.id = b.changeset_id
+                 WHERE b.path = 'f.txt' ORDER BY b.start_line",
+        )
+        .unwrap();
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let mut authors: Vec<String> = Vec::new();
+    for (start, end, author) in rows {
+        for _ in start..=end {
+            authors.push(author.clone());
+        }
+    }
+
+    // The shape that matters: line 1 is alice, line 2 (NEW) is bob, the last is dave, and the
+    // author of a middle line that never changed is still alice.
+    assert_eq!(
+        authors.first().map(|s| s.as_str()),
+        Some("alice"),
+        "first: {:?}",
+        authors
+    );
+    assert_eq!(
+        authors.get(1).map(|s| s.as_str()),
+        Some("bob"),
+        "inserted line: {:?}",
+        authors
+    );
+    assert_eq!(
+        authors.last().map(|s| s.as_str()),
+        Some("dave"),
+        "appended line: {:?}",
+        authors
+    );
+    assert_eq!(authors.len(), 6, "one entry per line: {:?}", authors);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_scoped_snapshot_leaves_another_writer_files_alone() {
+    // Two writers in one checkout is the case the whole feature exists for. Without the path
+    // filter each snapshot records every changed file, so the second writer's commit carries the
+    // first writer's work under its own name.
+    let d = std::env::temp_dir().join(format!("gesta-scope-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join(".gesta")).unwrap();
+    std::fs::create_dir_all(d.join("sub")).unwrap();
+    let conn = crate::store::open_db(&d).unwrap();
+    crate::store::init_schema(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, 0, NULL)",
+        [],
+    )
+    .unwrap();
+
+    std::fs::write(d.join("a.txt"), "a\n").unwrap();
+    std::fs::write(d.join("sub/c.txt"), "c\n").unwrap();
+    let base = crate::repo::create_changeset(&conn, &d, "base", "base").unwrap();
+    crate::repo::commit_one(&conn, &base.unwrap().id).unwrap();
+
+    std::fs::write(d.join("a.txt"), "a2\n").unwrap();
+    std::fs::write(d.join("sub/c.txt"), "c2\n").unwrap();
+
+    let mine =
+        crate::repo::create_changeset_scoped(&conn, &d, "mine", "alice", &["a.txt".to_string()])
+            .unwrap()
+            .expect("alice changed a.txt");
+    let theirs =
+        crate::repo::create_changeset_scoped(&conn, &d, "theirs", "bob", &["sub".to_string()])
+            .unwrap()
+            .expect("bob changed sub/c.txt");
+
+    let paths_of = |id: &str| -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT path FROM changeset_files WHERE changeset_id = ?1 ORDER BY path")
+            .unwrap();
         let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })
+            .query_map(params![id], |r| r.get::<_, String>(0))
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        let mut authors: Vec<String> = Vec::new();
-        for (start, end, author) in rows {
-            for _ in start..=end {
-                authors.push(author.clone());
-            }
-        }
+        rows
+    };
 
-        // The shape that matters: line 1 is alice, line 2 (NEW) is bob, the last is dave, and the
-        // author of a middle line that never changed is still alice.
-        assert_eq!(authors.first().map(|s| s.as_str()), Some("alice"), "first: {:?}", authors);
-        assert_eq!(authors.get(1).map(|s| s.as_str()), Some("bob"), "inserted line: {:?}", authors);
-        assert_eq!(authors.last().map(|s| s.as_str()), Some("dave"), "appended line: {:?}", authors);
-        assert_eq!(authors.len(), 6, "one entry per line: {:?}", authors);
-        let _ = std::fs::remove_dir_all(&d);
-    }
+    assert_eq!(paths_of(&mine.id), vec!["a.txt".to_string()]);
+    assert_eq!(paths_of(&theirs.id), vec!["sub/c.txt".to_string()]);
 
-
-    #[test]
-    fn a_scoped_snapshot_leaves_another_writer_files_alone() {
-        // Two writers in one checkout is the case the whole feature exists for. Without the path
-        // filter each snapshot records every changed file, so the second writer's commit carries the
-        // first writer's work under its own name.
-        let d = std::env::temp_dir().join(format!("gesta-scope-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(d.join(".gesta")).unwrap();
-        std::fs::create_dir_all(d.join("sub")).unwrap();
-        let conn = crate::store::open_db(&d).unwrap();
-        crate::store::init_schema(&conn).unwrap();
-        conn.execute(
-            "INSERT INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, 0, NULL)",
-            [],
-        )
+    // And with no paths, the snapshot is the whole tree, which is what one writer wants.
+    std::fs::write(d.join("a.txt"), "a3\n").unwrap();
+    let all = crate::repo::create_changeset(&conn, &d, "all", "carol")
+        .unwrap()
         .unwrap();
+    assert!(paths_of(&all.id).contains(&"a.txt".to_string()));
 
-        std::fs::write(d.join("a.txt"), "a\n").unwrap();
-        std::fs::write(d.join("sub/c.txt"), "c\n").unwrap();
-        let base = crate::repo::create_changeset(&conn, &d, "base", "base").unwrap();
-        crate::repo::commit_one(&conn, &base.unwrap().id).unwrap();
-
-        std::fs::write(d.join("a.txt"), "a2\n").unwrap();
-        std::fs::write(d.join("sub/c.txt"), "c2\n").unwrap();
-
-        let mine = crate::repo::create_changeset_scoped(
-            &conn,
-            &d,
-            "mine",
-            "alice",
-            &["a.txt".to_string()],
-        )
-        .unwrap()
-        .expect("alice changed a.txt");
-        let theirs = crate::repo::create_changeset_scoped(
-            &conn,
-            &d,
-            "theirs",
-            "bob",
-            &["sub".to_string()],
-        )
-        .unwrap()
-        .expect("bob changed sub/c.txt");
-
-        let paths_of = |id: &str| -> Vec<String> {
-            let mut stmt = conn
-                .prepare("SELECT path FROM changeset_files WHERE changeset_id = ?1 ORDER BY path")
-                .unwrap();
-            let rows = stmt
-                .query_map(params![id], |r| r.get::<_, String>(0))
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            rows
-        };
-
-        assert_eq!(paths_of(&mine.id), vec!["a.txt".to_string()]);
-        assert_eq!(paths_of(&theirs.id), vec!["sub/c.txt".to_string()]);
-
-        // And with no paths, the snapshot is the whole tree, which is what one writer wants.
-        std::fs::write(d.join("a.txt"), "a3\n").unwrap();
-        let all = crate::repo::create_changeset(&conn, &d, "all", "carol").unwrap().unwrap();
-        assert!(paths_of(&all.id).contains(&"a.txt".to_string()));
-
-        let _ = std::fs::remove_dir_all(&d);
-    }
+    let _ = std::fs::remove_dir_all(&d);
+}
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -2368,7 +2434,10 @@ pub(crate) mod tests {
         commit_as(&conn, "c1", "alice", "f.txt", "same\nx\nsame\n");
         commit_as(&conn, "c2", "bob", "f.txt", "same\nx\nsame\ny\n");
 
-        assert_eq!(authors(&conn, "f.txt"), vec!["alice", "alice", "alice", "bob"]);
+        assert_eq!(
+            authors(&conn, "f.txt"),
+            vec!["alice", "alice", "alice", "bob"]
+        );
     }
 
     #[test]
@@ -2409,7 +2478,11 @@ pub(crate) mod tests {
         commit_files(&conn, "cs1", "first", &[("f.txt", "alpha\nbeta\n")]);
 
         let versions: i64 = conn
-            .query_row("SELECT COUNT(*) FROM file_versions WHERE path='f.txt'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM file_versions WHERE path='f.txt'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(versions, 1);
         // Two lines written by one changeset are one range now. The count of rows is not the count
@@ -2431,7 +2504,9 @@ pub(crate) mod tests {
         let conn = mem_db();
         commit_files(&conn, "cs1", "m", &[("f.txt", "x\n")]);
         assert_eq!(commit_one(&conn, "cs1").unwrap(), 0);
-        let versions: i64 = conn.query_row("SELECT COUNT(*) FROM file_versions", [], |r| r.get(0)).unwrap();
+        let versions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM file_versions", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(versions, 1);
     }
 
@@ -2441,7 +2516,11 @@ pub(crate) mod tests {
         commit_files(&conn, "cs1", "m", &[("f.txt", "same\n")]);
         commit_files(&conn, "cs2", "m2", &[("f.txt", "same\n")]);
         let versions: i64 = conn
-            .query_row("SELECT COUNT(*) FROM file_versions WHERE path='f.txt'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM file_versions WHERE path='f.txt'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(versions, 1, "identical content must not add a version");
     }
@@ -2500,8 +2579,11 @@ pub(crate) mod tests {
         // Through the helper, so this test asks the same question as the others: which line
         // belongs to whom, not how the answer is stored.
         let blamed = authors(&conn, "f.txt");
-        assert_eq!(blamed, vec!["agentA", "agentA", "agentA", "agentB"],
-            "the appended duplicate belongs to agentB");
+        assert_eq!(
+            blamed,
+            vec!["agentA", "agentA", "agentA", "agentB"],
+            "the appended duplicate belongs to agentB"
+        );
     }
 
     #[test]
@@ -2523,7 +2605,8 @@ pub(crate) mod tests {
         // ours on main
         fs::write(tmp.join("shared.txt"), "ONE\ntwo\nthree\n").unwrap();
         commit_files(&conn, "cs2", "ours", &[("shared.txt", "ONE\ntwo\nthree\n")]);
-        conn.execute("UPDATE changesets SET parent='cs1' WHERE id='cs2'", []).unwrap();
+        conn.execute("UPDATE changesets SET parent='cs1' WHERE id='cs2'", [])
+            .unwrap();
 
         // theirs on dev
         fs::write(tmp.join("shared.txt"), "one\ntwo\nTHREE\n").unwrap();
@@ -2547,7 +2630,10 @@ pub(crate) mod tests {
         assert!(out.merge_changeset.is_some());
 
         let on_disk = fs::read_to_string(tmp.join("shared.txt")).unwrap();
-        assert_eq!(on_disk, "ONE\ntwo\nTHREE\n", "merged content must reach the working copy");
+        assert_eq!(
+            on_disk, "ONE\ntwo\nTHREE\n",
+            "merged content must reach the working copy"
+        );
         let head = branch_head(&conn, "main").unwrap().unwrap();
         assert_eq!(Some(head), out.merge_changeset);
 
@@ -2571,7 +2657,8 @@ pub(crate) mod tests {
 
         fs::write(tmp.join("s.txt"), "OURS\n").unwrap();
         commit_files(&conn, "cs2", "ours", &[("s.txt", "OURS\n")]);
-        conn.execute("UPDATE changesets SET parent='cs1' WHERE id='cs2'", []).unwrap();
+        conn.execute("UPDATE changesets SET parent='cs1' WHERE id='cs2'", [])
+            .unwrap();
 
         conn.execute(
             "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
@@ -2591,9 +2678,20 @@ pub(crate) mod tests {
         let before_head = branch_head(&conn, "main").unwrap();
         let out = merge_branch(&conn, &tmp, "dev", "main", "a").unwrap();
 
-        assert_eq!(out.conflicts, vec!["s.txt".to_string()], "must report the conflict");
-        assert_eq!(branch_head(&conn, "main").unwrap(), before_head, "head must not move");
-        assert!(tmp.join("s.txt.theirs").exists(), "theirs must be preserved on disk");
+        assert_eq!(
+            out.conflicts,
+            vec!["s.txt".to_string()],
+            "must report the conflict"
+        );
+        assert_eq!(
+            branch_head(&conn, "main").unwrap(),
+            before_head,
+            "head must not move"
+        );
+        assert!(
+            tmp.join("s.txt.theirs").exists(),
+            "theirs must be preserved on disk"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -2601,7 +2699,12 @@ pub(crate) mod tests {
     #[test]
     fn tree_at_drops_a_path_that_a_later_changeset_deleted() {
         let conn = mem_db();
-        commit_files(&conn, "cs1", "two files", &[("gone.txt", "bye\n"), ("stay.txt", "hi\n")]);
+        commit_files(
+            &conn,
+            "cs1",
+            "two files",
+            &[("gone.txt", "bye\n"), ("stay.txt", "hi\n")],
+        );
 
         // A deletion is recorded with new_hash = NULL and no file_version row.
         conn.execute(
@@ -2620,7 +2723,11 @@ pub(crate) mod tests {
 
         let tree = tree_at(&conn, "cs2").unwrap();
         let paths: Vec<&str> = tree.iter().map(|(p, _)| p.as_str()).collect();
-        assert_eq!(paths, vec!["stay.txt"], "a deleted path must leave the tree");
+        assert_eq!(
+            paths,
+            vec!["stay.txt"],
+            "a deleted path must leave the tree"
+        );
 
         // The earlier changeset still sees both.
         let old = tree_at(&conn, "cs1").unwrap();
@@ -2648,7 +2755,9 @@ pub(crate) mod tests {
         for rel in ["keep.txt", "gone.txt", "sub/deep.txt"] {
             std::fs::write(d.join(rel), "x\n").unwrap();
         }
-        let cs = crate::repo::create_changeset(&conn, &d, "base", "a").unwrap().unwrap();
+        let cs = crate::repo::create_changeset(&conn, &d, "base", "a")
+            .unwrap()
+            .unwrap();
         crate::repo::commit_one(&conn, &cs.id).unwrap();
 
         std::fs::remove_file(d.join("gone.txt")).unwrap();
@@ -2662,7 +2771,10 @@ pub(crate) mod tests {
             vec!["gone.txt".to_string(), "sub/deep.txt".to_string()],
             "both removals must be reported"
         );
-        assert!(delta.added.is_empty() && delta.modified.is_empty(), "nothing was added or changed");
+        assert!(
+            delta.added.is_empty() && delta.modified.is_empty(),
+            "nothing was added or changed"
+        );
         assert_eq!(delta.unchanged, 1, "keep.txt is unchanged");
 
         let _ = std::fs::remove_dir_all(&d);
@@ -2686,15 +2798,12 @@ pub(crate) mod tests {
         assert!(r.contains(&"cs1".to_string()));
         assert!(r.contains(&"cs2".to_string()));
         let parent: Option<String> = conn
-            .query_row("SELECT parent FROM changesets WHERE id='cs2'", [], |r| r.get(0))
+            .query_row("SELECT parent FROM changesets WHERE id='cs2'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(parent.as_deref(), Some("cs1"));
     }
-
-
-
-
-
 
     /// Make two branches from one base, each with its own edit to `f.txt`.
     fn two_branches(conn: &Connection, main_text: &str, side_text: &str) -> (String, String) {
@@ -2709,8 +2818,11 @@ pub(crate) mod tests {
         commit_files(conn, "side1", "side edit", &[("f.txt", side_text)]);
         conn.execute("UPDATE branches SET head = 'side1' WHERE name = 'side'", [])
             .unwrap();
-        conn.execute("UPDATE changesets SET branch = 'side' WHERE id = 'side1'", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE changesets SET branch = 'side' WHERE id = 'side1'",
+            [],
+        )
+        .unwrap();
 
         commit_files(conn, "main1", "main edit", &[("f.txt", main_text)]);
         ("side1".to_string(), "main1".to_string())
@@ -2727,9 +2839,15 @@ pub(crate) mod tests {
         std::fs::write(d.join("f.txt"), "a\nb\nc\n").unwrap();
 
         let out = cherry_pick(&conn, &d, &side, "main", "t").unwrap();
-        assert!(out.conflicts.is_empty(), "a change to a clean base must not conflict");
+        assert!(
+            out.conflicts.is_empty(),
+            "a change to a clean base must not conflict"
+        );
         let id = out.merge_changeset.expect("pick must record a changeset");
-        assert_eq!(branch_head(&conn, "main").unwrap().as_deref(), Some(id.as_str()));
+        assert_eq!(
+            branch_head(&conn, "main").unwrap().as_deref(),
+            Some(id.as_str())
+        );
 
         let content = std::fs::read_to_string(d.join("f.txt")).unwrap();
         assert_eq!(content, "a\nSIDE\nc\n");
@@ -2753,8 +2871,15 @@ pub(crate) mod tests {
         let out = cherry_pick(&conn, &d, &side, "main", "t").unwrap();
 
         assert_eq!(out.conflicts, vec!["f.txt".to_string()]);
-        assert!(out.merge_changeset.is_none(), "a conflicted pick must not record");
-        assert_eq!(branch_head(&conn, "main").unwrap(), head_before, "the head must not move");
+        assert!(
+            out.merge_changeset.is_none(),
+            "a conflicted pick must not record"
+        );
+        assert_eq!(
+            branch_head(&conn, "main").unwrap(),
+            head_before,
+            "the head must not move"
+        );
         assert_eq!(
             std::fs::read_to_string(d.join("f.txt")).unwrap(),
             "a\nMAIN\nc\n",
@@ -2781,7 +2906,10 @@ pub(crate) mod tests {
 
         let before = branch_head(&conn, "main").unwrap();
         let out = cherry_pick(&conn, &d, "edit", "main", "t").unwrap();
-        assert!(out.merge_changeset.is_none(), "nothing changed, so nothing recorded");
+        assert!(
+            out.merge_changeset.is_none(),
+            "nothing changed, so nothing recorded"
+        );
         assert_eq!(branch_head(&conn, "main").unwrap(), before);
 
         let _ = std::fs::remove_dir_all(&d);
@@ -2790,7 +2918,12 @@ pub(crate) mod tests {
     #[test]
     fn a_cherry_pick_can_delete_a_file() {
         let conn = mem_db();
-        commit_files(&conn, "base", "base", &[("f.txt", "x\n"), ("keep.txt", "k\n")]);
+        commit_files(
+            &conn,
+            "base",
+            "base",
+            &[("f.txt", "x\n"), ("keep.txt", "k\n")],
+        );
         // Record a deletion on a second commit the same way a commit does.
         conn.execute(
             "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
@@ -2818,7 +2951,10 @@ pub(crate) mod tests {
         let out = cherry_pick(&conn, &d, "del", "main", "t").unwrap();
         assert!(out.conflicts.is_empty());
         assert!(out.merge_changeset.is_some());
-        assert!(!d.join("f.txt").exists(), "the picked deletion removes the file");
+        assert!(
+            !d.join("f.txt").exists(),
+            "the picked deletion removes the file"
+        );
 
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -2898,7 +3034,11 @@ pub(crate) mod tests {
             let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
             rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
-        assert_eq!(stored, vec!["b.txt".to_string()], "the deleted path is gone");
+        assert_eq!(
+            stored,
+            vec!["b.txt".to_string()],
+            "the deleted path is gone"
+        );
     }
 
     #[test]
@@ -2988,7 +3128,12 @@ pub(crate) mod tests {
     #[test]
     fn diff_between_two_revisions_reports_changes_on_both_sides() {
         let conn = mem_db();
-        commit_files(&conn, "r1", "one", &[("a.txt", "alpha\n"), ("b.txt", "beta\n")]);
+        commit_files(
+            &conn,
+            "r1",
+            "one",
+            &[("a.txt", "alpha\n"), ("b.txt", "beta\n")],
+        );
 
         // A removal and an addition in the second commit.
         conn.execute(
@@ -3005,13 +3150,23 @@ pub(crate) mod tests {
         .unwrap();
         commit_one(&conn, "r2").unwrap();
 
-        commit_files(&conn, "r3", "three", &[("a.txt", "alpha changed\n"), ("c.txt", "gamma\n")]);
+        commit_files(
+            &conn,
+            "r3",
+            "three",
+            &[("a.txt", "alpha changed\n"), ("c.txt", "gamma\n")],
+        );
 
         // One step: b.txt deleted, and nothing else. r2 records only that, so a.txt
         // must not appear even though r3 changes it later.
         let one = diff_revs(&conn, Some("r1"), Some("r2")).unwrap();
         let names: Vec<&str> = one.iter().map(|(p, _, _)| p.as_str()).collect();
-        assert_eq!(names, vec!["b.txt"], "expected only the deletion, got {:?}", names);
+        assert_eq!(
+            names,
+            vec!["b.txt"],
+            "expected only the deletion, got {:?}",
+            names
+        );
 
         // Spanning two steps: c.txt appears as well.
         let all = diff_revs(&conn, Some("r1"), Some("r3")).unwrap();
@@ -3024,7 +3179,12 @@ pub(crate) mod tests {
         // An empty left side compares against nothing, which is how a first changeset
         // is shown on its own.
         let from_nothing = diff_revs(&conn, None, Some("r1")).unwrap();
-        assert_eq!(from_nothing.len(), 2, "expected both files, got {:?}", from_nothing);
+        assert_eq!(
+            from_nothing.len(),
+            2,
+            "expected both files, got {:?}",
+            from_nothing
+        );
     }
 
     #[test]
@@ -3032,11 +3192,7 @@ pub(crate) mod tests {
         let conn = mem_db();
         commit_files(&conn, "r1", "one", &[("a.txt", "alpha\n")]);
         let err = diff_revs(&conn, Some("does-not-exist"), Some("r1")).unwrap_err();
-        assert!(
-            err.to_string().contains("no such revision"),
-            "got: {}",
-            err
-        );
+        assert!(err.to_string().contains("no such revision"), "got: {}", err);
     }
 
     #[test]
@@ -3047,7 +3203,11 @@ pub(crate) mod tests {
 
         // An append reports only the new line.
         let (removed, added) = line_diff("a\nb\n", "a\nb\nc\n");
-        assert!(removed.is_empty(), "an append removes nothing, got {:?}", removed);
+        assert!(
+            removed.is_empty(),
+            "an append removes nothing, got {:?}",
+            removed
+        );
         assert_eq!(added, vec!["c".to_string()]);
     }
     /// Reviewing a stack is the question an agent-written change raises: what happened,
@@ -3074,7 +3234,12 @@ pub(crate) mod tests {
         assert_eq!(steps[1].id, "s2");
 
         // The small first step scores low, the large one does not.
-        assert_eq!(steps[0].risk.band(), "low", "reasons: {:?}", steps[0].risk.reasons);
+        assert_eq!(
+            steps[0].risk.band(),
+            "low",
+            "reasons: {:?}",
+            steps[0].risk.reasons
+        );
         assert!(
             steps[1].risk.score >= 4,
             "a 500 line manifest change scored {}",
@@ -3105,7 +3270,11 @@ pub(crate) mod tests {
         commit_files(&conn, "t2", "two", &[("a.txt", "alpha changed\n")]);
         let steps = review_stack(&conn, Some("t1"), "main").unwrap();
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].risk.score, 0, "reasons: {:?}", steps[0].risk.reasons);
+        assert_eq!(
+            steps[0].risk.score, 0,
+            "reasons: {:?}",
+            steps[0].risk.reasons
+        );
         assert_eq!(steps[0].risk.band(), "low");
     }
 
@@ -3175,7 +3344,10 @@ pub(crate) mod tests {
             with.reasons
         );
         // It never lowers anything, and never adds more than a few points.
-        assert!(with.score - without.score <= 3, "the adjustment is too large");
+        assert!(
+            with.score - without.score <= 3,
+            "the adjustment is too large"
+        );
     }
 
     #[test]
@@ -3278,7 +3450,8 @@ pub(crate) mod tests {
         // Second writer prepared against the same head and must be refused.
         let err = land_branch(&conn, &root, "right", "main", read.as_deref(), "b").unwrap_err();
         assert!(
-            err.to_string().contains("moved while this was being prepared"),
+            err.to_string()
+                .contains("moved while this was being prepared"),
             "got: {}",
             err
         );
@@ -3295,7 +3468,11 @@ pub(crate) mod tests {
         let tree = tree_at(&conn, &final_head).unwrap();
         let names: Vec<&str> = tree.iter().map(|(p, _)| p.as_str()).collect();
         assert!(names.contains(&"l.txt"), "left is missing from {:?}", names);
-        assert!(names.contains(&"r.txt"), "right is missing from {:?}", names);
+        assert!(
+            names.contains(&"r.txt"),
+            "right is missing from {:?}",
+            names
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

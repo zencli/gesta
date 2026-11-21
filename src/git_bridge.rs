@@ -59,7 +59,11 @@ pub fn import(conn: &Connection, git_root: &Path, prefix: Option<&str>) -> ZResu
     for hash in &order {
         let obj = repo.read_object(hash)?;
         if obj.kind != Kind::Commit {
-            return Err(bad(format!("{} is a {}, not a commit", hash, obj.kind.as_str())));
+            return Err(bad(format!(
+                "{} is a {}, not a commit",
+                hash,
+                obj.kind.as_str()
+            )));
         }
         let commit = gitobj::parse_commit(&obj.body)?;
         let (name, mail) = gitobj::author_parts(&commit.author);
@@ -305,16 +309,12 @@ fn export_into(conn: &Connection, repo: &Repo, branch: Option<&str>) -> ZResult<
 
         let mut mapped: HashMap<String, String> = HashMap::new();
         for id in ids {
-            let (parent, message, author, ts): (
-                Option<String>,
-                String,
-                String,
-                i64,
-            ) = conn.query_row(
-                "SELECT parent, message, author, created_at FROM changesets WHERE id = ?1",
-                rusqlite::params![id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )?;
+            let (parent, message, author, ts): (Option<String>, String, String, i64) = conn
+                .query_row(
+                    "SELECT parent, message, author, created_at FROM changesets WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?;
             let tree_hash = write_tree_for(conn, repo, &id)?;
             let (name, mail) = split_author(&author);
             let parents: Vec<String> = parent
@@ -331,15 +331,7 @@ fn export_into(conn: &Connection, repo: &Repo, branch: Option<&str>) -> ZResult<
                     |r| r.get(0),
                 )
                 .unwrap_or_else(|_| "+0000".to_string());
-            let body = gitobj::build_commit(
-                &tree_hash,
-                &parents,
-                &name,
-                &mail,
-                ts,
-                &tz,
-                &message,
-            );
+            let body = gitobj::build_commit(&tree_hash, &parents, &name, &mail, ts, &tz, &message);
             let commit = repo.write_object(Kind::Commit, &body)?;
             // Remember the name git gave this changeset. Without it a pull back from the same
             // remote sees an unknown commit and imports a duplicate of work that is already
@@ -412,7 +404,9 @@ fn write_tree_for(conn: &Connection, repo: &Repo, changeset: &str) -> ZResult<St
         }
     }
     let mut dirs: Vec<String> = by_dir.keys().cloned().collect();
-    dirs.sort_by_key(|d| std::cmp::Reverse(d.matches('/').count() + if d.is_empty() { 0 } else { 1 }));
+    dirs.sort_by_key(|d| {
+        std::cmp::Reverse(d.matches('/').count() + if d.is_empty() { 0 } else { 1 })
+    });
 
     let mut written: HashMap<String, String> = HashMap::new();
     for dir in dirs {
@@ -485,7 +479,12 @@ pub fn push_to_git_remote(
         .arg("-q")
         .arg(&staging)
         .output()
-        .map_err(|e| Box::new(crate::error::Error::new(crate::error::Code::Remote, format!("git is needed to push to a remote: {}", e))))?;
+        .map_err(|e| {
+            Box::new(crate::error::Error::new(
+                crate::error::Code::Remote,
+                format!("git is needed to push to a remote: {}", e),
+            ))
+        })?;
 
     let written = export_bare(conn, &staging, branch)?;
 
@@ -494,9 +493,21 @@ pub fn push_to_git_remote(
         .arg(&staging)
         .arg("push")
         .arg(remote)
-        .arg(written.branches.iter().map(|b| format!("refs/heads/{}:refs/heads/{}", b, b)).collect::<Vec<_>>().join(" "))
+        .arg(
+            written
+                .branches
+                .iter()
+                .map(|b| format!("refs/heads/{}:refs/heads/{}", b, b))
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
         .output()
-        .map_err(|e| Box::new(crate::error::Error::new(crate::error::Code::Remote, format!("cannot run git: {}", e))))?;
+        .map_err(|e| {
+            Box::new(crate::error::Error::new(
+                crate::error::Code::Remote,
+                format!("cannot run git: {}", e),
+            ))
+        })?;
 
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -513,7 +524,11 @@ pub fn push_to_git_remote(
 }
 
 /// Fetch branches from a git remote into a bare staging repository, then import them.
-pub fn pull_from_git_remote(conn: &Connection, remote: &str, prefix: Option<&str>) -> ZResult<Imported> {
+pub fn pull_from_git_remote(
+    conn: &Connection,
+    remote: &str,
+    prefix: Option<&str>,
+) -> ZResult<Imported> {
     let staging = std::env::temp_dir().join(format!("gesta-git-pull-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)?;
@@ -525,7 +540,12 @@ pub fn pull_from_git_remote(conn: &Connection, remote: &str, prefix: Option<&str
         .args(["init", "--bare", "-q"])
         .arg(&staging)
         .output()
-        .map_err(|e| Box::new(crate::error::Error::new(crate::error::Code::Remote, format!("git is needed to pull from a remote: {}", e))))?;
+        .map_err(|e| {
+            Box::new(crate::error::Error::new(
+                crate::error::Code::Remote,
+                format!("git is needed to pull from a remote: {}", e),
+            ))
+        })?;
     if !init.status.success() {
         return Err(Box::new(crate::error::Error::new(
             crate::error::Code::Remote,
@@ -538,7 +558,12 @@ pub fn pull_from_git_remote(conn: &Connection, remote: &str, prefix: Option<&str
         .arg(&staging)
         .args(["fetch", remote, "+refs/heads/*:refs/heads/*"])
         .output()
-        .map_err(|e| Box::new(crate::error::Error::new(crate::error::Code::Remote, format!("cannot run git: {}", e))))?;
+        .map_err(|e| {
+            Box::new(crate::error::Error::new(
+                crate::error::Code::Remote,
+                format!("cannot run git: {}", e),
+            ))
+        })?;
     if !fetch.status.success() {
         let err = String::from_utf8_lossy(&fetch.stderr);
         let _ = std::fs::remove_dir_all(&staging);
@@ -862,7 +887,10 @@ mod tests {
         // And the content is there, not just the name.
         let commit = gitobj::parse_commit(&repo.read_object(&head).unwrap().body).unwrap();
         let tree = gitobj::parse_tree(&repo.read_object(&commit.tree).unwrap().body).unwrap();
-        let b = tree.iter().find(|e| e.name == "b.txt").expect("b.txt missing");
+        let b = tree
+            .iter()
+            .find(|e| e.name == "b.txt")
+            .expect("b.txt missing");
         assert_eq!(repo.read_object(&b.hash).unwrap().body, b"second\n");
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&out);
@@ -957,17 +985,29 @@ mod tests {
         crate::store::set_state(&conn, "current_branch", "main").unwrap();
 
         let before: Option<String> = conn
-            .query_row("SELECT git_commit FROM changesets WHERE id = 'e1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT git_commit FROM changesets WHERE id = 'e1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(before.is_none(), "the fixture already had a git name");
 
         export(&conn, &dir, None).unwrap();
 
         let after: Option<String> = conn
-            .query_row("SELECT git_commit FROM changesets WHERE id = 'e1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT git_commit FROM changesets WHERE id = 'e1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(after.is_some(), "export did not record the git commit name");
-        assert_eq!(after.unwrap().len(), 40, "a git name is forty hex characters");
+        assert_eq!(
+            after.unwrap().len(),
+            40,
+            "a git name is forty hex characters"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

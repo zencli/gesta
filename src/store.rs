@@ -34,7 +34,7 @@ pub fn open_db(root: &Path) -> ZResult<Connection> {
 fn db_root(conn: &Connection) -> Option<std::path::PathBuf> {
     let path = conn.path()?;
     let dir = std::path::Path::new(path).parent()?; // .gesta
-    dir.parent().map(|p| p.to_path_buf())            // the repository
+    dir.parent().map(|p| p.to_path_buf()) // the repository
 }
 
 /// Is this error SQLite refusing a write because another connection holds the
@@ -95,9 +95,13 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> ZR
         //
         // Found by `bench/concurrency.py`, which failed about one run in eight with exactly this
         // message while every other check passed.
-        match conn.execute(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, decl), []) {
+        match conn.execute(
+            &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, decl),
+            [],
+        ) {
             Ok(_) => {}
-            Err(rusqlite::Error::SqliteFailure(_, Some(ref m))) if m.contains("duplicate column") => {}
+            Err(rusqlite::Error::SqliteFailure(_, Some(ref m)))
+                if m.contains("duplicate column") => {}
             Err(e) => return Err(e.into()),
         }
     }
@@ -425,7 +429,10 @@ pub fn migrate(conn: &Connection) -> ZResult<bool> {
     // A signature over the changeset's identity, and the public key it verifies against.
     ensure_column(conn, "changesets", "signature", "TEXT")?;
     ensure_column(conn, "changesets", "signer", "TEXT")?;
-    if !table_columns(conn, "changesets")?.iter().any(|c| c == "parent2") {
+    if !table_columns(conn, "changesets")?
+        .iter()
+        .any(|c| c == "parent2")
+    {
         conn.execute_batch("ALTER TABLE changesets ADD COLUMN parent2 TEXT")?;
     }
     // A branch is unprotected by default, which is what every repository created before this is.
@@ -455,14 +462,15 @@ pub fn hash_content(s: &str) -> String {
     hash_bytes(s.as_bytes())
 }
 
-
 /// Store raw bytes as an object. No compression, no delta.
 /// Binary files use this: compression often inflates them and deltas are
 /// not meaningful for non-text content.
 pub fn put_object_bytes(conn: &Connection, bytes: &[u8]) -> ZResult<String> {
     let h = hash_bytes(bytes);
     let exists: Option<i64> = conn
-        .query_row("SELECT 1 FROM objects WHERE hash = ?1", params![h], |r| r.get(0))
+        .query_row("SELECT 1 FROM objects WHERE hash = ?1", params![h], |r| {
+            r.get(0)
+        })
         .optional()?;
     if exists.is_some() {
         return Ok(h);
@@ -546,7 +554,11 @@ fn delta_depth(conn: &Connection, hash: &str) -> ZResult<usize> {
     // bounded walk rather than an infinite one.
     while depth <= MAX_DELTA_DEPTH {
         let base: Option<String> = conn
-            .query_row("SELECT base FROM deltas WHERE hash = ?1", params![cur], |r| r.get(0))
+            .query_row(
+                "SELECT base FROM deltas WHERE hash = ?1",
+                params![cur],
+                |r| r.get(0),
+            )
             .optional()?;
         match base {
             Some(b) => {
@@ -564,14 +576,12 @@ fn delta_depth(conn: &Connection, hash: &str) -> ZResult<usize> {
 /// the same shape of answer (delta chain limits plus periodic repacking).
 const MAX_DELTA_DEPTH: usize = 16;
 
-pub fn put_object_against(
-    conn: &Connection,
-    content: &str,
-    base: Option<&str>,
-) -> ZResult<String> {
+pub fn put_object_against(conn: &Connection, content: &str, base: Option<&str>) -> ZResult<String> {
     let h = hash_content(content);
     let exists: Option<i64> = conn
-        .query_row("SELECT 1 FROM objects WHERE hash = ?1", params![h], |r| r.get(0))
+        .query_row("SELECT 1 FROM objects WHERE hash = ?1", params![h], |r| {
+            r.get(0)
+        })
         .optional()?;
     if exists.is_some() {
         return Ok(h);
@@ -630,7 +640,6 @@ pub fn put_object_against(
     Ok(h)
 }
 
-
 /// Number of objects stored as deltas, and the bytes they save.
 pub fn delta_stats(conn: &Connection) -> ZResult<(i64, i64)> {
     let count: i64 = conn
@@ -668,7 +677,11 @@ pub fn get_object(conn: &Connection, hash: &str) -> ZResult<String> {
     // returns an empty body, which is exactly how a nested delta silently
     // stopped applying.
     let payload: Option<Vec<u8>> = conn
-        .query_row("SELECT payload FROM deltas WHERE hash = ?1", params![hash], |r| r.get(0))
+        .query_row(
+            "SELECT payload FROM deltas WHERE hash = ?1",
+            params![hash],
+            |r| r.get(0),
+        )
         .optional()?;
 
     let Some(packed) = payload else {
@@ -714,7 +727,9 @@ pub fn get_object(conn: &Connection, hash: &str) -> ZResult<String> {
 pub fn get_object_bytes(conn: &Connection, hash: &str) -> ZResult<Vec<u8>> {
     // A delta is always line deltas over text; a binary object never has one.
     let delta: Option<i64> = conn
-        .query_row("SELECT 1 FROM deltas WHERE hash = ?1", params![hash], |r| r.get(0))
+        .query_row("SELECT 1 FROM deltas WHERE hash = ?1", params![hash], |r| {
+            r.get(0)
+        })
         .optional()?;
     if delta.is_some() {
         return Ok(get_object(conn, hash)?.into_bytes());
@@ -722,8 +737,11 @@ pub fn get_object_bytes(conn: &Connection, hash: &str) -> ZResult<Vec<u8>> {
     // A grouped object keeps its body in a shared stream. Asking for the group first is one column
     // read, and it keeps every caller on one path: nothing outside this function needs to know
     // whether an object is packed.
-    if let Ok(crate::pack::Placement::Packed { group, offset, length }) =
-        crate::pack::placement(conn, hash)
+    if let Ok(crate::pack::Placement::Packed {
+        group,
+        offset,
+        length,
+    }) = crate::pack::placement(conn, hash)
     {
         if let Some(body) = crate::pack::read(conn, group, offset, length)? {
             return Ok(body);
@@ -743,8 +761,12 @@ pub fn get_object_bytes(conn: &Connection, hash: &str) -> ZResult<Vec<u8>> {
             |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
         )
         .optional()?;
-    let (blob, compressed) =
-        row.ok_or_else(|| bad(format!("object {} not found (store may be corrupted)", hash)))?;
+    let (blob, compressed) = row.ok_or_else(|| {
+        bad(format!(
+            "object {} not found (store may be corrupted)",
+            hash
+        ))
+    })?;
     if compressed == 1 {
         decompress_bytes(&blob)
     } else {
@@ -756,8 +778,11 @@ fn read_whole(conn: &Connection, hash: &str) -> ZResult<String> {
     // A grouped object has no body in its own row, so the group is asked first. Both readers go
     // through here, and only one of them knew about groups at first: `show` failed with "incomplete
     // deflate stream" because it read the empty `content` column and tried to decompress nothing.
-    if let Ok(crate::pack::Placement::Packed { group, offset, length }) =
-        crate::pack::placement(conn, hash)
+    if let Ok(crate::pack::Placement::Packed {
+        group,
+        offset,
+        length,
+    }) = crate::pack::placement(conn, hash)
     {
         if let Some(body) = crate::pack::read(conn, group, offset, length)? {
             return String::from_utf8(body)
@@ -779,8 +804,12 @@ fn read_whole(conn: &Connection, hash: &str) -> ZResult<String> {
             |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
         )
         .optional()?;
-    let (blob, compressed) =
-        row.ok_or_else(|| bad(format!("object {} not found (store may be corrupted)", hash)))?;
+    let (blob, compressed) = row.ok_or_else(|| {
+        bad(format!(
+            "object {} not found (store may be corrupted)",
+            hash
+        ))
+    })?;
     if compressed == 1 {
         decompress(&blob)
     } else {
@@ -802,9 +831,11 @@ pub fn object_store_bytes(conn: &Connection) -> ZResult<(i64, i64)> {
 
 pub fn get_state(conn: &Connection, key: &str) -> ZResult<Option<String>> {
     Ok(conn
-        .query_row("SELECT value FROM repo_state WHERE key = ?1", params![key], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT value FROM repo_state WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        )
         .optional()?)
 }
 
@@ -825,10 +856,7 @@ pub fn current_branch(conn: &Connection) -> ZResult<String> {
 
 /// Parents of a changeset. Public so a history walk outside this module can
 /// follow the chain without duplicating the query.
-pub fn parents_of_public(
-    conn: &Connection,
-    id: &str,
-) -> ZResult<(Option<String>, Option<String>)> {
+pub fn parents_of_public(conn: &Connection, id: &str) -> ZResult<(Option<String>, Option<String>)> {
     parents_of(conn, id)
 }
 
@@ -837,7 +865,12 @@ fn parents_of(conn: &Connection, id: &str) -> ZResult<(Option<String>, Option<St
         .query_row(
             "SELECT parent, parent2 FROM changesets WHERE id = ?1",
             params![id],
-            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            },
         )
         .optional()?
         .unwrap_or((None, None)))
@@ -903,7 +936,11 @@ pub fn merge_base(conn: &Connection, a: &str, b: &str) -> ZResult<Option<String>
             continue;
         }
         let ts: i64 = conn
-            .query_row("SELECT created_at FROM changesets WHERE id = ?1", params![cand], |r| r.get(0))
+            .query_row(
+                "SELECT created_at FROM changesets WHERE id = ?1",
+                params![cand],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         if best.as_ref().map(|(_, t)| ts > *t).unwrap_or(true) {
             best = Some((cand.clone(), ts));
@@ -941,10 +978,7 @@ pub fn in_placeholders(n: usize) -> String {
 ///
 /// `history` prints `v26  9cbc02e9` for each row, and a reader who copies that label into `show` was
 /// told it did not exist. The label is per path, so this answers only when the caller names one.
-pub fn resolve_version_label(
-    conn: &Connection,
-    rev: &str,
-) -> ZResult<Option<(String, String)>> {
+pub fn resolve_version_label(conn: &Connection, rev: &str) -> ZResult<Option<(String, String)>> {
     let Some(rest) = rev.strip_prefix('v') else {
         return Ok(None);
     };
@@ -1021,7 +1055,11 @@ pub fn resolve_rev(conn: &Connection, rev: &str) -> ZResult<Option<String>> {
         return Ok(Some(head));
     }
     let exists: Option<String> = conn
-        .query_row("SELECT id FROM changesets WHERE id = ?1", params![rev], |r| r.get(0))
+        .query_row(
+            "SELECT id FROM changesets WHERE id = ?1",
+            params![rev],
+            |r| r.get(0),
+        )
         .optional()?;
     if exists.is_some() {
         return Ok(exists);
@@ -1062,7 +1100,11 @@ pub fn resolve_rev(conn: &Connection, rev: &str) -> ZResult<Option<String>> {
         if hits.len() > 1 {
             return Err(Box::new(crate::error::Error::new(
                 crate::error::Code::Usage,
-                format!("{} matches {} commits. Name more of the id.", rev, hits.len()),
+                format!(
+                    "{} matches {} commits. Name more of the id.",
+                    rev,
+                    hits.len()
+                ),
             )));
         }
     }
@@ -1118,9 +1160,11 @@ pub fn resolve_rev(conn: &Connection, rev: &str) -> ZResult<Option<String>> {
             Some(next) => {
                 // A tag that names a real changeset ends the walk, and that is the common case.
                 let is_changeset: Option<String> = conn
-                    .query_row("SELECT id FROM changesets WHERE id = ?1", params![next], |r| {
-                        r.get(0)
-                    })
+                    .query_row(
+                        "SELECT id FROM changesets WHERE id = ?1",
+                        params![next],
+                        |r| r.get(0),
+                    )
                     .optional()?;
                 if is_changeset.is_some() {
                     return Ok(is_changeset);
@@ -1239,13 +1283,19 @@ pub fn new_changeset_id(conn: &Connection, message: &str, author: &str) -> ZResu
         let seed = format!("{}|{}|{}|{}|{}", message, author, now(), seq, attempt);
         let id = format!("cs{}", &hash_content(&seed)[..12]);
         let taken: Option<String> = conn
-            .query_row("SELECT id FROM changesets WHERE id = ?1", params![id], |r| r.get(0))
+            .query_row(
+                "SELECT id FROM changesets WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
             .optional()?;
         if taken.is_none() {
             return Ok(id);
         }
     }
-    Err(bad("could not allocate a unique changeset id after 16 attempts"))
+    Err(bad(
+        "could not allocate a unique changeset id after 16 attempts",
+    ))
 }
 
 /// Point a branch at `changeset` and keep the committed tree in step.
@@ -1315,9 +1365,8 @@ pub fn set_branch_head(conn: &Connection, branch: &str, changeset: &str) -> ZRes
 /// keeps a commit proportional to the change.
 fn apply_changeset_to_tree(conn: &Connection, branch: &str, changeset: &str) -> ZResult<()> {
     let files: Vec<(String, Option<String>)> = {
-        let mut stmt = conn.prepare(
-            "SELECT path, new_hash FROM changeset_files WHERE changeset_id = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT path, new_hash FROM changeset_files WHERE changeset_id = ?1")?;
         let rows = stmt.query_map(params![changeset], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
         })?;
@@ -1351,9 +1400,8 @@ pub fn refresh_branch_tree(conn: &Connection, branch: &str) -> ZResult<()> {
     let head = branch_head(conn, branch)?;
     let Some(head) = head else { return Ok(()) };
     let files = crate::repo::tree_at(conn, &head)?;
-    let mut stmt = conn.prepare(
-        "INSERT OR REPLACE INTO branch_tree(branch, path, hash) VALUES(?1, ?2, ?3)",
-    )?;
+    let mut stmt =
+        conn.prepare("INSERT OR REPLACE INTO branch_tree(branch, path, hash) VALUES(?1, ?2, ?3)")?;
     for (path, hash) in &files {
         stmt.execute(params![branch, path, hash])?;
     }
@@ -1403,9 +1451,7 @@ pub fn gc(conn: &Connection) -> ZResult<u64> {
     let mut reachable: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Commits and their trees.
-    let mut stmt = conn.prepare(
-        "SELECT id FROM changesets WHERE status = 'committed'",
-    )?;
+    let mut stmt = conn.prepare("SELECT id FROM changesets WHERE status = 'committed'")?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     for row in rows {
         let cs = row?;
@@ -1417,9 +1463,7 @@ pub fn gc(conn: &Connection) -> ZResult<u64> {
     }
 
     // Pending changesets (not yet committed but stored).
-    let mut stmt = conn.prepare(
-        "SELECT id FROM changesets WHERE status = 'pending'",
-    )?;
+    let mut stmt = conn.prepare("SELECT id FROM changesets WHERE status = 'pending'")?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     for row in rows {
         let cs = row?;
@@ -1463,7 +1507,10 @@ pub fn gc(conn: &Connection) -> ZResult<u64> {
     let mut deleted = 0u64;
     for hash in all {
         if !reachable.contains(&hash) {
-            conn.execute("DELETE FROM objects WHERE hash = ?1", rusqlite::params![&hash])?;
+            conn.execute(
+                "DELETE FROM objects WHERE hash = ?1",
+                rusqlite::params![&hash],
+            )?;
             deleted += 1;
         }
     }
@@ -1526,7 +1573,9 @@ pub(crate) mod tests {
         assert_eq!(a, b);
         assert_eq!(get_object(&conn, &a).unwrap(), text);
 
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM objects", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM objects", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1, "duplicate content must not create a second object");
 
         let (raw, stored) = object_store_bytes(&conn).unwrap();
@@ -1609,11 +1658,17 @@ pub(crate) mod tests {
         add_cs(&conn, "cs2", Some("cs1"), None);
         add_cs(&conn, "cs3", Some("cs1"), None);
         add_cs(&conn, "cs4", Some("cs2"), Some("cs3"));
-        conn.execute("UPDATE branches SET head='cs4' WHERE name='main'", []).unwrap();
+        conn.execute("UPDATE branches SET head='cs4' WHERE name='main'", [])
+            .unwrap();
 
         let r = reachable_from(&conn, "main").unwrap();
         for id in ["cs1", "cs2", "cs3", "cs4"] {
-            assert!(r.contains(&id.to_string()), "{} must stay reachable, got {:?}", id, r);
+            assert!(
+                r.contains(&id.to_string()),
+                "{} must stay reachable, got {:?}",
+                id,
+                r
+            );
         }
     }
 
@@ -1624,8 +1679,14 @@ pub(crate) mod tests {
         add_cs(&conn, "cs2", Some("cs1"), None);
         add_cs(&conn, "cs3", Some("cs2"), None);
         add_cs(&conn, "cs4", Some("cs2"), None);
-        assert_eq!(merge_base(&conn, "cs3", "cs4").unwrap().as_deref(), Some("cs2"));
-        assert_eq!(merge_base(&conn, "cs2", "cs3").unwrap().as_deref(), Some("cs2"));
+        assert_eq!(
+            merge_base(&conn, "cs3", "cs4").unwrap().as_deref(),
+            Some("cs2")
+        );
+        assert_eq!(
+            merge_base(&conn, "cs2", "cs3").unwrap().as_deref(),
+            Some("cs2")
+        );
     }
 
     #[test]
@@ -1665,15 +1726,22 @@ pub(crate) mod tests {
             .unwrap();
         }
 
-        conn.execute("UPDATE branches SET head='cs2' WHERE name='main'", []).unwrap();
-        assert_eq!(latest_hash(&conn, "f.txt", "main").unwrap().as_deref(), Some(h2.as_str()));
+        conn.execute("UPDATE branches SET head='cs2' WHERE name='main'", [])
+            .unwrap();
+        assert_eq!(
+            latest_hash(&conn, "f.txt", "main").unwrap().as_deref(),
+            Some(h2.as_str())
+        );
 
         conn.execute(
             "INSERT INTO branches(name, head, created_at, from_branch) VALUES('pinned', 'cs1', 0, 'main')",
             [],
         )
         .unwrap();
-        assert_eq!(latest_hash(&conn, "f.txt", "pinned").unwrap().as_deref(), Some(h1.as_str()));
+        assert_eq!(
+            latest_hash(&conn, "f.txt", "pinned").unwrap().as_deref(),
+            Some(h1.as_str())
+        );
         assert_eq!(latest_hash(&conn, "absent.txt", "main").unwrap(), None);
     }
 
@@ -1728,7 +1796,8 @@ pub(crate) mod tests {
                 Err(Box::new(rusqlite::Error::SqliteFailure(
                     rusqlite::ffi::Error::new(5),
                     Some("database is locked".to_string()),
-                )) as Box<dyn std::error::Error + Send + Sync>)
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>)
             } else {
                 Ok(calls)
             }
@@ -1757,7 +1826,8 @@ pub(crate) mod tests {
             params![h],
         )
         .unwrap();
-        conn.execute("UPDATE branches SET head='cs1' WHERE name='main'", []).unwrap();
+        conn.execute("UPDATE branches SET head='cs1' WHERE name='main'", [])
+            .unwrap();
 
         assert_eq!(resolve_rev(&conn, "main").unwrap().as_deref(), Some("cs1"));
     }
@@ -1827,9 +1897,7 @@ pub(crate) mod tests {
             "SELECT COUNT(*) FROM changeset_files WHERE changeset_id IN ({})",
             in_placeholders(ids.len())
         );
-        let n: i64 = conn
-            .query_row(&sql, params![ids[0]], |r| r.get(0))
-            .unwrap();
+        let n: i64 = conn.query_row(&sql, params![ids[0]], |r| r.get(0)).unwrap();
         assert_eq!(n, 1);
     }
 
@@ -1897,9 +1965,15 @@ pub(crate) mod tests {
         let h1 = put_object_against(&conn, &v1, Some(&h0)).unwrap();
 
         // Corrupt the payload in place.
-        conn.execute("UPDATE deltas SET payload = X'00' WHERE hash = ?1", params![h1])
-            .unwrap();
-        assert!(get_object(&conn, &h1).is_err(), "corruption must not be silent");
+        conn.execute(
+            "UPDATE deltas SET payload = X'00' WHERE hash = ?1",
+            params![h1],
+        )
+        .unwrap();
+        assert!(
+            get_object(&conn, &h1).is_err(),
+            "corruption must not be silent"
+        );
     }
 
     #[test]
@@ -1932,7 +2006,12 @@ pub(crate) mod tests {
         );
 
         for (i, h) in hashes.iter().enumerate() {
-            assert_eq!(get_object(&conn, h).unwrap(), contents[i], "version {} broke", i);
+            assert_eq!(
+                get_object(&conn, h).unwrap(),
+                contents[i],
+                "version {} broke",
+                i
+            );
         }
     }
 }

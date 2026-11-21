@@ -69,8 +69,12 @@ impl Code {
             Code::NotFound => "list what exists, then name one of those",
             Code::PathNotFound => "check the path against `gesta ls`, or the branch is older",
             Code::NotARepo => "run `gesta init` here, or move to a directory that has one",
-            Code::DirtyWorktree => "snapshot with `gesta changeset create`, or set it aside with `gesta stash save`",
-            Code::Unmerged => "resolve the file, then `gesta rebase --continue` or `gesta merge --continue`",
+            Code::DirtyWorktree => {
+                "snapshot with `gesta changeset create`, or set it aside with `gesta stash save`"
+            }
+            Code::Unmerged => {
+                "resolve the file, then `gesta rebase --continue` or `gesta merge --continue`"
+            }
             Code::Auth => "check the token, or run `gesta secret list` to see which one is used",
             Code::Remote => "check the URL and the network, then try again",
             Code::Usage => "run the command with --help",
@@ -165,15 +169,27 @@ mod tests {
         let e = Error::not_found("no such branch: nope");
         let json = e.json();
         assert!(json.contains("\"code\":\"not-found\""), "{}", json);
-        assert!(json.contains("\"message\":\"no such branch: nope\""), "{}", json);
-        assert!(json.contains("\"advice\":"), "an agent should get the next step: {}", json);
+        assert!(
+            json.contains("\"message\":\"no such branch: nope\""),
+            "{}",
+            json
+        );
+        assert!(
+            json.contains("\"advice\":"),
+            "an agent should get the next step: {}",
+            json
+        );
     }
 
     #[test]
     fn a_quote_in_a_message_does_not_break_the_json() {
         let e = Error::new(Code::Usage, "unknown flag \"--nope\"");
         let json = e.json();
-        assert!(json.contains("\\\"--nope\\\""), "quote not escaped: {}", json);
+        assert!(
+            json.contains("\\\"--nope\\\""),
+            "quote not escaped: {}",
+            json
+        );
         // The braces have to balance, or a parser fails in a way that hides the real message.
         assert_eq!(json.matches('{').count(), json.matches('}').count());
     }
@@ -214,7 +230,9 @@ mod tests {
             assert!(!code.advice().is_empty(), "{:?} has no advice", code);
             assert!(!code.name().is_empty());
             assert!(
-                code.name().chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                code.name()
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '-'),
                 "{:?} name is not a stable identifier: {}",
                 code,
                 code.name()

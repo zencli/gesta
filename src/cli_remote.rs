@@ -12,8 +12,8 @@ use crate::ops;
 use crate::remote;
 use crate::repo;
 use crate::store::{
-    ancestors, branch_head, current_branch, delta_stats, init_schema,
-    object_store_bytes, open_db, set_state,
+    ancestors, branch_head, current_branch, delta_stats, init_schema, object_store_bytes, open_db,
+    set_state,
 };
 use crate::worktree::IgnoreRules;
 use crate::{bad, now, open_repo, repo_dir, ZResult};
@@ -57,9 +57,11 @@ pub fn cmd_remote_add(
 /// Pin saved for this remote, if any.
 fn remote_pin(conn: &rusqlite::Connection, name: &str) -> ZResult<Option<String>> {
     Ok(conn
-        .query_row("SELECT pin FROM remotes WHERE name = ?1", rusqlite::params![name], |r| {
-            r.get::<_, Option<String>>(0)
-        })
+        .query_row(
+            "SELECT pin FROM remotes WHERE name = ?1",
+            rusqlite::params![name],
+            |r| r.get::<_, Option<String>>(0),
+        )
         .optional()?
         .flatten())
 }
@@ -90,9 +92,11 @@ pub fn cmd_remote_list() -> ZResult<()> {
 }
 
 fn remote_url(conn: &rusqlite::Connection, name: &str) -> ZResult<String> {
-    conn.query_row("SELECT url FROM remotes WHERE name = ?1", rusqlite::params![name], |r| {
-        r.get::<_, String>(0)
-    })
+    conn.query_row(
+        "SELECT url FROM remotes WHERE name = ?1",
+        rusqlite::params![name],
+        |r| r.get::<_, String>(0),
+    )
     .optional()?
     .ok_or_else(|| bad(format!("no such remote: {}", name)))
 }
@@ -101,9 +105,11 @@ fn remote_url(conn: &rusqlite::Connection, name: &str) -> ZResult<String> {
 /// later push does not need the secret retyped.
 fn remote_token(conn: &rusqlite::Connection, name: &str) -> ZResult<Option<String>> {
     Ok(conn
-        .query_row("SELECT token FROM remotes WHERE name = ?1", rusqlite::params![name], |r| {
-            r.get::<_, Option<String>>(0)
-        })
+        .query_row(
+            "SELECT token FROM remotes WHERE name = ?1",
+            rusqlite::params![name],
+            |r| r.get::<_, Option<String>>(0),
+        )
         .optional()?
         .flatten())
 }
@@ -134,7 +140,11 @@ pub fn cmd_inspect(
         if crate::repo_dir(&path).is_dir() {
             let remote_conn = open_db(&path)?;
             match branch_head(&remote_conn, branch) {
-                Ok(Some(h)) => Some(ancestors(&remote_conn, &h)?.into_iter().collect::<HashSet<String>>()),
+                Ok(Some(h)) => Some(
+                    ancestors(&remote_conn, &h)?
+                        .into_iter()
+                        .collect::<HashSet<String>>(),
+                ),
                 _ => Some(HashSet::new()),
             }
         } else {
@@ -157,7 +167,12 @@ pub fn cmd_inspect(
         .filter(|(_, a)| a.contains('@') || a.contains('<'))
         .cloned()
         .collect();
-    let largest = bundle.objects.iter().map(|(_, c)| c.len()).max().unwrap_or(0);
+    let largest = bundle
+        .objects
+        .iter()
+        .map(|(_, c)| c.len())
+        .max()
+        .unwrap_or(0);
     let estimated = known.is_none();
     authors.truncate(20);
 
@@ -175,11 +190,20 @@ pub fn cmd_inspect(
             ("remote", crate::json::Json::str(remote_name.to_string())),
             ("branch", crate::json::Json::str(branch.to_string())),
             ("url", crate::json::Json::str(url.clone())),
-            ("changesets", crate::json::Json::int(bundle.changesets.len() as i64)),
-            ("objects", crate::json::Json::int(bundle.objects.len() as i64)),
+            (
+                "changesets",
+                crate::json::Json::int(bundle.changesets.len() as i64),
+            ),
+            (
+                "objects",
+                crate::json::Json::int(bundle.objects.len() as i64),
+            ),
             ("bytes", crate::json::Json::int(wire.len() as i64)),
             ("largest_object", crate::json::Json::int(largest as i64)),
-            ("author_identities", crate::json::Json::int(identity.len() as i64)),
+            (
+                "author_identities",
+                crate::json::Json::int(identity.len() as i64),
+            ),
             ("estimated", crate::json::Json::Bool(estimated)),
             ("authors", crate::json::Json::Arr(items)),
         ]);
@@ -272,7 +296,12 @@ pub fn cmd_push(remote_name: &str, branch: &str) -> ZResult<()> {
         "INSERT INTO remote_refs(remote, branch, changeset_id, updated_at) VALUES(?1, ?2, ?3, ?4)
          ON CONFLICT(remote, branch) DO UPDATE SET changeset_id = excluded.changeset_id,
                                                    updated_at = excluded.updated_at",
-        rusqlite::params![remote_name, branch, bundle.head.clone().unwrap_or_default(), now()],
+        rusqlite::params![
+            remote_name,
+            branch,
+            bundle.head.clone().unwrap_or_default(),
+            now()
+        ],
     )?;
 
     println!(
@@ -313,16 +342,15 @@ fn push_s3(conn: &Connection, url: &str, branch: &str) -> ZResult<()> {
             // Complete means the object can serve a shallow clone: it needs a
             // snapshot and every object that snapshot names. A snapshot whose
             // objects were never carried is as broken as no snapshot at all.
-            let snap_ok = !b.snapshot.is_empty()
-                && {
-                    let carried: HashSet<&str> = b
-                        .objects
-                        .iter()
-                        .map(|(h, _)| h.as_str())
-                        .chain(b.deltas.iter().map(|(h, _, _)| h.as_str()))
-                        .collect();
-                    b.snapshot.iter().all(|(_, h)| carried.contains(h.as_str()))
-                };
+            let snap_ok = !b.snapshot.is_empty() && {
+                let carried: HashSet<&str> = b
+                    .objects
+                    .iter()
+                    .map(|(h, _)| h.as_str())
+                    .chain(b.deltas.iter().map(|(h, _, _)| h.as_str()))
+                    .collect();
+                b.snapshot.iter().all(|(_, h)| carried.contains(h.as_str()))
+            };
             (b.head, b.changesets.len() as i64, snap_ok)
         }
         None => (None, 0, false),
@@ -434,7 +462,10 @@ pub fn cmd_pull(remote_name: &str, branch: &str, author: &str) -> ZResult<()> {
     }
     repo::materialise(&conn, &root, &current)?;
     ops::record(&conn, "pull", Some(&remote_head), Some(remote_name))?;
-    println!("pulled {} changeset(s) from {} into {}", applied, remote_name, branch);
+    println!(
+        "pulled {} changeset(s) from {} into {}",
+        applied, remote_name, branch
+    );
     Ok(())
 }
 
@@ -465,9 +496,11 @@ pub fn cmd_clone(
     }
     let remote_conn = open_db(&remote_path)?;
     let branch: String = remote_conn
-        .query_row("SELECT name FROM branches ORDER BY created_at LIMIT 1", [], |r| {
-            r.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT name FROM branches ORDER BY created_at LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
         .optional()?
         .ok_or_else(|| bad("remote has no branches"))?;
 
@@ -561,7 +594,14 @@ fn clone_s3(url: &str, target: &Path, pin: Option<&str>, depth: Option<usize>) -
         bundle.changesets.len(),
         written,
         if bundle.shallow_root.is_some() {
-            format!(", shallow at {}", bundle.changesets.first().map(|c| c.id.as_str()).unwrap_or("-"))
+            format!(
+                ", shallow at {}",
+                bundle
+                    .changesets
+                    .first()
+                    .map(|c| c.id.as_str())
+                    .unwrap_or("-")
+            )
         } else {
             String::new()
         }
@@ -578,7 +618,10 @@ pub fn cmd_gc() -> ZResult<()> {
     // Grouping runs after the removal, so a group never holds an object that gc just deleted.
     let (groups, moved) = crate::pack::repack(&conn)?;
     let (g_all, packed_bytes, raw_bytes) = crate::pack::group_stats(&conn)?;
-    println!("gc: removed {} unreachable object(s), database vacuumed", deleted);
+    println!(
+        "gc: removed {} unreachable object(s), database vacuumed",
+        deleted
+    );
     if groups > 0 {
         println!(
             "gc: grouped {} object(s) into {} new group(s); {} object(s) now share {} group(s)",
@@ -649,7 +692,11 @@ pub fn cmd_fsck(prune: bool, worktree: bool) -> ZResult<()> {
     for (id, p1, p2) in &parents {
         for p in [p1, p2].into_iter().flatten() {
             let exists: Option<i64> = conn
-                .query_row("SELECT 1 FROM changesets WHERE id = ?1", rusqlite::params![p], |r| r.get(0))
+                .query_row(
+                    "SELECT 1 FROM changesets WHERE id = ?1",
+                    rusqlite::params![p],
+                    |r| r.get(0),
+                )
                 .optional()?;
             if exists.is_none() {
                 if boundaries.contains(id) {
@@ -670,13 +717,19 @@ pub fn cmd_fsck(prune: bool, worktree: bool) -> ZResult<()> {
     // Every branch head must exist.
     let branches: Vec<(String, Option<String>)> = {
         let mut stmt = conn.prepare("SELECT name, head FROM branches")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (name, head) in &branches {
         if let Some(h) = head {
             let exists: Option<i64> = conn
-                .query_row("SELECT 1 FROM changesets WHERE id = ?1", rusqlite::params![h], |r| r.get(0))
+                .query_row(
+                    "SELECT 1 FROM changesets WHERE id = ?1",
+                    rusqlite::params![h],
+                    |r| r.get(0),
+                )
                 .optional()?;
             if exists.is_none() {
                 println!("MISSING changeset {} is the head of branch {}", h, name);
@@ -825,7 +878,11 @@ pub fn cmd_fsck(prune: bool, worktree: bool) -> ZResult<()> {
     )?;
 
     if problems == 0 {
-        println!("repository is consistent ({} object(s), {} orphan(s))", count_objects(&conn)?, orphans);
+        println!(
+            "repository is consistent ({} object(s), {} orphan(s))",
+            count_objects(&conn)?,
+            orphans
+        );
     } else {
         println!("\n{} problem(s) found", problems);
     }
@@ -870,10 +927,18 @@ pub fn cmd_stats() -> ZResult<()> {
     // footer adds them back, which is the number a person should read.
     let (deltas, saved) = delta_stats(&conn)?;
     let delta_bytes: i64 = conn
-        .query_row("SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM deltas", [], |r| r.get(0))
+        .query_row(
+            "SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM deltas",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     let total_stored = stored + delta_bytes;
-    let ratio = if raw > 0 { raw as f64 / total_stored.max(1) as f64 } else { 0.0 };
+    let ratio = if raw > 0 {
+        raw as f64 / total_stored.max(1) as f64
+    } else {
+        0.0
+    };
     println!(
         "objects:     {} ({} bytes raw, {} bytes in objects plus {} in deltas = {} stored, {:.1}x)",
         objects, raw, stored, delta_bytes, total_stored, ratio
@@ -953,9 +1018,14 @@ pub fn cmd_ignore_list() -> ZResult<()> {
     for p in &from_files {
         println!("  {}", p);
     }
-    let lifted: Vec<String> = stored.into_iter().chain(
-        from_files.iter().map(|s| s.split(" (").next().unwrap_or(s).to_string()),
-    ).collect();
+    let lifted: Vec<String> = stored
+        .into_iter()
+        .chain(
+            from_files
+                .iter()
+                .map(|s| s.split(" (").next().unwrap_or(s).to_string()),
+        )
+        .collect();
     let rules = IgnoreRules::with_defaults(&lifted);
     println!("\n{} active pattern(s)", rules.len());
     Ok(())
@@ -1005,7 +1075,10 @@ pub fn cmd_ignore_why(path: &str, json: bool) -> ZResult<()> {
 
     let rel = crate::normalise(path);
     // The same question the scanner asks, so the answer cannot disagree with the scan.
-    let all: Vec<String> = sources.iter().flat_map(|(_, r)| r.iter().cloned()).collect();
+    let all: Vec<String> = sources
+        .iter()
+        .flat_map(|(_, r)| r.iter().cloned())
+        .collect();
     let ignored = crate::worktree::IgnoreRules::new(all).is_ignored(&rel, false);
 
     // The deciding rule is the last one that matches, because a later negation undoes an earlier
@@ -1026,9 +1099,10 @@ pub fn cmd_ignore_why(path: &str, json: bool) -> ZResult<()> {
         let mut obj = vec![
             ("path", crate::json::Json::str(rel.clone())),
             ("ignored", crate::json::Json::Bool(ignored)),
-            ("patterns", crate::json::Json::int(
-                sources.iter().map(|(_, r)| r.len()).sum::<usize>() as i64,
-            )),
+            (
+                "patterns",
+                crate::json::Json::int(sources.iter().map(|(_, r)| r.len()).sum::<usize>() as i64),
+            ),
         ];
         match &deciding {
             Some((source, rule)) => {
@@ -1058,8 +1132,10 @@ pub fn cmd_ignore_why(path: &str, json: bool) -> ZResult<()> {
             for (src, rules) in &sources {
                 for r in rules.iter().filter(|r| r.starts_with('!')) {
                     let restored = crate::worktree::IgnoreRules::new(vec![r.clone()]);
-                    if crate::worktree::IgnoreRules::new(vec![rule.trim_start_matches('!').to_string()])
-                        .is_ignored(&rel, false)
+                    if crate::worktree::IgnoreRules::new(vec![rule
+                        .trim_start_matches('!')
+                        .to_string()])
+                    .is_ignored(&rel, false)
                         && !restored.is_ignored(&rel, false)
                     {
                         println!("    {}  (from {})", r, src);
@@ -1083,13 +1159,15 @@ pub fn cmd_ignore_remove(pattern: &str) -> ZResult<()> {
         rusqlite::params![pattern],
     )?;
     if n == 0 {
-        println!("{} was not in the database (it may come from .zenignore)", pattern);
+        println!(
+            "{} was not in the database (it may come from .zenignore)",
+            pattern
+        );
     } else {
         println!("no longer ignoring: {}", pattern);
     }
     Ok(())
 }
-
 
 /// Point a remote-tracking branch at `head`. Pull merges this branch into the
 /// current one, which is how a fetched history becomes part of local work
@@ -1116,7 +1194,12 @@ fn merge_fetched(
     set_tracking_branch(conn, &tracking, remote_head)?;
     let out = repo::merge_branch(conn, root, &tracking, branch, author)?;
     if !out.conflicts.is_empty() {
-        eprintln!("merge of {} into {} hit {} conflict(s):", tracking, branch, out.conflicts.len());
+        eprintln!(
+            "merge of {} into {} hit {} conflict(s):",
+            tracking,
+            branch,
+            out.conflicts.len()
+        );
         for c in &out.conflicts {
             eprintln!("  {} (their version saved as {}.theirs)", c, c);
         }
@@ -1171,15 +1254,13 @@ fn push_http(
     // is already there, so the bundle only carries the rest.
     let listing = String::from_utf8_lossy(&body).to_string();
     let mut have: HashSet<String> = HashSet::new();
-    let remote_head = listing
-        .lines()
-        .find_map(|l| {
-            let mut p = l.split('\t');
-            match (p.next(), p.next()) {
-                (Some(n), Some(h)) if n == branch && h != "-" => Some(h.to_string()),
-                _ => None,
-            }
-        });
+    let remote_head = listing.lines().find_map(|l| {
+        let mut p = l.split('\t');
+        match (p.next(), p.next()) {
+            (Some(n), Some(h)) if n == branch && h != "-" => Some(h.to_string()),
+            _ => None,
+        }
+    });
     if let Some(h) = &remote_head {
         have.insert(h.clone());
     }
@@ -1190,8 +1271,13 @@ fn push_http(
     let changeset_count = bundle.changesets.len();
 
     let target = format!("{}/v1/bundle?branch={}", base, branch);
-    let (status, body) =
-        http::request_with_pin("POST", &target, Some(&wire), token.as_deref(), pin.as_deref())?;
+    let (status, body) = http::request_with_pin(
+        "POST",
+        &target,
+        Some(&wire),
+        token.as_deref(),
+        pin.as_deref(),
+    )?;
     if status != 200 {
         return Err(bad(format!(
             "push rejected by {} ({}): {}",
@@ -1205,7 +1291,12 @@ fn push_http(
         "INSERT INTO remote_refs(remote, branch, changeset_id, updated_at) VALUES(?1, ?2, ?3, ?4)
          ON CONFLICT(remote, branch) DO UPDATE SET changeset_id = excluded.changeset_id,
                                                    updated_at = excluded.updated_at",
-        rusqlite::params![remote_name, branch, bundle.head.clone().unwrap_or_default(), now()],
+        rusqlite::params![
+            remote_name,
+            branch,
+            bundle.head.clone().unwrap_or_default(),
+            now()
+        ],
     )?;
 
     // The local repository keeps its own working tree in sync with the branch
@@ -1235,7 +1326,11 @@ fn pull_http(
         &branch_head(conn, branch)?.unwrap_or_else(|| "none".into()),
     )
     .unwrap_or_default();
-    let have: Vec<String> = if have == vec!["none".to_string()] { Vec::new() } else { have };
+    let have: Vec<String> = if have == vec!["none".to_string()] {
+        Vec::new()
+    } else {
+        have
+    };
 
     let target = http::bundle_url(base, branch, &have);
     let pin = remote_pin(conn, remote_name)?;
@@ -1252,10 +1347,12 @@ fn pull_http(
     }
 
     let bundle = remote::Bundle::decode(&body)?;
-    let remote_head = bundle
-        .head
-        .clone()
-        .ok_or_else(|| bad(format!("remote {} returned no head for {}", remote_name, branch)))?;
+    let remote_head = bundle.head.clone().ok_or_else(|| {
+        bad(format!(
+            "remote {} returned no head for {}",
+            remote_name, branch
+        ))
+    })?;
     // Fetch the objects but keep the local branch: the merge below decides the
     // new head. Moving it here would discard local changesets.
     let applied = remote::apply_bundle_opts(conn, &bundle, false)?;
@@ -1266,7 +1363,10 @@ fn pull_http(
     }
     repo::materialise(conn, root, &current)?;
     ops::record(conn, "pull", Some(&remote_head), Some(remote_name))?;
-    println!("pulled {} changeset(s) from {} ({}) into {}", applied, remote_name, base, branch);
+    println!(
+        "pulled {} changeset(s) from {} ({}) into {}",
+        applied, remote_name, base, branch
+    );
     Ok(())
 }
 
@@ -1287,11 +1387,21 @@ fn clone_http(url: &str, target: &Path, token: Option<&str>, pin: Option<&str>) 
     let listing = String::from_utf8_lossy(&body).to_string();
     let branch = listing
         .lines()
-        .find_map(|l| l.split('\t').next().filter(|s| !s.is_empty()).map(|s| s.to_string()))
+        .find_map(|l| {
+            l.split('\t')
+                .next()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
         .ok_or_else(|| bad(format!("{} has no branches", base)))?;
 
-    let (status, body) =
-        http::request_with_pin("GET", &http::bundle_url(base, &branch, &[]), None, token, pin)?;
+    let (status, body) = http::request_with_pin(
+        "GET",
+        &http::bundle_url(base, &branch, &[]),
+        None,
+        token,
+        pin,
+    )?;
     if status != 200 {
         return Err(bad(format!(
             "cannot fetch {} from {} ({}): {}",
@@ -1512,7 +1622,11 @@ pub fn cmd_token_rotate(selector: &str, hashed: bool) -> ZResult<()> {
         // `sha256:<digest>:<role>:<name>...` puts the name at index 2 like the clear form does; the
         // secret is the only field whose position differs.
         let name = f.get(2).copied();
-        let secret = if f.first() == Some(&"sha256") { f.get(1).copied() } else { f.first().copied() };
+        let secret = if f.first() == Some(&"sha256") {
+            f.get(1).copied()
+        } else {
+            f.first().copied()
+        };
         let matches = name.map(|n| n == selector).unwrap_or(false)
             || secret.map(|s| s.ends_with(selector)).unwrap_or(false);
         if matches {
@@ -1525,7 +1639,11 @@ pub fn cmd_token_rotate(selector: &str, hashed: bool) -> ZResult<()> {
     // The failing entry is parsed before anything is written, so a rotate on a malformed line refuses
     // rather than replacing it with a well-formed but different grant.
     let fields: Vec<String> = entries[idx].split(':').map(|s| s.to_string()).collect();
-    let offset = if entries[idx].starts_with("sha256:") { 1 } else { 0 };
+    let offset = if entries[idx].starts_with("sha256:") {
+        1
+    } else {
+        0
+    };
     if fields.len() < 3 + offset {
         return Err(bad(format!("the entry for {:?} is malformed", selector)));
     }
@@ -1534,7 +1652,11 @@ pub fn cmd_token_rotate(selector: &str, hashed: bool) -> ZResult<()> {
     let rest: Vec<String> = fields[offset + 3..].to_vec();
 
     let token = auth::generate_token(32)?;
-    let secret = if hashed { format!("sha256:{}", auth::digest(&token)) } else { token.clone() };
+    let secret = if hashed {
+        format!("sha256:{}", auth::digest(&token))
+    } else {
+        token.clone()
+    };
     let mut parts = vec![secret, role.clone(), name.clone()];
     parts.extend(rest);
     entries[idx] = parts.join(":");
@@ -1544,7 +1666,9 @@ pub fn cmd_token_rotate(selector: &str, hashed: bool) -> ZResult<()> {
     println!("{}", token);
     println!();
     println!("The old secret stops working as soon as the server reads the file, which it does on every request.");
-    println!("Update the client now: a credential left in a config somewhere is the one that gets used.");
+    println!(
+        "Update the client now: a credential left in a config somewhere is the one that gets used."
+    );
     Ok(())
 }
 
@@ -1587,7 +1711,14 @@ pub fn cmd_token_remove(selector: &str) -> ZResult<()> {
                 token,
             )
         };
-        let tail: String = id.chars().rev().take(4).collect::<String>().chars().rev().collect();
+        let tail: String = id
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
         if name == selector || tail == selector {
             removed += 1;
             continue;
@@ -1598,7 +1729,10 @@ pub fn cmd_token_remove(selector: &str) -> ZResult<()> {
     if removed == 0 {
         return Err(bad(format!("no token matches {:?}", selector)));
     }
-    fs::write(&path, kept.join("\n") + if kept.is_empty() { "" } else { "\n" })?;
+    fs::write(
+        &path,
+        kept.join("\n") + if kept.is_empty() { "" } else { "\n" },
+    )?;
     println!("removed {} token(s) matching {:?}", removed, selector);
     // The running server notices the file changed and rebuilds its table, so a restart is a choice
     // rather than a requirement. Saying "restart" when it is not needed teaches people to trust the
@@ -1634,8 +1768,19 @@ pub fn cmd_token_list() -> ZResult<()> {
                 token,
             )
         };
-        let tail: String = id.chars().rev().take(4).collect::<String>().chars().rev().collect();
-        let kind = if l.starts_with("sha256:") { "hashed" } else { "clear" };
+        let tail: String = id
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        let kind = if l.starts_with("sha256:") {
+            "hashed"
+        } else {
+            "clear"
+        };
         println!("{:<10} {:<18} {:<7} ...{}", role, name, kind, tail);
         shown += 1;
     }
@@ -1660,7 +1805,12 @@ pub fn cmd_remote_ls(remote_name: &str) -> ZResult<()> {
         if branches.is_empty() {
             println!("no branches at s3://{}/{}", cfg.bucket, prefix);
         } else {
-            println!("s3://{}/{} ({} branch(es))", cfg.bucket, prefix, branches.len());
+            println!(
+                "s3://{}/{} ({} branch(es))",
+                cfg.bucket,
+                prefix,
+                branches.len()
+            );
             for b in branches {
                 println!("  {}", b);
             }
@@ -1669,7 +1819,7 @@ pub fn cmd_remote_ls(remote_name: &str) -> ZResult<()> {
     }
 
     Err(bad(
-        "listing is only supported for s3:// remotes".to_string(),
+        "listing is only supported for s3:// remotes".to_string()
     ))
 }
 
@@ -1736,8 +1886,7 @@ pub fn cmd_deepen(
     }
 
     let boundaries: Vec<String> = {
-        let mut stmt =
-            conn.prepare("SELECT changeset_id FROM shallow_roots WHERE branch = ?1")?;
+        let mut stmt = conn.prepare("SELECT changeset_id FROM shallow_roots WHERE branch = ?1")?;
         let rows = stmt.query_map(rusqlite::params![branch], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
@@ -1765,7 +1914,11 @@ pub fn cmd_deepen(
     if dry_run {
         println!(
             "would take up to {} changeset(s) more for {} ({} held now)",
-            if target == usize::MAX { "all".to_string() } else { target.to_string() },
+            if target == usize::MAX {
+                "all".to_string()
+            } else {
+                target.to_string()
+            },
             branch,
             local_count
         );
@@ -1774,9 +1927,9 @@ pub fn cmd_deepen(
 
     let (cfg, prefix) = crate::s3::S3Config::from_url(&url)?;
     let key = crate::s3::key_for(&prefix, branch);
-    let bytes = cfg.get(&key)?.ok_or_else(|| {
-        crate::bad(format!("the bucket has no object at {}", key))
-    })?;
+    let bytes = cfg
+        .get(&key)?
+        .ok_or_else(|| crate::bad(format!("the bucket has no object at {}", key)))?;
     let mut bundle = remote::Bundle::decode(&bytes)?;
 
     let available = bundle.changesets.len();
@@ -1943,11 +2096,7 @@ pub fn cmd_attributes_why(path: &str, json: bool) -> ZResult<()> {
         println!("  written to the working tree as stored");
     }
     if let Some(src) = &rules.source {
-        println!(
-            "  {} rule(s) from {}",
-            rules.rules.len(),
-            src
-        );
+        println!("  {} rule(s) from {}", rules.rules.len(), src);
     }
     Ok(())
 }
@@ -1992,7 +2141,12 @@ pub fn cmd_secret_scan(history: bool, json: bool) -> ZResult<()> {
                 Err(_) => continue,
             };
             scanned += 1;
-            findings.extend(scanner.scan_text(&path, &body).into_iter().map(|f| (path.clone(), f)));
+            findings.extend(
+                scanner
+                    .scan_text(&path, &body)
+                    .into_iter()
+                    .map(|f| (path.clone(), f)),
+            );
         }
     } else {
         let branch = current_branch(&conn)?;
@@ -2056,13 +2210,14 @@ pub fn cmd_secret_scan(history: bool, json: bool) -> ZResult<()> {
     }
 
     if findings.is_empty() {
-        println!(
-            "no secrets found ({} object(s) scanned)",
-            scanned
-        );
+        println!("no secrets found ({} object(s) scanned)", scanned);
         return Ok(());
     }
-    println!("{} possible secret(s) in {} object(s):", findings.len(), scanned);
+    println!(
+        "{} possible secret(s) in {} object(s):",
+        findings.len(),
+        scanned
+    );
     for (_, f) in &findings {
         println!("  {}", f);
         if let Some(e) = f.entropy {
@@ -2075,7 +2230,9 @@ pub fn cmd_secret_scan(history: bool, json: bool) -> ZResult<()> {
     println!(
         "\nto stop reporting a fixture: add `path <glob>` or `stopword <word>` to .gesta/secret-allowlist"
     );
-    println!("a credential that is already committed has to be reverted and then rotated, in that order");
+    println!(
+        "a credential that is already committed has to be reverted and then rotated, in that order"
+    );
     Ok(())
 }
 

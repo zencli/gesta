@@ -119,6 +119,19 @@ def main():
         warns = len(re.findall(r"^warning: [a-z]", out, re.M))
         record("clippy clean", rc == 0 and warns == 0, f"{warns} warning(s)\n{out[-400:]}")
 
+    if want("fmt"):
+        # `cargo fmt --check` had never run here: the component was not installed, so a check that
+        # reported an error nobody saw looked like a check that passed. 623 diffs had accumulated.
+        # Running it here keeps that from happening again, and the failure names the files rather
+        # than a count, because a count says nothing about where to look.
+        rc, out = sh("bash -lc 'source $HOME/.cargo/env && cargo fmt --all -- --check'")
+        diffs = re.findall(r"^Diff in (.+?):", out, re.M)
+        record(
+            "formatting is clean",
+            rc == 0 and not diffs,
+            f"{len(diffs)} file(s) need formatting: {', '.join(sorted(set(diffs))[:8])}",
+        )
+
     if want("audit"):
         rc, out = sh("bash -lc 'source $HOME/.cargo/env && cargo audit'", timeout=600)
         vulns = "vulnerability found" in out or "Vulnerabilities found" in out

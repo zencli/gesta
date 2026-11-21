@@ -81,7 +81,9 @@ pub fn brief(conn: &Connection, root: &Path) -> ZResult<Brief> {
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
-    let rebase_pending = crate::rebase::load(conn)?.map(|s| s.pending.len()).unwrap_or(0);
+    let rebase_pending = crate::rebase::load(conn)?
+        .map(|s| s.pending.len())
+        .unwrap_or(0);
     let stashes = crate::stash::list(conn)?.len();
 
     let delta = crate::repo::diff_worktree(conn, root, &branch)?;
@@ -226,7 +228,8 @@ pub fn fix_with(conn: &Connection, root: &Path, opts: Options) -> ZResult<Fixed>
     if b.next == Next::FinishRebase {
         out.skipped.push((
             "rebase".to_string(),
-            "a rebase stopped on a conflict: resolve it, then `gesta rebase --continue`".to_string(),
+            "a rebase stopped on a conflict: resolve it, then `gesta rebase --continue`"
+                .to_string(),
         ));
         return Ok(out);
     }
@@ -286,7 +289,10 @@ pub fn fix_with(conn: &Connection, root: &Path, opts: Options) -> ZResult<Fixed>
 }
 
 fn drop_pending(conn: &Connection, id: &str) -> ZResult<()> {
-    conn.execute("DELETE FROM changeset_files WHERE changeset_id = ?1", rusqlite::params![id])?;
+    conn.execute(
+        "DELETE FROM changeset_files WHERE changeset_id = ?1",
+        rusqlite::params![id],
+    )?;
     conn.execute(
         "DELETE FROM changesets WHERE id = ?1 AND status = 'pending'",
         rusqlite::params![id],
@@ -298,7 +304,12 @@ pub fn fixed_to_json(f: &Fixed) -> Json {
     let pair = |v: &Vec<(String, String)>| {
         Json::arr(
             v.iter()
-                .map(|(a, b)| Json::obj(vec![("what", Json::str(a.clone())), ("why", Json::str(b.clone()))]))
+                .map(|(a, b)| {
+                    Json::obj(vec![
+                        ("what", Json::str(a.clone())),
+                        ("why", Json::str(b.clone())),
+                    ])
+                })
                 .collect(),
         )
     };
@@ -377,7 +388,11 @@ mod tests {
         crate::repo::create_changeset(&conn, &dir, "snap", "a").unwrap();
         let b = brief(&conn, &dir).unwrap();
         assert_eq!(b.pending.len(), 1);
-        assert_eq!(b.next, Next::CommitPending, "a matching snapshot is worth committing");
+        assert_eq!(
+            b.next,
+            Next::CommitPending,
+            "a matching snapshot is worth committing"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -389,7 +404,11 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "three\n").unwrap();
         let b = brief(&conn, &dir).unwrap();
         assert_eq!(b.stale.len(), 1, "the stale snapshot was not flagged");
-        assert_eq!(b.next, Next::CommitWork, "new work outranks a stale snapshot");
+        assert_eq!(
+            b.next,
+            Next::CommitWork,
+            "new work outranks a stale snapshot"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -465,10 +484,17 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "three\n").unwrap();
         let f = fix_with(&conn, &dir, Options::default()).unwrap();
         assert_eq!(f.dropped, vec![cs.id.clone()], "the stale snapshot stayed");
-        assert!(f.committed.is_empty(), "committing it would record stale content");
+        assert!(
+            f.committed.is_empty(),
+            "committing it would record stale content"
+        );
         // The drops removed the row rather than committing wrong content.
         let still: i64 = conn
-            .query_row("SELECT COUNT(*) FROM changesets WHERE id = ?1", [&cs.id], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM changesets WHERE id = ?1",
+                [&cs.id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(still, 0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -514,8 +540,15 @@ mod tests {
         let (conn, dir) = repo_with_one_commit("opt-off");
         std::fs::write(dir.join("a.txt"), "two\n").unwrap();
         let f = fix_with(&conn, &dir, Options::default()).unwrap();
-        assert!(f.stashed.is_empty(), "the edit was set aside without being asked");
-        assert_eq!(brief(&conn, &dir).unwrap().changed, 1, "the edit left the tree");
+        assert!(
+            f.stashed.is_empty(),
+            "the edit was set aside without being asked"
+        );
+        assert_eq!(
+            brief(&conn, &dir).unwrap().changed,
+            1,
+            "the edit left the tree"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -524,11 +557,29 @@ mod tests {
         let (conn, dir) = repo_with_one_commit("opt-on");
         std::fs::write(dir.join("a.txt"), "two\n").unwrap();
         std::fs::write(dir.join("b.txt"), "new\n").unwrap();
-        let f = fix_with(&conn, &dir, Options { stash_uncommitted: true }).unwrap();
+        let f = fix_with(
+            &conn,
+            &dir,
+            Options {
+                stash_uncommitted: true,
+            },
+        )
+        .unwrap();
         assert_eq!(f.stashed.len(), 1);
-        assert_eq!(f.stashed[0].1, 2, "both the edit and the new file were saved");
-        assert!(f.skipped.is_empty(), "nothing should be left: {:?}", f.skipped);
-        assert_eq!(brief(&conn, &dir).unwrap().changed, 0, "the tree is still dirty");
+        assert_eq!(
+            f.stashed[0].1, 2,
+            "both the edit and the new file were saved"
+        );
+        assert!(
+            f.skipped.is_empty(),
+            "nothing should be left: {:?}",
+            f.skipped
+        );
+        assert_eq!(
+            brief(&conn, &dir).unwrap().changed,
+            0,
+            "the tree is still dirty"
+        );
         // The head state came back, which is what makes the tree clean.
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
         assert!(!dir.join("b.txt").exists());
@@ -543,9 +594,20 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "two\n").unwrap();
         crate::repo::create_changeset(&conn, &dir, "snap", "a").unwrap();
         std::fs::write(dir.join("c.txt"), "later\n").unwrap();
-        let f = fix_with(&conn, &dir, Options { stash_uncommitted: true }).unwrap();
+        let f = fix_with(
+            &conn,
+            &dir,
+            Options {
+                stash_uncommitted: true,
+            },
+        )
+        .unwrap();
         assert_eq!(f.committed.len(), 1, "the snapshot was not committed");
-        assert_eq!(f.stashed.len(), 1, "the file added after the snapshot was not stashed");
+        assert_eq!(
+            f.stashed.len(),
+            1,
+            "the file added after the snapshot was not stashed"
+        );
         assert_eq!(brief(&conn, &dir).unwrap().changed, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -561,8 +623,18 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("a.txt"), "two\n").unwrap();
-        let f = fix_with(&conn, &dir, Options { stash_uncommitted: true }).unwrap();
-        assert!(f.stashed.is_empty(), "stashing mid rebase would hide a conflict");
+        let f = fix_with(
+            &conn,
+            &dir,
+            Options {
+                stash_uncommitted: true,
+            },
+        )
+        .unwrap();
+        assert!(
+            f.stashed.is_empty(),
+            "stashing mid rebase would hide a conflict"
+        );
         assert_eq!(brief(&conn, &dir).unwrap().changed, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }

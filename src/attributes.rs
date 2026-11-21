@@ -379,7 +379,9 @@ pub fn explain(rules: &Rules, path: &str) -> HashMap<String, String> {
     );
     out.insert(
         "rule".to_string(),
-        which.map(|w| w.to_string()).unwrap_or_else(|| "(none)".to_string()),
+        which
+            .map(|w| w.to_string())
+            .unwrap_or_else(|| "(none)".to_string()),
     );
     out
 }
@@ -438,7 +440,11 @@ mod tests {
             checkout: Some(Eol::Crlf),
         };
         let png = b"\x89PNG\r\n\x1a\n\x00\x00".to_vec();
-        assert_eq!(plan.stored(&png), png, "a NUL byte means the body is not text");
+        assert_eq!(
+            plan.stored(&png),
+            png,
+            "a NUL byte means the body is not text"
+        );
         assert_eq!(plan.checked_out(&png), png);
     }
 

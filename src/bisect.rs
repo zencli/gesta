@@ -79,7 +79,9 @@ fn range(conn: &Connection, good: &str, bad_point: &str) -> ZResult<Vec<String>>
         chain.push(id.clone());
         guard += 1;
         if guard > 100_000 {
-            return Err(bad("history walk did not end: the parent chain contains a cycle".to_string()));
+            return Err(bad(
+                "history walk did not end: the parent chain contains a cycle".to_string(),
+            ));
         }
         let (p1, _p2) = crate::store::parents_of_public(conn, &id)?;
         cur = p1;
@@ -136,15 +138,7 @@ pub fn load(conn: &Connection) -> ZResult<Option<Session>> {
         .query_row(
             "SELECT good, bad, candidates, current, steps FROM bisect WHERE id = 1",
             [],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                ))
-            },
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .ok();
     Ok(row.map(|(good, bad, cands, current, steps)| Session {
@@ -220,7 +214,8 @@ pub enum Step {
 
 /// Advance the search by one answer.
 pub fn step(conn: &Connection, root: &Path, good_answer: bool) -> ZResult<Step> {
-    let mut s = load(conn)?.ok_or_else(|| bad("no bisect in progress (run `gesta bisect start`)".to_string()))?;
+    let mut s = load(conn)?
+        .ok_or_else(|| bad("no bisect in progress (run `gesta bisect start`)".to_string()))?;
 
     // Narrow the range using the answer about the changeset just tested.
     if let Some(cur) = s.current.clone() {
@@ -240,11 +235,12 @@ pub fn step(conn: &Connection, root: &Path, good_answer: bool) -> ZResult<Step> 
     }
 
     if s.candidates.len() <= 1 {
-        let answer = s
-            .candidates
-            .first()
-            .cloned()
-            .ok_or_else(|| bad("the search narrowed to nothing, which means the answers contradict each other".to_string()))?;
+        let answer = s.candidates.first().cloned().ok_or_else(|| {
+            bad(
+                "the search narrowed to nothing, which means the answers contradict each other"
+                    .to_string(),
+            )
+        })?;
         store(conn, &s)?;
         return Ok(Step::Found(answer));
     }
@@ -320,7 +316,12 @@ mod tests {
         let conn = crate::store::tests::mem_db();
         commit_files(&conn, "c00", "base", &[("f", "0\n")]);
         for i in 1..=31 {
-            commit_files(&conn, &format!("c{:02}", i), "s", &[("f", &format!("{}\n", i))]);
+            commit_files(
+                &conn,
+                &format!("c{:02}", i),
+                "s",
+                &[("f", &format!("{}\n", i))],
+            );
         }
         let d = std::env::temp_dir().join(format!("gesta-bisect-log-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -329,7 +330,11 @@ mod tests {
         start(&conn, "c00", "c31").unwrap();
         let (found, questions) = find_counting(&conn, &d, "c07");
         assert_eq!(found, "c07");
-        assert!(questions <= 6, "took {} questions for 31 candidates", questions);
+        assert!(
+            questions <= 6,
+            "took {} questions for 31 candidates",
+            questions
+        );
 
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -383,7 +388,12 @@ mod tests {
         let conn = crate::store::tests::mem_db();
         commit_files(&conn, "c0", "base", &[("f", "0\n")]);
         for i in 1..=31 {
-            commit_files(&conn, &format!("c{:02}", i), "s", &[("f", &format!("{}\n", i))]);
+            commit_files(
+                &conn,
+                &format!("c{:02}", i),
+                "s",
+                &[("f", &format!("{}\n", i))],
+            );
         }
         let d = std::env::temp_dir().join(format!("gesta-bisect2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -413,10 +423,15 @@ mod tests {
         commit_files(&conn, "c2", "two", &[("f", "2\n")]);
         commit_files(&conn, "c3", "three", &[("f", "3\n")]);
         // Every row shares created_at, which is what a burst of commits produces.
-        conn.execute("UPDATE changesets SET created_at = 1000", []).unwrap();
+        conn.execute("UPDATE changesets SET created_at = 1000", [])
+            .unwrap();
 
         let r = range(&conn, "c1", "c3").unwrap();
-        assert_eq!(r, vec!["c2", "c3"], "order must come from parents, not time");
+        assert_eq!(
+            r,
+            vec!["c2", "c3"],
+            "order must come from parents, not time"
+        );
     }
 
     #[test]
@@ -447,7 +462,12 @@ mod tests {
         let conn = crate::store::tests::mem_db();
         commit_files(&conn, "c1", "one", &[("f", "1\n")]);
         for i in 2..=10 {
-            commit_files(&conn, &format!("c{}", i), "s", &[("f", &format!("{}\n", i))]);
+            commit_files(
+                &conn,
+                &format!("c{}", i),
+                "s",
+                &[("f", &format!("{}\n", i))],
+            );
         }
         let d = std::env::temp_dir().join(format!("gesta-bisect-loop-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);

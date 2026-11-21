@@ -6,19 +6,20 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::merge;
-use crate::ops;
 use crate::history;
 use crate::json::Json;
 use crate::mcp;
+use crate::merge;
+use crate::ops;
 use crate::repo;
-use crate::store::{self, branch_head, current_branch, get_object, hash_at_point, init_schema,
-    open_db, reachable_from, set_state};
+use crate::store::{
+    self, branch_head, current_branch, get_object, hash_at_point, init_schema, open_db,
+    reachable_from, set_state,
+};
 use crate::worktree;
 use crate::{bad, fmt_ts, normalise, now, open_repo, repo_dir, repo_root, ZResult};
 
 // init / status / diff / log.
-
 
 /// `sparse set|list|clear`.
 pub fn cmd_sparse(sub: crate::SparseCmd) -> ZResult<()> {
@@ -38,14 +39,15 @@ pub fn cmd_sparse(sub: crate::SparseCmd) -> ZResult<()> {
         }
         crate::SparseCmd::Set { patterns } => {
             let (root, conn) = open_repo()?;
-            let scope = crate::sparse::SparseScope { patterns: patterns.clone() };
+            let scope = crate::sparse::SparseScope {
+                patterns: patterns.clone(),
+            };
             if scope.is_empty() {
                 return Err(bad("give at least one pattern, or use 'sparse clear'"));
             }
             let branch = current_branch(&conn)?;
-            let (written, kept) = store::with_retry(|| {
-                scope.checkout_sparse(&conn, &root, &branch)
-            })?;
+            let (written, kept) =
+                store::with_retry(|| scope.checkout_sparse(&conn, &root, &branch))?;
             scope.save(&conn)?;
             println!(
                 "working set: {} pattern(s). {} file(s) written, {} left in the branch but not checked out.",
@@ -204,18 +206,12 @@ fn pending_out_of_date(
 /// The dry run exists because this is not a change to file content: a person asks for it after
 /// discovering that an identity went somewhere it should not have, and wants to see the size of the
 /// problem before agreeing to it.
-pub fn cmd_anonymise(
-    authors: &[String],
-    to: &str,
-    branch: &str,
-    dry_run: bool,
-) -> ZResult<()> {
+pub fn cmd_anonymise(authors: &[String], to: &str, branch: &str, dry_run: bool) -> ZResult<()> {
     let (_root, conn) = open_repo()?;
     if dry_run {
         // The same query the rewrite uses, so the preview and the action cannot disagree.
-        let mut stmt = conn.prepare(
-            "SELECT id, author FROM changesets WHERE branch = ?1 ORDER BY created_at",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT id, author FROM changesets WHERE branch = ?1 ORDER BY created_at")?;
         let rows: Vec<(String, String)> = stmt
             .query_map(rusqlite::params![branch], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -256,10 +252,7 @@ pub fn cmd_anonymise(
     for a in &report.authors {
         println!("  {} -> {}", a, to);
     }
-    println!(
-        "rewrote {} changeset(s) on {}",
-        report.rewritten, branch
-    );
+    println!("rewrote {} changeset(s) on {}", report.rewritten, branch);
     if report.dropped_signatures > 0 {
         // Saying this plainly matters: the changesets are no longer signed, and a reader who
         // assumes they still are would trust something that no longer holds.
@@ -543,9 +536,13 @@ pub fn cmd_changeset_create_paths(
     let (root, conn) = open_repo()?;
     let branch = current_branch(&conn)?;
 
-    match store::with_retry(|| repo::create_changeset_scoped(&conn, &root, message, author, paths))? {
+    match store::with_retry(|| repo::create_changeset_scoped(&conn, &root, message, author, paths))?
+    {
         None => {
-            println!("nothing to snapshot: working tree matches branch {}", branch);
+            println!(
+                "nothing to snapshot: working tree matches branch {}",
+                branch
+            );
             Ok(())
         }
         Some(cs) => {
@@ -556,7 +553,12 @@ pub fn cmd_changeset_create_paths(
                     rusqlite::params![session, intent, cs.id],
                 )?;
             }
-            println!("created changeset {} ({} file(s), branch {})", cs.id, cs.files.len(), branch);
+            println!(
+                "created changeset {} ({} file(s), branch {})",
+                cs.id,
+                cs.files.len(),
+                branch
+            );
             for (rel, old, _) in &cs.files {
                 println!("  {} {}", if old.is_none() { "A" } else { "M" }, rel);
             }
@@ -633,12 +635,7 @@ fn refuse_secrets(conn: &rusqlite::Connection, root: &std::path::Path, id: &str)
         found.len()
     );
     for f in found.iter().take(10) {
-        msg.push_str(&format!(
-            "  {}  {}  {}\n",
-            f.path,
-            f.rule,
-            f.redacted
-        ));
+        msg.push_str(&format!("  {}  {}  {}\n", f.path, f.rule, f.redacted));
     }
     if found.len() > 10 {
         msg.push_str(&format!("  and {} more\n", found.len() - 10));
@@ -702,9 +699,8 @@ pub fn cmd_changeset_apply(id: &str) -> ZResult<()> {
             |r| r.get::<_, i64>(0),
         )
         .optional()?;
-    let cutoff = cutoff.ok_or_else(|| {
-        crate::error::Error::not_found(format!("no such changeset: {}", id))
-    })?;
+    let cutoff = cutoff
+        .ok_or_else(|| crate::error::Error::not_found(format!("no such changeset: {}", id)))?;
 
     let ids: Vec<String> = {
         let mut stmt = conn.prepare(
@@ -723,7 +719,12 @@ pub fn cmd_changeset_apply(id: &str) -> ZResult<()> {
         total += store::with_retry(|| repo::commit_one(&conn, cs))?;
     }
     ops::record(&conn, "changeset apply", Some(id), None)?;
-    println!("applied {} changeset(s) up to {} ({} file(s))", ids.len(), id, total);
+    println!(
+        "applied {} changeset(s) up to {} ({} file(s))",
+        ids.len(),
+        id,
+        total
+    );
     Ok(())
 }
 
@@ -744,7 +745,12 @@ pub fn cmd_changeset_commit_all() -> ZResult<()> {
     for cs in &ids {
         total += store::with_retry(|| repo::commit_one(&conn, cs))?;
     }
-    ops::record(&conn, "commit all", None, Some(&format!("{} changesets", ids.len())))?;
+    ops::record(
+        &conn,
+        "commit all",
+        None,
+        Some(&format!("{} changesets", ids.len())),
+    )?;
     println!("committed {} changeset(s) ({} file(s))", ids.len(), total);
     Ok(())
 }
@@ -808,7 +814,8 @@ pub fn cmd_changeset_list() -> ZResult<()> {
 
 pub fn cmd_revert(id: &str, reason: Option<&str>, author: &str) -> ZResult<()> {
     let (root, conn) = open_repo()?;
-    let revert_id = store::with_retry(|| history::revert_changeset(&conn, &root, id, author, reason))?;
+    let revert_id =
+        store::with_retry(|| history::revert_changeset(&conn, &root, id, author, reason))?;
     ops::record(&conn, "revert", Some(&revert_id), Some(id))?;
     println!("reverted {} as {}", id, revert_id);
     println!("\nThe revert is a normal changeset: `gesta log` shows both, and");
@@ -958,7 +965,12 @@ pub fn cmd_blame(file: &str, ignore: &[String]) -> ZResult<()> {
         let mut out = Vec::new();
         for (start, end, cs, author, intent) in ranges {
             for line in start..=end {
-                out.push((line, cs.clone(), author.clone().unwrap_or_default(), intent.clone()));
+                out.push((
+                    line,
+                    cs.clone(),
+                    author.clone().unwrap_or_default(),
+                    intent.clone(),
+                ));
             }
         }
         out
@@ -1019,7 +1031,10 @@ pub fn cmd_blame(file: &str, ignore: &[String]) -> ZResult<()> {
         }
     }
     if unattributed > 0 {
-        eprintln!("warning: {} line(s) have no attributed changeset", unattributed);
+        eprintln!(
+            "warning: {} line(s) have no attributed changeset",
+            unattributed
+        );
     }
     Ok(())
 }
@@ -1172,7 +1187,9 @@ fn ls_entries(
     tree.sort_by(|a, b| a.0.cmp(&b.0));
     if let Some(p) = prefix {
         let p = crate::normalise(p);
-        tree.retain(|(path, _)| path == &p || path.starts_with(&format!("{}/", p.trim_end_matches('/'))));
+        tree.retain(|(path, _)| {
+            path == &p || path.starts_with(&format!("{}/", p.trim_end_matches('/')))
+        });
     }
     Ok(tree)
 }
@@ -1222,7 +1239,10 @@ pub fn cmd_key_rotate(path: Option<&str>, dry_run: bool) -> ZResult<()> {
         println!("would archive: {}", current_path.display());
         println!("would create:  {}", target.display());
         if let Some(r) = &current {
-            println!("the key in use is {}", &r.public_hex[..16.min(r.public_hex.len())]);
+            println!(
+                "the key in use is {}",
+                &r.public_hex[..16.min(r.public_hex.len())]
+            );
         } else {
             println!("no key is recorded as active");
         }
@@ -1251,7 +1271,10 @@ pub fn cmd_key_rotate(path: Option<&str>, dry_run: bool) -> ZResult<()> {
         &root,
         "local",
         &key.public_hex(),
-        archived.as_ref().map(|p| p.display().to_string()).as_deref(),
+        archived
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .as_deref(),
     );
     if let Some(a) = archived {
         println!("archived the old key to {}", a.display());
@@ -1285,7 +1308,13 @@ pub fn cmd_key_list() -> ZResult<()> {
         } else {
             "  (file is gone)"
         };
-        println!("{}  {}  {}{}", &r.public_hex[..16.min(r.public_hex.len())], state, r.path, present);
+        println!(
+            "{}  {}  {}{}",
+            &r.public_hex[..16.min(r.public_hex.len())],
+            state,
+            r.path,
+            present
+        );
     }
     Ok(())
 }
@@ -1337,7 +1366,13 @@ pub fn cmd_verify(id: Option<&str>, key_hex: Option<&str>) -> ZResult<()> {
         }
     };
     /// What a verification needs: the fields the signature covered, plus the signature itself.
-    type SignedRow = (String, String, Option<String>, Option<String>, Option<String>);
+    type SignedRow = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
     let row: Option<SignedRow> = conn
         .query_row(
             "SELECT message, author, parent, signature, signer FROM changesets WHERE id = ?1",
@@ -1345,14 +1380,10 @@ pub fn cmd_verify(id: Option<&str>, key_hex: Option<&str>) -> ZResult<()> {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let (message, author, parent, signature, signer) = row
-        .ok_or_else(|| crate::error::Error::not_found(format!("no such changeset: {}", id)))?;
-    let signature = signature.ok_or_else(|| {
-        bad(format!(
-            "{} carries no signature: nothing to verify",
-            id
-        ))
-    })?;
+    let (message, author, parent, signature, signer) =
+        row.ok_or_else(|| crate::error::Error::not_found(format!("no such changeset: {}", id)))?;
+    let signature =
+        signature.ok_or_else(|| bad(format!("{} carries no signature: nothing to verify", id)))?;
     let public = match key_hex {
         Some(k) => k.to_string(),
         None => signer.ok_or_else(|| {
@@ -1362,7 +1393,14 @@ pub fn cmd_verify(id: Option<&str>, key_hex: Option<&str>) -> ZResult<()> {
             ))
         })?,
     };
-    crate::sign::verify(&public, &id, &message, &author, parent.as_deref(), &signature)?;
+    crate::sign::verify(
+        &public,
+        &id,
+        &message,
+        &author,
+        parent.as_deref(),
+        &signature,
+    )?;
     println!("{} verifies against {}", id, public);
     // The maths checking out answers "was this signed by that key", not "is that key ours".
     // Any signature verifies against its own public half, so a key this repository has never
@@ -1672,13 +1710,12 @@ pub fn cmd_show(spec: &str) -> ZResult<()> {
             }
         },
     };
-    let hash = hash_at_point(&conn, &path, &cs)?
-        .ok_or_else(|| {
-            crate::error::Error::new(
-                crate::error::Code::PathNotFound,
-                format!("{} does not exist at {}", path, rev),
-            )
-        })?;
+    let hash = hash_at_point(&conn, &path, &cs)?.ok_or_else(|| {
+        crate::error::Error::new(
+            crate::error::Code::PathNotFound,
+            format!("{} does not exist at {}", path, rev),
+        )
+    })?;
     // Bytes, not text. `show` on a binary file failed with a message about UTF-8 because it went
     // through the text reader, and a large binary is exactly the file somebody shows.
     let bytes = crate::store::get_object_bytes(&conn, &hash)?;
@@ -1692,7 +1729,10 @@ pub fn cmd_checkout(file: &str, changeset: Option<&str>) -> ZResult<()> {
     if file == "." {
         let branch = current_branch(&conn)?;
         let (written, removed) = repo::restore_worktree(&conn, &root, &branch)?;
-        println!("restored {} file(s), removed {} stale file(s)", written, removed);
+        println!(
+            "restored {} file(s), removed {} stale file(s)",
+            written, removed
+        );
         return Ok(());
     }
     let rel = normalise(file);
@@ -1712,7 +1752,10 @@ pub fn cmd_backup(dest: &str, json: bool) -> ZResult<()> {
     if json {
         let doc = crate::json::Json::obj(vec![
             ("schema", crate::json::Json::str("gesta@1")),
-            ("path", crate::json::Json::str(report.path.display().to_string())),
+            (
+                "path",
+                crate::json::Json::str(report.path.display().to_string()),
+            ),
             ("bytes", crate::json::Json::int(report.bytes as i64)),
             ("changesets", crate::json::Json::int(report.changesets)),
             ("objects", crate::json::Json::int(report.objects)),
@@ -1793,7 +1836,10 @@ pub fn cmd_restore(file: &str) -> ZResult<()> {
     let branch = current_branch(&conn)?;
     if file == "." {
         let (written, removed) = repo::restore_worktree(&conn, &root, &branch)?;
-        println!("restored {} file(s), removed {} stale file(s)", written, removed);
+        println!(
+            "restored {} file(s), removed {} stale file(s)",
+            written, removed
+        );
         return Ok(());
     }
     let rel = normalise(file);
@@ -1841,9 +1887,14 @@ pub fn cmd_tag(name: Option<&str>, changeset: Option<&str>, list: bool) -> ZResu
     let (_root, conn) = open_repo()?;
     if list {
         let tags: Vec<(String, String, i64)> = {
-            let mut stmt = conn.prepare("SELECT name, changeset_id, created_at FROM tags ORDER BY name")?;
+            let mut stmt =
+                conn.prepare("SELECT name, changeset_id, created_at FROM tags ORDER BY name")?;
             let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
@@ -1855,7 +1906,8 @@ pub fn cmd_tag(name: Option<&str>, changeset: Option<&str>, list: bool) -> ZResu
         }
         return Ok(());
     }
-    let name = name.ok_or_else(|| bad("a tag needs a name: `gesta tag <name> [--changeset REV]`"))?;
+    let name =
+        name.ok_or_else(|| bad("a tag needs a name: `gesta tag <name> [--changeset REV]`"))?;
 
     // Whatever was named has to be turned into a changeset id before it is stored. Storing the
     // name is what let `tag v2 main` succeed while pointing at a string that is not a changeset:
@@ -1888,7 +1940,11 @@ pub fn cmd_tag(name: Option<&str>, changeset: Option<&str>, list: bool) -> ZResu
 pub fn cmd_branch_create(name: &str, from: &str) -> ZResult<()> {
     let (_root, conn) = open_repo()?;
     let exists: Option<String> = conn
-        .query_row("SELECT name FROM branches WHERE name = ?1", rusqlite::params![name], |r| r.get(0))
+        .query_row(
+            "SELECT name FROM branches WHERE name = ?1",
+            rusqlite::params![name],
+            |r| r.get(0),
+        )
         .optional()?;
     if exists.is_some() {
         println!("branch {} already exists", name);
@@ -1904,7 +1960,12 @@ pub fn cmd_branch_create(name: &str, from: &str) -> ZResult<()> {
     // first commit, and `status` on it reports every file as new.
     crate::store::refresh_branch_tree(&conn, name)?;
     ops::record(&conn, "branch create", Some(name), Some(from))?;
-    println!("created branch {} from {} at {}", name, from, head.unwrap_or_else(|| "(empty)".into()));
+    println!(
+        "created branch {} from {} at {}",
+        name,
+        from,
+        head.unwrap_or_else(|| "(empty)".into())
+    );
     Ok(())
 }
 
@@ -1912,7 +1973,8 @@ pub fn cmd_branch_list() -> ZResult<()> {
     let (_root, conn) = open_repo()?;
     let cur = current_branch(&conn)?;
     let all: Vec<(String, Option<String>, i64)> = {
-        let mut stmt = conn.prepare("SELECT name, head, created_at FROM branches ORDER BY created_at")?;
+        let mut stmt =
+            conn.prepare("SELECT name, head, created_at FROM branches ORDER BY created_at")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1954,12 +2016,22 @@ pub fn cmd_branch_delete(name: &str) -> ZResult<()> {
     let (_root, conn) = open_repo()?;
     let cur = current_branch(&conn)?;
     if name == cur {
-        return Err(bad(format!("cannot delete the branch you are on ({})", name)));
+        return Err(bad(format!(
+            "cannot delete the branch you are on ({})",
+            name
+        )));
     }
     if branch_head(&conn, name).is_err() {
-        return Err(bad(format!("no such branch: {}{}", name, branch_names(&conn))));
+        return Err(bad(format!(
+            "no such branch: {}{}",
+            name,
+            branch_names(&conn)
+        )));
     }
-    conn.execute("DELETE FROM branches WHERE name = ?1", rusqlite::params![name])?;
+    conn.execute(
+        "DELETE FROM branches WHERE name = ?1",
+        rusqlite::params![name],
+    )?;
     // The derived tree goes with the branch. Leaving it behind would make a
     // branch created later under the same name start with a stale tree.
     conn.execute(
@@ -1979,13 +2051,20 @@ pub fn cmd_branch_delete(name: &str) -> ZResult<()> {
 pub fn cmd_branch_protect(name: &str, unset: bool) -> ZResult<()> {
     let (_root, conn) = open_repo()?;
     if crate::store::branch_head(&conn, name).is_err() {
-        return Err(bad(format!("no such branch: {}{}", name, branch_names(&conn))));
+        return Err(bad(format!(
+            "no such branch: {}{}",
+            name,
+            branch_names(&conn)
+        )));
     }
     if !crate::approval::set_protected(&conn, name, !unset)? {
         return Err(bad(format!("no such branch: {}", name)));
     }
     if unset {
-        println!("{} is no longer protected; a push to it needs no approval", name);
+        println!(
+            "{} is no longer protected; a push to it needs no approval",
+            name
+        );
     } else {
         println!(
             "{} is protected: a push to it now needs a sign-off from a credential other than the one pushing",
@@ -2011,7 +2090,12 @@ pub fn cmd_approve(id: &str, by: &str) -> ZResult<()> {
     // refused request.
     crate::audit::local::approve(&root, id, by, &branch);
     let signers = crate::approval::approvers(&conn, id)?;
-    println!("{} approved by {} (approvals: {})", id, by, signers.join(", "));
+    println!(
+        "{} approved by {} (approvals: {})",
+        id,
+        by,
+        signers.join(", ")
+    );
     if crate::approval::is_protected(&conn, &branch)? && signers.len() == 1 {
         // Worth saying here rather than at the push: a single approval is enough only if the pusher
         // is a different credential, and that is the thing people get wrong.
@@ -2083,7 +2167,13 @@ pub fn cmd_branch_merge_json(source: &str, target: &str, author: &str) -> ZResul
         ),
         (
             "applied",
-            crate::json::Json::arr(out.applied.iter().cloned().map(crate::json::Json::str).collect()),
+            crate::json::Json::arr(
+                out.applied
+                    .iter()
+                    .cloned()
+                    .map(crate::json::Json::str)
+                    .collect(),
+            ),
         ),
         ("conflicts", crate::conflict::reports_to_json(&out.reports)),
     ]));
@@ -2121,7 +2211,10 @@ pub fn cmd_branch_merge(source: &str, target: &str, author: &str) -> ZResult<()>
     }
 
     if out.applied.is_empty() {
-        println!("nothing to merge: {} has no changesets {} lacks", source, target);
+        println!(
+            "nothing to merge: {} has no changesets {} lacks",
+            source, target
+        );
         return Ok(());
     }
     ops::record(&conn, "merge", out.merge_changeset.as_deref(), Some(source))?;
@@ -2156,7 +2249,10 @@ pub fn cmd_branch_info(name: &str) -> ZResult<()> {
     println!("branch:      {}", name);
     println!("created:     {}", fmt_ts(ts));
     println!("from:        {}", from.unwrap_or_else(|| "-".into()));
-    println!("head:        {}", head.clone().unwrap_or_else(|| "(empty)".into()));
+    println!(
+        "head:        {}",
+        head.clone().unwrap_or_else(|| "(empty)".into())
+    );
     println!("changesets:  {}", reachable_from(&conn, name)?.len());
     if let (Some(h), Some(other)) = (&head, None::<String>) {
         let _ = (h, other);
@@ -2245,9 +2341,18 @@ pub fn cmd_status_json() -> ZResult<()> {
         ("branch", Json::str(branch)),
         ("head", head.map(Json::str).unwrap_or(Json::Null)),
         ("pending_changesets", Json::arr(pending)),
-        ("added", Json::arr(d.added.into_iter().map(Json::str).collect())),
-        ("modified", Json::arr(d.modified.into_iter().map(Json::str).collect())),
-        ("deleted", Json::arr(d.deleted.into_iter().map(Json::str).collect())),
+        (
+            "added",
+            Json::arr(d.added.into_iter().map(Json::str).collect()),
+        ),
+        (
+            "modified",
+            Json::arr(d.modified.into_iter().map(Json::str).collect()),
+        ),
+        (
+            "deleted",
+            Json::arr(d.deleted.into_iter().map(Json::str).collect()),
+        ),
         (
             "skipped_binary",
             Json::arr(d.skipped_binary.into_iter().map(Json::str).collect()),
@@ -2272,7 +2377,9 @@ pub fn cmd_log_json(limit: usize, envelope: bool) -> ZResult<()> {
             ("status", Json::str(r.get::<_, String>(4)?)),
             (
                 "parent",
-                r.get::<_, Option<String>>(5)?.map(Json::str).unwrap_or(Json::Null),
+                r.get::<_, Option<String>>(5)?
+                    .map(Json::str)
+                    .unwrap_or(Json::Null),
             ),
         ]))
     })?;
@@ -2310,10 +2417,7 @@ pub fn cmd_blame_json(file: &str) -> ZResult<()> {
             lines.push(Json::obj(vec![
                 ("line", Json::int(line)),
                 ("changeset", Json::str(cs.clone())),
-                (
-                    "author",
-                    Json::str(author.clone().unwrap_or_default()),
-                ),
+                ("author", Json::str(author.clone().unwrap_or_default())),
             ]));
         }
     }
@@ -2356,7 +2460,10 @@ pub fn cmd_history_json(file: &str) -> YResultAlias {
 
     emit(Json::obj(vec![
         ("path", Json::str(rel)),
-        ("rename_chain", Json::arr(chain.into_iter().map(Json::str).collect())),
+        (
+            "rename_chain",
+            Json::arr(chain.into_iter().map(Json::str).collect()),
+        ),
         ("versions", Json::arr(versions)),
     ]));
     Ok(())
@@ -2378,8 +2485,14 @@ pub fn cmd_diff_json(changeset: Option<&str>) -> YResultAlias {
                             .map(|(path, removed, added)| {
                                 Json::obj(vec![
                                     ("path", Json::str(path)),
-                                    ("removed", Json::arr(removed.into_iter().map(Json::str).collect())),
-                                    ("added", Json::arr(added.into_iter().map(Json::str).collect())),
+                                    (
+                                        "removed",
+                                        Json::arr(removed.into_iter().map(Json::str).collect()),
+                                    ),
+                                    (
+                                        "added",
+                                        Json::arr(added.into_iter().map(Json::str).collect()),
+                                    ),
                                 ])
                             })
                             .collect(),
@@ -2407,9 +2520,18 @@ pub fn cmd_diff_json(changeset: Option<&str>) -> YResultAlias {
             let d = repo::diff_worktree(&conn, &root, &branch)?;
             emit(Json::obj(vec![
                 ("branch", Json::str(branch)),
-                ("added", Json::arr(d.added.into_iter().map(Json::str).collect())),
-                ("modified", Json::arr(d.modified.into_iter().map(Json::str).collect())),
-                ("deleted", Json::arr(d.deleted.into_iter().map(Json::str).collect())),
+                (
+                    "added",
+                    Json::arr(d.added.into_iter().map(Json::str).collect()),
+                ),
+                (
+                    "modified",
+                    Json::arr(d.modified.into_iter().map(Json::str).collect()),
+                ),
+                (
+                    "deleted",
+                    Json::arr(d.deleted.into_iter().map(Json::str).collect()),
+                ),
                 (
                     "skipped_binary",
                     Json::arr(d.skipped_binary.into_iter().map(Json::str).collect()),
@@ -2459,13 +2581,16 @@ pub fn cmd_branch_json(sub: crate::BranchCmd) -> YResultAlias {
     match sub {
         crate::BranchCmd::List => {
             let cur = current_branch(&conn)?;
-            let mut stmt = conn.prepare("SELECT name, head, created_at FROM branches ORDER BY name")?;
+            let mut stmt =
+                conn.prepare("SELECT name, head, created_at FROM branches ORDER BY name")?;
             let rows = stmt.query_map([], |r| {
                 Ok(Json::obj(vec![
                     ("name", Json::str(r.get::<_, String>(0)?)),
                     (
                         "head",
-                        r.get::<_, Option<String>>(1)?.map(Json::str).unwrap_or(Json::Null),
+                        r.get::<_, Option<String>>(1)?
+                            .map(Json::str)
+                            .unwrap_or(Json::Null),
                     ),
                     ("created_at", Json::int(r.get::<_, i64>(2)?)),
                 ]))
@@ -2504,15 +2629,19 @@ pub fn cmd_changeset_json(sub: crate::ChangesetCmd) -> YResultAlias {
             emit(Json::arr(rows.collect::<rusqlite::Result<Vec<_>>>()?));
             Ok(())
         }
-        crate::ChangesetCmd::Create { message, author, paths, session, intent } => {
-            cmd_changeset_create_json(
-                &message,
-                &author,
-                session.as_deref(),
-                intent.as_deref(),
-                &paths,
-            )
-        }
+        crate::ChangesetCmd::Create {
+            message,
+            author,
+            paths,
+            session,
+            intent,
+        } => cmd_changeset_create_json(
+            &message,
+            &author,
+            session.as_deref(),
+            intent.as_deref(),
+            &paths,
+        ),
         crate::ChangesetCmd::Commit { id } => cmd_changeset_commit_json(&id),
         // A caller that asked for JSON and got text has a silent failure: it parses nothing and
         // branches on nothing, and the run looks successful. Refuse rather than print prose.
@@ -2556,7 +2685,10 @@ fn cmd_changeset_create_json(
                 .map(|(rel, old, _)| {
                     Json::obj(vec![
                         ("path", Json::str(rel.clone())),
-                        ("change", Json::str(if old.is_none() { "added" } else { "modified" })),
+                        (
+                            "change",
+                            Json::str(if old.is_none() { "added" } else { "modified" }),
+                        ),
                     ])
                 })
                 .collect(),
@@ -2599,7 +2731,11 @@ pub fn dispatch_branch_text(sub: crate::BranchCmd) -> ZResult<()> {
         crate::BranchCmd::List => cmd_branch_list(),
         crate::BranchCmd::Switch { name } => cmd_branch_switch(&name),
         crate::BranchCmd::Delete { name } => cmd_branch_delete(&name),
-        crate::BranchCmd::Merge { source, target, author } => cmd_branch_merge(&source, &target, &author),
+        crate::BranchCmd::Merge {
+            source,
+            target,
+            author,
+        } => cmd_branch_merge(&source, &target, &author),
         crate::BranchCmd::Info { name } => cmd_branch_info(&name),
         crate::BranchCmd::Protect { name, unset } => cmd_branch_protect(&name, unset),
         crate::BranchCmd::Conflicts { source, target } => cmd_merge_preview(&source, &target),
@@ -2674,7 +2810,10 @@ pub fn cmd_stash(sub: crate::StashCmd, json: bool) -> ZResult<()> {
                 println!("commit or restore them first, then pop again");
                 return Ok(());
             }
-            println!("applied stash {} ({} file(s)): {}", s.id, written, s.message);
+            println!(
+                "applied stash {} ({} file(s)): {}",
+                s.id, written, s.message
+            );
             Ok(())
         }
         StashCmd::Drop { id } => {
@@ -2701,7 +2840,11 @@ pub fn cmd_hook(sub: crate::HookCmd, json: bool) -> ZResult<()> {
         HookCmd::List => {
             let (root, _conn) = open_repo()?;
             for (name, installed) in crate::hooks::list(&root) {
-                println!("{}  {}", if installed { "installed" } else { "absent   " }, name);
+                println!(
+                    "{}  {}",
+                    if installed { "installed" } else { "absent   " },
+                    name
+                );
             }
             Ok(())
         }
@@ -2798,7 +2941,10 @@ pub fn cmd_hook_status(json: bool) -> ZResult<()> {
 pub fn cmd_bisect(sub: crate::BisectCmd) -> ZResult<()> {
     use crate::BisectCmd;
     match sub {
-        BisectCmd::Start { good, bad: bad_point } => {
+        BisectCmd::Start {
+            good,
+            bad: bad_point,
+        } => {
             let (root, conn) = open_repo()?;
             if crate::bisect::load(&conn)?.is_some() {
                 return Err(bad(
@@ -2898,7 +3044,10 @@ pub fn cmd_cherry_pick(source: &str, onto: Option<&str>, author: &str) -> ZResul
     let out = repo::cherry_pick(&conn, &root, source, &target, author)?;
 
     if !out.conflicts.is_empty() {
-        println!("cherry-pick stopped: {} file(s) conflict", out.conflicts.len());
+        println!(
+            "cherry-pick stopped: {} file(s) conflict",
+            out.conflicts.len()
+        );
         for p in &out.conflicts {
             println!("  {}", p);
         }
@@ -2911,7 +3060,10 @@ pub fn cmd_cherry_pick(source: &str, onto: Option<&str>, author: &str) -> ZResul
             Ok(())
         }
         None => {
-            println!("nothing to pick: the change is already present on {}", target);
+            println!(
+                "nothing to pick: the change is already present on {}",
+                target
+            );
             Ok(())
         }
     }
@@ -2933,7 +3085,9 @@ pub fn cmd_rebase(
     }
 
     if do_continue {
-        report_rebase(crate::rebase::continue_after_resolution(&conn, &root, author)?);
+        report_rebase(crate::rebase::continue_after_resolution(
+            &conn, &root, author,
+        )?);
         return Ok(());
     }
 
@@ -2981,7 +3135,10 @@ pub fn cmd_sub(sub: crate::SubCmd, json: bool) -> ZResult<()> {
             let (_root, conn) = open_repo()?;
             let s = crate::subrepo::add(&conn, &path, &remote)?;
             println!("added subrepository {} -> {}", s.path, s.remote);
-            println!("next: place a checkout there, then `gesta sub pin {}`", s.path);
+            println!(
+                "next: place a checkout there, then `gesta sub pin {}`",
+                s.path
+            );
             Ok(())
         }
         SubCmd::List => {
@@ -3098,12 +3255,15 @@ pub fn cmd_submodule(sub: crate::SubmoduleCmd, json: bool) -> ZResult<()> {
             if subs.contains_key(&path) {
                 return Err(bad(format!("submodule {} already exists", path)));
             }
-            subs.insert(path.clone(), crate::submodule::Submodule {
-                path: path.clone(),
-                url: url.clone(),
-                branch,
-                commit: None,
-            });
+            subs.insert(
+                path.clone(),
+                crate::submodule::Submodule {
+                    path: path.clone(),
+                    url: url.clone(),
+                    branch,
+                    commit: None,
+                },
+            );
             crate::submodule::write_gitmodules(&root, &subs)?;
             println!("added submodule {} -> {}", path, url.clone());
             println!("run `gesta submodule init` to clone it");
@@ -3194,7 +3354,10 @@ pub fn cmd_secret(sub: crate::SecretCmd) -> ZResult<()> {
             println!("store: {}", path.display());
             let first = read_hidden("passphrase: ")?;
             if first.len() < 8 {
-                return Err(bad("a passphrase shorter than 8 characters is not worth the file it protects".to_string()));
+                return Err(bad(
+                    "a passphrase shorter than 8 characters is not worth the file it protects"
+                        .to_string(),
+                ));
             }
             let again = read_hidden("repeat: ")?;
             if first != again {
@@ -3207,7 +3370,11 @@ pub fn cmd_secret(sub: crate::SecretCmd) -> ZResult<()> {
             let existing = store.load()?;
             // Saving an empty map is what creates the file, and keeps what is there.
             store.save(&existing)?;
-            println!("created {} ({} entries kept)", store.path.display(), existing.len());
+            println!(
+                "created {} ({} entries kept)",
+                store.path.display(),
+                existing.len()
+            );
             Ok(())
         }
         SecretCmd::Set { name } => {
@@ -3264,7 +3431,11 @@ fn resolve_from(
     // a revision. Without it the earlier behaviour had no way to be requested at all, and removing
     // a capability to fix a default is not a fix.
     if let Some(f) = from {
-        return Ok(if f.is_empty() { None } else { Some(f.to_string()) });
+        return Ok(if f.is_empty() {
+            None
+        } else {
+            Some(f.to_string())
+        });
     }
     let to = match to {
         Some(t) => t,
@@ -3323,7 +3494,10 @@ pub fn cmd_diff_range_json(from: Option<&str>, to: Option<&str>) -> ZResult<()> 
                         "removed",
                         Json::arr(removed.into_iter().map(Json::str).collect()),
                     ),
-                    ("added", Json::arr(added.into_iter().map(Json::str).collect())),
+                    (
+                        "added",
+                        Json::arr(added.into_iter().map(Json::str).collect()),
+                    ),
                 ])
             })
             .collect(),
@@ -3442,10 +3616,13 @@ pub fn cmd_review_json(
 
     emit_object(vec![
         ("branch", crate::json::Json::str(target.to_string())),
-        ("from", match from {
-            Some(f) => crate::json::Json::str(f.to_string()),
-            None => crate::json::Json::Null,
-        }),
+        (
+            "from",
+            match from {
+                Some(f) => crate::json::Json::str(f.to_string()),
+                None => crate::json::Json::Null,
+            },
+        ),
         ("shown", crate::json::Json::int(items.len() as i64)),
         ("below_threshold", crate::json::Json::int(hidden)),
         ("steps", crate::json::Json::arr(items)),
@@ -3460,7 +3637,11 @@ pub fn cmd_review(from: Option<&str>, to: Option<&str>, min_risk: Option<&str>) 
 
     let steps = crate::repo::review_stack(&conn, from, target)?;
     if steps.is_empty() {
-        println!("nothing between {} and {}", from.unwrap_or("the start"), target);
+        println!(
+            "nothing between {} and {}",
+            from.unwrap_or("the start"),
+            target
+        );
         return Ok(());
     }
 
@@ -3670,7 +3851,11 @@ mod pending_tests {
         // Deleting the file is also a mismatch.
         std::fs::remove_file(dir.join("f.txt")).unwrap();
         let gone = pending_out_of_date(&conn, &dir, 0).unwrap();
-        assert_eq!(gone.len(), 1, "a file removed after the snapshot was not reported");
+        assert_eq!(
+            gone.len(),
+            1,
+            "a file removed after the snapshot was not reported"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

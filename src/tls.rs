@@ -24,7 +24,10 @@ use std::sync::Arc;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, ServerConfig, ServerConnection, SignatureScheme, StreamOwned};
+use rustls::{
+    ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, ServerConfig,
+    ServerConnection, SignatureScheme, StreamOwned,
+};
 
 use crate::{bad, ZResult};
 
@@ -248,10 +251,7 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Wrap an accepted TCP connection in a server-side TLS session.
-pub fn accept(
-    stream: TcpStream,
-    cfg: Arc<ServerConfig>,
-) -> ZResult<TlsStream> {
+pub fn accept(stream: TcpStream, cfg: Arc<ServerConfig>) -> ZResult<TlsStream> {
     let conn = ServerConnection::new(cfg)
         .map_err(|e| bad(format!("cannot start a TLS session: {}", e)))?;
     Ok(TlsStream::Server(Box::new(StreamOwned::new(conn, stream))))
@@ -394,7 +394,10 @@ pub fn connect(
 /// Returns the SHA-256 fingerprint of the certificate, which the operator pins on
 /// the client. The certificate covers the host name and 127.0.0.1 so a loopback
 /// test works without a second file.
-pub fn generate_self_signed(host: &str, dir: &Path) -> ZResult<(std::path::PathBuf, std::path::PathBuf, String)> {
+pub fn generate_self_signed(
+    host: &str,
+    dir: &Path,
+) -> ZResult<(std::path::PathBuf, std::path::PathBuf, String)> {
     use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
 
     let mut params = CertificateParams::default();
@@ -403,7 +406,11 @@ pub fn generate_self_signed(host: &str, dir: &Path) -> ZResult<(std::path::PathB
     dn.push(DnType::OrganizationName, "gesta");
     params.distinguished_name = dn;
     params.subject_alt_names = vec![
-        SanType::DnsName(host.to_string().try_into().map_err(|_| bad("bad host name"))?),
+        SanType::DnsName(
+            host.to_string()
+                .try_into()
+                .map_err(|_| bad("bad host name"))?,
+        ),
         SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
     ];
     // Ten years: this is a private-network certificate, and an expiry that
@@ -506,7 +513,10 @@ mod tests {
         assert!(client_config(Some("abcd")).is_err(), "too short");
         assert!(client_config(Some("zz")).is_err(), "not hex");
         let ok = "0".repeat(64);
-        assert!(client_config(Some(&ok)).is_ok(), "64 hex characters is valid");
+        assert!(
+            client_config(Some(&ok)).is_ok(),
+            "64 hex characters is valid"
+        );
     }
 
     #[test]
@@ -524,7 +534,10 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "the private key must not be readable by others");
+            assert_eq!(
+                mode, 0o600,
+                "the private key must not be readable by others"
+            );
         }
         // On Windows the mode bits do not exist, so the name is unused there and clippy refuses it
         // under -D warnings. Naming the reason is better than an allow attribute that hides it.

@@ -68,7 +68,10 @@ pub fn uri_encode(s: &str, keep_slash: bool) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         let c = b as char;
-        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') || (keep_slash && c == '/') {
+        if c.is_ascii_alphanumeric()
+            || matches!(c, '-' | '_' | '.' | '~')
+            || (keep_slash && c == '/')
+        {
             out.push(c);
         } else {
             out.push('%');
@@ -197,10 +200,7 @@ mod tests {
             ],
             headers: vec![
                 ("host".to_string(), "iam.amazonaws.com".to_string()),
-                (
-                    "x-amz-date".to_string(),
-                    "20150830T123600Z".to_string(),
-                ),
+                ("x-amz-date".to_string(), "20150830T123600Z".to_string()),
                 (
                     "content-type".to_string(),
                     "application/x-www-form-urlencoded; charset=utf-8".to_string(),
@@ -217,12 +217,11 @@ mod tests {
                 "20150830T123600Z",
             )
             .unwrap();
+        assert!(auth.contains(&sig), "the header must carry the signature");
         assert!(
-            auth.contains(&sig),
-            "the header must carry the signature"
-        );
-        assert!(
-            auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/iam/aws4_request"),
+            auth.starts_with(
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/iam/aws4_request"
+            ),
             "scope is part of the header, got {}",
             auth
         );

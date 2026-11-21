@@ -5,44 +5,42 @@
 
 mod approval;
 mod attributes;
-mod backup;
 mod audit;
 mod audit_forward;
 mod auth;
+mod backup;
 mod bisect;
 mod brief;
 mod cache;
-mod clock;
 mod cli;
 mod cli_remote;
+mod clock;
 mod conflict;
 mod content;
 mod delta;
 mod delta_pack;
-#[cfg(windows)]
-mod vfs;
+mod error;
 mod git_bridge;
 mod gitobj;
 mod gitserver;
 mod grep;
 mod history;
-mod impact;
 mod hooks;
 mod http;
+mod impact;
 mod json;
 mod keyring;
 #[cfg(feature = "regex")]
 mod leak;
 mod mcp;
-mod error;
-mod privacy;
 mod merge;
 mod ops;
-mod packfile;
 mod pack;
-mod remote;
-mod rebase;
+mod packfile;
+mod privacy;
 mod protocol_v2;
+mod rebase;
+mod remote;
 mod repo;
 mod s3;
 mod secrets;
@@ -51,11 +49,13 @@ mod sign;
 mod sigv4;
 mod sparse;
 mod stash;
+mod store;
 mod submodule;
 mod subrepo;
-mod store;
 #[cfg(feature = "tls")]
 mod tls;
+#[cfg(windows)]
+mod vfs;
 mod worktree;
 
 use clap::{Parser, Subcommand};
@@ -557,7 +557,8 @@ enum Cmd {
     Submodule {
         #[command(subcommand)]
         sub: SubmoduleCmd,
-    },    Ignore {
+    },
+    Ignore {
         #[command(subcommand)]
         sub: IgnoreCmd,
     },
@@ -626,7 +627,10 @@ enum ChangesetCmd {
 #[derive(Subcommand)]
 enum BisectCmd {
     /// Begin a search between a known good and a known bad changeset
-    Start { good: String, bad: String },
+    Start {
+        good: String,
+        bad: String,
+    },
     /// Report the changeset under test as good, or as bad
     Good,
     Bad,
@@ -735,8 +739,12 @@ enum BranchCmd {
         from: String,
     },
     List,
-    Switch { name: String },
-    Delete { name: String },
+    Switch {
+        name: String,
+    },
+    Delete {
+        name: String,
+    },
     Merge {
         source: String,
         #[arg(long, default_value = "main")]
@@ -744,7 +752,9 @@ enum BranchCmd {
         #[arg(long, default_value = "agent")]
         author: String,
     },
-    Info { name: String },
+    Info {
+        name: String,
+    },
     /// Protect a branch so a push to it needs a sign-off from another credential
     Protect {
         name: String,
@@ -1047,7 +1057,12 @@ fn run() -> ZResult<()> {
         } if json => cli::cmd_log_json(limit, envelope),
         Cmd::Blame { file, .. } if json => cli::cmd_blame_json(&file),
         Cmd::History { file } if json => cli::cmd_history_json(&file),
-        Cmd::Diff { changeset, from, to, .. } if json => {
+        Cmd::Diff {
+            changeset,
+            from,
+            to,
+            ..
+        } if json => {
             if from.is_some() || to.is_some() {
                 cli::cmd_diff_range_json(from.as_deref(), to.as_deref())
             } else {
@@ -1063,26 +1078,53 @@ fn run() -> ZResult<()> {
             sub: BranchCmd::Conflicts { source, target },
         } => cli::cmd_merge_preview(&source, &target),
         Cmd::Branch {
-            sub: BranchCmd::Merge { source, target, author },
+            sub:
+                BranchCmd::Merge {
+                    source,
+                    target,
+                    author,
+                },
         } if json => cli::cmd_branch_merge_json(&source, &target, &author),
         Cmd::Branch { sub } if json => cli::cmd_branch_json(sub),
         Cmd::Changeset { sub } if json => cli::cmd_changeset_json(sub),
         Cmd::Sparse { sub } => cli::cmd_sparse(sub),
-        Cmd::Rebase { onto, branch, author, continue_, abort } => {
-            cli::cmd_rebase(onto.as_deref(), branch.as_deref(), &author, continue_, abort)
-        }
-        Cmd::CherryPick { source, onto, author } => cli::cmd_cherry_pick(&source, onto.as_deref(), &author),
+        Cmd::Rebase {
+            onto,
+            branch,
+            author,
+            continue_,
+            abort,
+        } => cli::cmd_rebase(
+            onto.as_deref(),
+            branch.as_deref(),
+            &author,
+            continue_,
+            abort,
+        ),
+        Cmd::CherryPick {
+            source,
+            onto,
+            author,
+        } => cli::cmd_cherry_pick(&source, onto.as_deref(), &author),
         Cmd::Bisect { sub } => cli::cmd_bisect(sub),
         Cmd::Sub { sub } => cli::cmd_sub(sub, json),
         Cmd::Submodule { sub } => cli::cmd_submodule(sub, json),
         Cmd::Stash { sub } => cli::cmd_stash(sub, json),
         Cmd::Hook { sub } => cli::cmd_hook(sub, json),
         Cmd::Init { bare } => cli::cmd_init(bare),
-        Cmd::Anonymise { authors, to, branch, dry_run } => {
-            cli::cmd_anonymise(&authors, &to, &branch, dry_run)
-        }
+        Cmd::Anonymise {
+            authors,
+            to,
+            branch,
+            dry_run,
+        } => cli::cmd_anonymise(&authors, &to, &branch, dry_run),
         Cmd::Status => cli::cmd_status(),
-        Cmd::Diff { changeset, from, to, name_only } => {
+        Cmd::Diff {
+            changeset,
+            from,
+            to,
+            name_only,
+        } => {
             if from.is_some() || to.is_some() {
                 cli::cmd_diff_range(from.as_deref(), to.as_deref(), name_only)
             } else {
@@ -1095,7 +1137,13 @@ fn run() -> ZResult<()> {
             ChangesetCmd::Approve { id, by } => cli::cmd_approve(&id, &by),
             ChangesetCmd::Approvals { id } => cli::cmd_approvals(&id),
             ChangesetCmd::Find { commit } => cli::cmd_changeset_for_commit(&commit),
-            ChangesetCmd::Create { message, author, paths, session, intent } => {
+            ChangesetCmd::Create {
+                message,
+                author,
+                paths,
+                session,
+                intent,
+            } => {
                 let session = session.or_else(|| std::env::var("GESTA_SESSION").ok());
                 cli::cmd_changeset_create_paths(
                     &message,
@@ -1117,14 +1165,21 @@ fn run() -> ZResult<()> {
         Cmd::Ls { rev, path, long: _ } if json => cli::cmd_ls_json(rev.as_deref(), path.as_deref()),
         Cmd::Ls { rev, path, long } => cli::cmd_ls(rev.as_deref(), path.as_deref(), long),
         Cmd::Git { sub } => match sub {
-            GitCmd::Import { path, path_prefix } => cli::cmd_git_import(&path, path_prefix.as_deref()),
+            GitCmd::Import { path, path_prefix } => {
+                cli::cmd_git_import(&path, path_prefix.as_deref())
+            }
             GitCmd::Export { path, branch } => cli::cmd_git_export(&path, branch.as_deref()),
             GitCmd::Push { remote, branch } => cli::cmd_git_push(&remote, branch.as_deref()),
-            GitCmd::Pull { remote, path_prefix } => {
-                cli::cmd_git_pull(&remote, path_prefix.as_deref())
-            }
+            GitCmd::Pull {
+                remote,
+                path_prefix,
+            } => cli::cmd_git_pull(&remote, path_prefix.as_deref()),
         },
-        Cmd::Brief { json: brief_json, fix, stash } => {
+        Cmd::Brief {
+            json: brief_json,
+            fix,
+            stash,
+        } => {
             if fix {
                 cli::cmd_brief_fix(brief_json, stash)
             } else if brief_json {
@@ -1168,30 +1223,43 @@ fn run() -> ZResult<()> {
         Cmd::RestoreRepo { file, yes } => cli::cmd_restore_repo(&file, yes),
         Cmd::Undo => cli::cmd_undo(),
         Cmd::Redo => cli::cmd_redo(),
-        Cmd::Revert { id, reason, author } => {
-            cli::cmd_revert(&id, reason.as_deref(), &author)
-        }
+        Cmd::Revert { id, reason, author } => cli::cmd_revert(&id, reason.as_deref(), &author),
         Cmd::Ops { limit } => cli::cmd_ops(limit),
-        Cmd::Tag { name, changeset, list } => {
-            cli::cmd_tag(name.as_deref(), changeset.as_deref(), list)
-        }
+        Cmd::Tag {
+            name,
+            changeset,
+            list,
+        } => cli::cmd_tag(name.as_deref(), changeset.as_deref(), list),
         Cmd::Branch { sub } => match sub {
             BranchCmd::Create { name, from } => cli::cmd_branch_create(&name, &from),
             BranchCmd::List => cli::cmd_branch_list(),
             BranchCmd::Switch { name } => cli::cmd_branch_switch(&name),
             BranchCmd::Delete { name } => cli::cmd_branch_delete(&name),
-            BranchCmd::Merge { source, target, author } => cli::cmd_branch_merge(&source, &target, &author),
+            BranchCmd::Merge {
+                source,
+                target,
+                author,
+            } => cli::cmd_branch_merge(&source, &target, &author),
             BranchCmd::Info { name } => cli::cmd_branch_info(&name),
             BranchCmd::Protect { name, unset } => cli::cmd_branch_protect(&name, unset),
             BranchCmd::Conflicts { source, target } => cli::cmd_merge_preview(&source, &target),
         },
         Cmd::Remote { sub } => match sub {
-            RemoteCmd::Add { name, url, token, pin } => {
-                cli_remote::cmd_remote_add(&name, &url, token.as_deref(), pin.as_deref())
-            }
+            RemoteCmd::Add {
+                name,
+                url,
+                token,
+                pin,
+            } => cli_remote::cmd_remote_add(&name, &url, token.as_deref(), pin.as_deref()),
             RemoteCmd::List => cli_remote::cmd_remote_list(),
             RemoteCmd::Token { sub } => match sub {
-                TokenCmd::Add { role, name, hashed, scope, branches } => cli_remote::cmd_token_add(
+                TokenCmd::Add {
+                    role,
+                    name,
+                    hashed,
+                    scope,
+                    branches,
+                } => cli_remote::cmd_token_add(
                     &role,
                     &name,
                     hashed,
@@ -1203,27 +1271,43 @@ fn run() -> ZResult<()> {
                 }
                 TokenCmd::List => cli_remote::cmd_token_list(),
                 TokenCmd::Remove { selector } => cli_remote::cmd_token_remove(&selector),
-                TokenCmd::Audit { refused, limit } => {
-                    cli_remote::cmd_audit(refused, limit, json)
-                }
+                TokenCmd::Audit { refused, limit } => cli_remote::cmd_audit(refused, limit, json),
             },
             RemoteCmd::Ls { remote } => cli_remote::cmd_remote_ls(&remote),
-            RemoteCmd::Deepen { depth, unshallow, remote, branch, dry_run } => {
-                cli_remote::cmd_deepen(depth, unshallow, &remote, &branch, dry_run)
-            }
-            RemoteCmd::Inspect { remote, branch, json_inspect, check_identity } => {
-                cli_remote::cmd_inspect(&remote, &branch, json_inspect || json, check_identity)
-            }
+            RemoteCmd::Deepen {
+                depth,
+                unshallow,
+                remote,
+                branch,
+                dry_run,
+            } => cli_remote::cmd_deepen(depth, unshallow, &remote, &branch, dry_run),
+            RemoteCmd::Inspect {
+                remote,
+                branch,
+                json_inspect,
+                check_identity,
+            } => cli_remote::cmd_inspect(&remote, &branch, json_inspect || json, check_identity),
             RemoteCmd::Push { remote, branch } => cli_remote::cmd_push(&remote, &branch),
-            RemoteCmd::Pull { remote, branch, author } => cli_remote::cmd_pull(&remote, &branch, &author),
-            RemoteCmd::Clone { url, dir, token, pin, depth } => {
-                cli_remote::cmd_clone(&url, &dir, token.as_deref(), pin.as_deref(), depth)
-            }
+            RemoteCmd::Pull {
+                remote,
+                branch,
+                author,
+            } => cli_remote::cmd_pull(&remote, &branch, &author),
+            RemoteCmd::Clone {
+                url,
+                dir,
+                token,
+                pin,
+                depth,
+            } => cli_remote::cmd_clone(&url, &dir, token.as_deref(), pin.as_deref(), depth),
         },
         Cmd::Secret { sub } => cli::cmd_secret(sub),
-        Cmd::Land { source, onto, expect, author } => {
-            cli::cmd_land(&source, &onto, expect.as_deref(), &author)
-        }
+        Cmd::Land {
+            source,
+            onto,
+            expect,
+            author,
+        } => cli::cmd_land(&source, &onto, expect.as_deref(), &author),
         Cmd::Review { from, to, min_risk } => {
             if json {
                 cli::cmd_review_json(from.as_deref(), to.as_deref(), min_risk.as_deref())
@@ -1234,9 +1318,12 @@ fn run() -> ZResult<()> {
         Cmd::Mcp => cli::cmd_mcp(),
         #[cfg(windows)]
         Cmd::Mount { target, branch } => cli::cmd_mount(&target, branch.as_deref()),
-        Cmd::Serve { bind, port, tls, key } => {
-            cli_remote::cmd_serve(&bind, port, tls.as_deref(), key.as_deref())
-        }
+        Cmd::Serve {
+            bind,
+            port,
+            tls,
+            key,
+        } => cli_remote::cmd_serve(&bind, port, tls.as_deref(), key.as_deref()),
         Cmd::Fsck { prune, worktree } => cli_remote::cmd_fsck(prune, worktree),
         Cmd::Gc => cli_remote::cmd_gc(),
         Cmd::Key { sub } => match sub {
@@ -1265,11 +1352,7 @@ mod tests {
     use super::*;
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "gesta-root-{}-{}",
-            tag,
-            std::process::id()
-        ));
+        let d = std::env::temp_dir().join(format!("gesta-root-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

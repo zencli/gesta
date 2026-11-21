@@ -89,9 +89,9 @@ impl Grant {
             return true;
         }
         let name = path.rsplit('/').next().unwrap_or(path);
-        self.scope.iter().any(|pat| {
-            glob_match(pat, path) || (!pat.contains('/') && glob_match(pat, name))
-        })
+        self.scope
+            .iter()
+            .any(|pat| glob_match(pat, path) || (!pat.contains('/') && glob_match(pat, name)))
     }
 }
 
@@ -114,7 +114,11 @@ fn glob_match(pattern: &str, text: &str) -> bool {
             // `**` crosses directory separators; the leading `/` in `**/x` is
             // optional so `**/a.md` also matches a top level `a.md`.
             let rest = &p[2..];
-            let rest = if rest.first() == Some(&'/') { &rest[1..] } else { rest };
+            let rest = if rest.first() == Some(&'/') {
+                &rest[1..]
+            } else {
+                rest
+            };
             for skip in 0..=t.len() {
                 if go(rest, &t[skip..]) {
                     return true;
@@ -394,7 +398,10 @@ mod tests {
 
     #[test]
     fn parses_token_role_and_name() {
-        let a = Auth::from_entries(&["abc123:write:alice".to_string(), "def456:read:bob".to_string()]);
+        let a = Auth::from_entries(&[
+            "abc123:write:alice".to_string(),
+            "def456:read:bob".to_string(),
+        ]);
         assert_eq!(a.token_count(), 2);
 
         let g = a.authenticate("abc123").unwrap();
@@ -473,7 +480,10 @@ mod tests {
         let token = "real-token";
         let d = digest(token);
         let a = Auth::from_entries(&[format!("sha256:{}:write:x", d)]);
-        assert!(a.authenticate(&d).is_none(), "a stolen digest must not work as a token");
+        assert!(
+            a.authenticate(&d).is_none(),
+            "a stolen digest must not work as a token"
+        );
         assert!(a.authenticate(token).is_some());
     }
 
@@ -548,12 +558,18 @@ mod tests {
     #[test]
     fn authenticate_now_separates_expired_from_unknown() {
         let a = Auth::from_entries(&["abc:write:alice::1000".to_string()]);
-        assert!(matches!(a.authenticate_now("abc", 500), AuthOutcome::Granted(_)));
+        assert!(matches!(
+            a.authenticate_now("abc", 500),
+            AuthOutcome::Granted(_)
+        ));
         match a.authenticate_now("abc", 2000) {
             AuthOutcome::Expired(name) => assert_eq!(name, "alice"),
             other => panic!("expected Expired, got {:?}", other),
         }
-        assert!(matches!(a.authenticate_now("wrong", 500), AuthOutcome::Unknown));
+        assert!(matches!(
+            a.authenticate_now("wrong", 500),
+            AuthOutcome::Unknown
+        ));
     }
 
     #[test]
@@ -577,7 +593,10 @@ mod tests {
         };
         assert!(g.permits("docs/a/b.md"));
         assert!(g.permits("README.md"));
-        assert!(g.permits("nested/readme.md"), "a bare name pattern matches any depth");
+        assert!(
+            g.permits("nested/readme.md"),
+            "a bare name pattern matches any depth"
+        );
         assert!(g.permits("src/lib/one.rs"));
         assert!(!g.permits("src/lib/two.rs"));
         assert!(!g.permits("src/main.rs"));
@@ -605,8 +624,14 @@ mod tests {
         // what the reload looks for; force it visible by touching the file again.
         a.loaded_at = None;
         a.reload_if_changed(&file);
-        assert!(a.required, "removing the last token must not open the server");
-        assert!(a.authenticate("secret").is_none(), "the removed token is gone");
+        assert!(
+            a.required,
+            "removing the last token must not open the server"
+        );
+        assert!(
+            a.authenticate("secret").is_none(),
+            "the removed token is gone"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -633,7 +658,10 @@ mod tests {
         // would make a branch field on a read token silently hide history.
         let a = Auth::from_entries(&["t:read:agent:::main".to_string()]);
         let g = a.authenticate("t").unwrap();
-        assert!(g.permits_branch("anything"), "a read grant is not branch limited");
+        assert!(
+            g.permits_branch("anything"),
+            "a read grant is not branch limited"
+        );
     }
 
     #[test]

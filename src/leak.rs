@@ -319,7 +319,11 @@ pub fn shannon(s: &str) -> f64 {
 pub fn redact(secret: &str) -> String {
     let visible = 4.min(secret.chars().count());
     let head: String = secret.chars().take(visible).collect();
-    format!("{}{}", head, "*".repeat(secret.chars().count().saturating_sub(visible)))
+    format!(
+        "{}{}",
+        head,
+        "*".repeat(secret.chars().count().saturating_sub(visible))
+    )
 }
 
 /// A stable identity for a finding that does not move when the file is edited above it.
@@ -397,7 +401,12 @@ fn glob(pattern: &str, text: &str) -> bool {
 pub fn default_rules() -> Vec<Rule> {
     let specs: &[(&str, &str, usize, Option<f64>)] = &[
         // Cloud provider access keys have a documented prefix and a fixed length.
-        ("aws-access-key-id", r"\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b", 0, Some(3.0)),
+        (
+            "aws-access-key-id",
+            r"\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b",
+            0,
+            Some(3.0),
+        ),
         (
             "aws-secret-access-key",
             r#"(?i)aws_secret_access_key\s*[=:]\s*['"]?([A-Za-z0-9/+=]{40})"#,
@@ -406,21 +415,66 @@ pub fn default_rules() -> Vec<Rule> {
         ),
         // GitHub tokens: prefix plus length is the whole signal.
         ("github-pat", r"\bghp_[A-Za-z0-9]{36}\b", 0, Some(3.0)),
-        ("github-fine-grained", r"\bgithub_pat_[A-Za-z0-9_]{82}\b", 0, Some(3.0)),
+        (
+            "github-fine-grained",
+            r"\bgithub_pat_[A-Za-z0-9_]{82}\b",
+            0,
+            Some(3.0),
+        ),
         ("github-oauth", r"\bgho_[A-Za-z0-9]{36}\b", 0, Some(3.0)),
         ("gitlab-pat", r"\bglpat-[A-Za-z0-9_-]{20}\b", 0, Some(3.0)),
         // Payment providers, where the prefix is documented and the cost of a leak is money.
-        ("stripe-secret", r"\b(?:sk|rk)_live_[A-Za-z0-9]{24,}\b", 0, Some(3.0)),
-        ("stripe-restricted", r"\brk_live_[A-Za-z0-9]{24,}\b", 0, Some(3.0)),
+        (
+            "stripe-secret",
+            r"\b(?:sk|rk)_live_[A-Za-z0-9]{24,}\b",
+            0,
+            Some(3.0),
+        ),
+        (
+            "stripe-restricted",
+            r"\brk_live_[A-Za-z0-9]{24,}\b",
+            0,
+            Some(3.0),
+        ),
         // Messaging and mail.
-        ("slack-token", r"\bxox[baprs]-[A-Za-z0-9-]{10,72}\b", 0, Some(3.0)),
-        ("slack-webhook", r"https://hooks\.slack\.com/services/T[A-Za-z0-9_]+/B[A-Za-z0-9_]+/[A-Za-z0-9_]+", 0, Some(3.0)),
-        ("sendgrid-key", r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b", 0, Some(3.0)),
+        (
+            "slack-token",
+            r"\bxox[baprs]-[A-Za-z0-9-]{10,72}\b",
+            0,
+            Some(3.0),
+        ),
+        (
+            "slack-webhook",
+            r"https://hooks\.slack\.com/services/T[A-Za-z0-9_]+/B[A-Za-z0-9_]+/[A-Za-z0-9_]+",
+            0,
+            Some(3.0),
+        ),
+        (
+            "sendgrid-key",
+            r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b",
+            0,
+            Some(3.0),
+        ),
         // Model providers.
-        ("openai-key", r"\bsk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}\b", 0, Some(3.0)),
-        ("anthropic-key", r"\bsk-ant-[A-Za-z0-9_-]{20,}\b", 0, Some(3.0)),
+        (
+            "openai-key",
+            r"\bsk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}\b",
+            0,
+            Some(3.0),
+        ),
+        (
+            "anthropic-key",
+            r"\bsk-ant-[A-Za-z0-9_-]{20,}\b",
+            0,
+            Some(3.0),
+        ),
         // Private keys are a shape no entropy check improves on.
-        ("private-key", r"-----BEGIN (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY(?: BLOCK)?-----", 0, None),
+        (
+            "private-key",
+            r"-----BEGIN (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY(?: BLOCK)?-----",
+            0,
+            None,
+        ),
         // A connection string with a password in it.
         (
             "url-with-password",
@@ -487,7 +541,10 @@ mod tests {
         assert_eq!(got[0].rule, "aws-access-key-id");
         assert_eq!(got[0].line, 1);
         assert!(got[0].redacted.starts_with("AKIA"));
-        assert!(!got[0].redacted.contains("2E4F"), "the secret is not repeated in the report");
+        assert!(
+            !got[0].redacted.contains("2E4F"),
+            "the secret is not repeated in the report"
+        );
     }
 
     #[test]
@@ -511,7 +568,11 @@ mod tests {
         s.allowlist.stopwords.clear();
         // Twenty characters, all the same letter: the shape matches, the entropy does not.
         let got = s.scan_text("a.txt", "AAAAAAAAAAAAAAAAAAAAAAAA\n");
-        assert!(got.is_empty(), "a repetitive string passed the entropy floor: {:?}", got);
+        assert!(
+            got.is_empty(),
+            "a repetitive string passed the entropy floor: {:?}",
+            got
+        );
     }
 
     #[test]
@@ -527,15 +588,23 @@ mod tests {
         // The test suite holds a PEM header, and the project has to be able to commit its own tests.
         let mut s = Scanner::default();
         s.allowlist.paths.push("src/tls.rs".to_string());
-        assert!(s.scan_text("src/tls.rs", "-----BEGIN PRIVATE KEY-----\\n").is_empty());
+        assert!(s
+            .scan_text("src/tls.rs", "-----BEGIN PRIVATE KEY-----\\n")
+            .is_empty());
         // The same text outside that file is still a finding.
-        assert_eq!(s.scan_text("other.rs", "-----BEGIN PRIVATE KEY-----").len(), 1);
+        assert_eq!(
+            s.scan_text("other.rs", "-----BEGIN PRIVATE KEY-----").len(),
+            1
+        );
     }
 
     #[test]
     fn a_connection_string_password_is_caught() {
         let s = scanner();
-        let got = s.scan_text("c.py", "url = \"postgres://admin:hunter2hunter2@db.internal/app\"\n");
+        let got = s.scan_text(
+            "c.py",
+            "url = \"postgres://admin:hunter2hunter2@db.internal/app\"\n",
+        );
         assert_eq!(got.len(), 1, "got {:?}", got);
         assert_eq!(got[0].rule, "url-with-password");
     }
@@ -545,7 +614,9 @@ mod tests {
         let s = scanner();
         // A long random-looking value with no keyword near it is not reported, because a rule that
         // fires on every base64 blob reports every file.
-        assert!(s.scan_text("a.txt", "value = \"Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA\"\n").is_empty());
+        assert!(s
+            .scan_text("a.txt", "value = \"Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA\"\n")
+            .is_empty());
         let got = s.scan_text("b.txt", "api_key = \"9f8e7d6c5b4a39281706f5e4d3c2b1a0\"\n");
         assert_eq!(got.len(), 1, "got {:?}", got);
     }
@@ -572,7 +643,10 @@ mod tests {
         let b = fingerprint("aws-access-key-id", "a.py", "AKIA2E4F6G8H0J2K4L6M");
         assert_eq!(a, b);
         // A different file, rule or secret is a different finding.
-        assert_ne!(a, fingerprint("aws-access-key-id", "b.py", "AKIA2E4F6G8H0J2K4L6M"));
+        assert_ne!(
+            a,
+            fingerprint("aws-access-key-id", "b.py", "AKIA2E4F6G8H0J2K4L6M")
+        );
         assert_ne!(a, fingerprint("github-pat", "a.py", "AKIA2E4F6G8H0J2K4L6M"));
     }
 
@@ -588,7 +662,10 @@ mod tests {
     fn a_rule_that_cannot_compile_is_reported_rather_than_dropped() {
         let got = Rule::new("broken", "(unclosed", 0, None);
         assert!(got.is_err());
-        assert!(got.unwrap_err().contains("broken"), "the message names the rule");
+        assert!(
+            got.unwrap_err().contains("broken"),
+            "the message names the rule"
+        );
     }
 
     #[test]

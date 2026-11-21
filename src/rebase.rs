@@ -23,7 +23,14 @@ use rusqlite::Connection;
 use crate::{bad, now, repo, ZResult};
 
 /// A row of the `rebase` table, as stored.
-type Row = (String, String, String, Option<String>, String, Option<String>);
+type Row = (
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+);
 
 pub struct Session {
     pub branch: String,
@@ -88,14 +95,16 @@ pub fn load(conn: &Connection) -> ZResult<Option<Session>> {
             },
         )
         .ok();
-    Ok(row.map(|(branch, onto, pending, current, done, original_head)| Session {
-        branch,
-        onto,
-        pending: split(&pending),
-        current,
-        done: split(&done),
-        original_head,
-    }))
+    Ok(row.map(
+        |(branch, onto, pending, current, done, original_head)| Session {
+            branch,
+            onto,
+            pending: split(&pending),
+            current,
+            done: split(&done),
+            original_head,
+        },
+    ))
 }
 
 fn split(s: &str) -> Vec<String> {
@@ -238,10 +247,12 @@ pub fn continue_after_resolution(
     root: &Path,
     author: &str,
 ) -> ZResult<Progress> {
-    let mut s = load(conn)?.ok_or_else(|| Box::new(crate::error::Error::new(
+    let mut s = load(conn)?.ok_or_else(|| {
+        Box::new(crate::error::Error::new(
             crate::error::Code::Unmerged,
             "no rebase in progress: there is nothing to continue",
-        )))?;
+        ))
+    })?;
     let current = s
         .current
         .clone()
@@ -289,10 +300,12 @@ pub fn continue_after_resolution(
 
 /// Put the branch back where it started and forget the session.
 pub fn abort(conn: &Connection, root: &Path) -> ZResult<String> {
-    let s = load(conn)?.ok_or_else(|| Box::new(crate::error::Error::new(
+    let s = load(conn)?.ok_or_else(|| {
+        Box::new(crate::error::Error::new(
             crate::error::Code::Unmerged,
             "no rebase in progress: there is nothing to continue",
-        )))?;
+        ))
+    })?;
     match &s.original_head {
         Some(h) => {
             crate::store::set_branch_head(conn, &s.branch, h)?;
@@ -324,34 +337,35 @@ mod tests {
     /// committing the side branch first made the main changeset its child and the
     /// graph was a line instead of a fork. The parents here are stated outright.
     fn setup(conn: &Connection, main_text: &str, side_text: &str) {
-        let put = |id: &str, msg: &str, branch: &str, parent: Option<&str>, path: &str, body: &str| {
-            conn.execute(
+        let put =
+            |id: &str, msg: &str, branch: &str, parent: Option<&str>, path: &str, body: &str| {
+                conn.execute(
                 "INSERT INTO changesets(id,message,author,created_at,status,parent,parent2,branch)
                  VALUES(?1,?2,'a',1,'committed',?3,NULL,?4)",
                 params![id, msg, parent, branch],
             )
             .unwrap();
-            let h = crate::store::put_object(conn, body).unwrap();
-            conn.execute(
-                "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+                let h = crate::store::put_object(conn, body).unwrap();
+                conn.execute(
+                    "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
                  VALUES(?1,?2,NULL,?3)",
-                params![id, path, h],
-            )
-            .unwrap();
-            let next: i64 = conn
-                .query_row(
-                    "SELECT COALESCE(MAX(version),0)+1 FROM file_versions WHERE path=?1",
-                    params![path],
-                    |r| r.get(0),
+                    params![id, path, h],
                 )
                 .unwrap();
-            conn.execute(
-                "INSERT INTO file_versions(path,version,hash,changeset_id,created_at)
+                let next: i64 = conn
+                    .query_row(
+                        "SELECT COALESCE(MAX(version),0)+1 FROM file_versions WHERE path=?1",
+                        params![path],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                conn.execute(
+                    "INSERT INTO file_versions(path,version,hash,changeset_id,created_at)
                  VALUES(?1,?2,?3,?4,1)",
-                params![path, next, h, id],
-            )
-            .unwrap();
-        };
+                    params![path, next, h, id],
+                )
+                .unwrap();
+            };
 
         put("base", "base", "main", None, "f.txt", "a\nb\nc\n");
         conn.execute(
@@ -360,8 +374,22 @@ mod tests {
             [],
         )
         .unwrap();
-        put("side1", "side edit", "side", Some("base"), "f.txt", side_text);
-        put("main1", "main edit", "main", Some("base"), "f.txt", main_text);
+        put(
+            "side1",
+            "side edit",
+            "side",
+            Some("base"),
+            "f.txt",
+            side_text,
+        );
+        put(
+            "main1",
+            "main edit",
+            "main",
+            Some("base"),
+            "f.txt",
+            main_text,
+        );
         conn.execute("UPDATE branches SET head='side1' WHERE name='side'", [])
             .unwrap();
         conn.execute("UPDATE branches SET head='main1' WHERE name='main'", [])
@@ -384,7 +412,10 @@ mod tests {
             Progress::Done(ids) => assert_eq!(ids.len(), 1),
             other => panic!("the rebase should have finished, got {:?}", other),
         }
-        assert!(load(&conn).unwrap().is_none(), "a finished rebase clears its state");
+        assert!(
+            load(&conn).unwrap().is_none(),
+            "a finished rebase clears its state"
+        );
 
         let content = std::fs::read_to_string(d.join("f.txt")).unwrap();
         assert_eq!(content, "a\nMAIN\nc\nSIDE\n", "both changes are present");
@@ -404,7 +435,9 @@ mod tests {
             Progress::Stopped { conflicts } => assert_eq!(conflicts, vec!["f.txt".to_string()]),
             _ => panic!("this pick must conflict"),
         }
-        let s = load(&conn).unwrap().expect("the session must survive the stop");
+        let s = load(&conn)
+            .unwrap()
+            .expect("the session must survive the stop");
         assert_eq!(s.current.as_deref(), Some("side1"));
         assert!(s.done.is_empty(), "nothing was successfully replayed");
 
@@ -465,7 +498,9 @@ mod tests {
         std::fs::write(d.join("f.txt"), "a\nMAIN\nc\n").unwrap();
 
         start(&conn, &d, "side", "main1", "t").unwrap();
-        let e = start(&conn, &d, "side", "main1", "t").unwrap_err().to_string();
+        let e = start(&conn, &d, "side", "main1", "t")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("already running"), "got: {}", e);
 
         let _ = std::fs::remove_dir_all(&d);
@@ -496,7 +531,10 @@ mod tests {
             Progress::Stopped { conflicts } => panic!("still conflicting: {:?}", conflicts),
             Progress::Nothing => panic!("a resolution was recorded, so this is not nothing"),
         }
-        assert!(load(&conn).unwrap().is_none(), "the rebase must be finished");
+        assert!(
+            load(&conn).unwrap().is_none(),
+            "the rebase must be finished"
+        );
         assert_eq!(
             std::fs::read_to_string(d.join("f.txt")).unwrap(),
             "a\nRESOLVED\nc\n"
@@ -536,7 +574,8 @@ mod tests {
             )
             .unwrap();
         }
-        conn.execute("UPDATE branches SET head='side3' WHERE name='side'", []).unwrap();
+        conn.execute("UPDATE branches SET head='side3' WHERE name='side'", [])
+            .unwrap();
 
         let mut stops = 0;
         let mut p = start(&conn, &d, "side", "main1", "t").unwrap();
@@ -549,7 +588,10 @@ mod tests {
 
         assert!(stops >= 1, "the setup produced no conflict at all");
         // The session is gone, so a further continue is refused instead of looping.
-        assert!(load(&conn).unwrap().is_none(), "the session was not cleared");
+        assert!(
+            load(&conn).unwrap().is_none(),
+            "the session was not cleared"
+        );
         assert!(
             continue_after_resolution(&conn, &d, "t").is_err(),
             "a finished rebase must refuse to continue"

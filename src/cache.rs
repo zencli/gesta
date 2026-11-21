@@ -13,9 +13,9 @@ use rusqlite::params;
 use rusqlite::Connection;
 
 use crate::store::hash_content;
-use std::fs;
 use crate::worktree::{read_file, IgnoreRules, ReadOutcome};
 use crate::ZResult;
+use std::fs;
 
 /// Files whose mtime is younger than this are re-read rather than trusted.
 /// Two seconds covers filesystem timestamp granularity plus the clock skew of a
@@ -154,7 +154,11 @@ pub fn scan_with_cache(
                 crate::store::put_object_bytes(conn, &bytes)?;
                 pending_writes.push((rel.clone(), mtime, size, hash.clone()));
                 // Binary files have no text content in the scan result.
-                files.push(ScannedFile { rel, hash, content: String::new() });
+                files.push(ScannedFile {
+                    rel,
+                    hash,
+                    content: String::new(),
+                });
             }
             ReadOutcome::Unreadable(e) => unreadable.push(format!("{}: {}", rel, e)),
         }
@@ -242,9 +246,7 @@ fn prune_cache(conn: &Connection, files: &[ScannedFile], binary: &[String]) -> Z
         return Ok(());
     }
 
-    conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS live_paths(path TEXT PRIMARY KEY);",
-    )?;
+    conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS live_paths(path TEXT PRIMARY KEY);")?;
     conn.execute("DELETE FROM live_paths", [])?;
     {
         let tx = conn.unchecked_transaction()?;
@@ -272,7 +274,9 @@ fn prune_cache(conn: &Connection, files: &[ScannedFile], binary: &[String]) -> Z
 #[cfg(test)]
 pub fn remember(conn: &Connection, root: &Path, rel: &str, hash: &str) -> ZResult<()> {
     let p = root.join(rel);
-    let Ok(meta) = std::fs::metadata(&p) else { return Ok(()) };
+    let Ok(meta) = std::fs::metadata(&p) else {
+        return Ok(());
+    };
     let mtime = meta
         .modified()
         .ok()
@@ -320,8 +324,16 @@ mod tests {
         // By name, not by index. The scan sorts now, but a test that looks up what it wrote is
         // checking the scan rather than the filesystem's ordering, and its failure message says which
         // file is wrong.
-        let a = r.files.iter().find(|f| f.rel == "a.txt").expect("a.txt is missing");
-        let b = r.files.iter().find(|f| f.rel == "b.txt").expect("b.txt is missing");
+        let a = r
+            .files
+            .iter()
+            .find(|f| f.rel == "a.txt")
+            .expect("a.txt is missing");
+        let b = r
+            .files
+            .iter()
+            .find(|f| f.rel == "b.txt")
+            .expect("b.txt is missing");
         assert_eq!(a.hash, hash_content("one\n"));
         assert_eq!(b.hash, hash_content("two\n"));
         // And the order itself is part of the contract now.
@@ -431,7 +443,11 @@ mod tests {
         remember(&conn, &d, "a.txt", &hash_content("WRONG\n")).unwrap();
 
         let r = scan_with_cache(&conn, &d, &rules, &crate::attributes::Rules::default()).unwrap();
-        assert_eq!(r.files[0].hash, hash_content("AAAA\n"), "must hash real content");
+        assert_eq!(
+            r.files[0].hash,
+            hash_content("AAAA\n"),
+            "must hash real content"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -465,7 +481,10 @@ mod tests {
         let r = scan_with_cache(&conn, &d, &rules, &crate::attributes::Rules::default()).unwrap();
         assert_eq!(r.cached, 1, "the cache row should answer");
         assert_eq!(r.rehashed, 0, "nothing should have been read");
-        assert_eq!(r.files[0].hash, recorded, "the file must not have been read");
+        assert_eq!(
+            r.files[0].hash, recorded,
+            "the file must not have been read"
+        );
 
         let _ = std::fs::remove_dir_all(&d);
     }

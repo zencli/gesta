@@ -49,7 +49,8 @@ pub fn encode(base: &[u8], target: &[u8]) -> Option<Vec<u8>> {
 
     // An index of every position by its first four bytes. Without it every scan of the base is a
     // linear search per byte of the target, which is quadratic on a large file.
-    let mut index: std::collections::HashMap<[u8; 4], Vec<usize>> = std::collections::HashMap::new();
+    let mut index: std::collections::HashMap<[u8; 4], Vec<usize>> =
+        std::collections::HashMap::new();
     if base.len() >= 4 {
         for i in 0..=base.len() - 4 {
             let key = [base[i], base[i + 1], base[i + 2], base[i + 3]];
@@ -174,7 +175,10 @@ mod tests {
         target.extend_from_slice(b"one new line at the end\n");
         let d = encode(&base, &target).expect("a target with an insertion should delta");
         let back = crate::packfile::apply_delta_for_test(&base, &d).unwrap();
-        assert_eq!(back, target, "the delta must rebuild the target byte for byte");
+        assert_eq!(
+            back, target,
+            "the delta must rebuild the target byte for byte"
+        );
     }
 
     #[test]
@@ -183,7 +187,10 @@ mod tests {
         // delta that is the object plus a header.
         let base = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec();
         let target: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
-        assert!(encode(&base, &target).is_none(), "an unrelated target must not be deltaed");
+        assert!(
+            encode(&base, &target).is_none(),
+            "an unrelated target must not be deltaed"
+        );
     }
 
     #[test]
@@ -198,10 +205,19 @@ mod tests {
         let base: Vec<u8> = std::iter::repeat_n(b'x', 70000).collect();
         let d = encode(&base, &base).expect("a full copy of a long run should delta");
         let back = crate::packfile::apply_delta_for_test(&base, &d).unwrap();
-        assert_eq!(back.len(), base.len(), "the copy must rebuild the whole base");
+        assert_eq!(
+            back.len(),
+            base.len(),
+            "the copy must rebuild the whole base"
+        );
         let mut out = Vec::new();
         emit_copy(&mut out, 0, 65536);
         assert_eq!(out[0] & 0x80, 0x80, "a copy opcode has the high bit set");
-        assert_eq!(out.len(), 1, "a full copy needs no offset or length bytes: {:?}", out);
+        assert_eq!(
+            out.len(),
+            1,
+            "a full copy needs no offset or length bytes: {:?}",
+            out
+        );
     }
 }

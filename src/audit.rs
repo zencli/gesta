@@ -111,7 +111,11 @@ pub fn record_with(
     );
     let line = format!("{}\n", doc.render());
 
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         if f.write_all(line.as_bytes()).is_err() {
             eprintln!("audit log is not writable: {}", path.display());
         }
@@ -133,7 +137,13 @@ pub mod local {
     use super::{record_with, Decision, Event};
 
     /// A commit landed on a branch.
-    pub fn commit(root: &std::path::Path, branch: &str, changeset: &str, author: &str, files: usize) {
+    pub fn commit(
+        root: &std::path::Path,
+        branch: &str,
+        changeset: &str,
+        author: &str,
+        files: usize,
+    ) {
         record_with(
             root,
             &Event {
@@ -197,7 +207,12 @@ pub mod local {
     }
 
     /// A signing key was replaced.
-    pub fn key_rotated(root: &std::path::Path, who: &str, new_public: &str, archived: Option<&str>) {
+    pub fn key_rotated(
+        root: &std::path::Path,
+        who: &str,
+        new_public: &str,
+        archived: Option<&str>,
+    ) {
         let reason = match archived {
             Some(a) => format!("archived {}", a),
             None => "no previous key".to_string(),
@@ -221,7 +236,9 @@ pub mod local {
     /// Rebuilding reads two small files, and holding one in a static would mean a thread that outlives
     /// the process it was configured for. A local event happens a few times a minute at most.
     fn forwarder(root: &std::path::Path) -> Option<crate::audit_forward::Forwarder> {
-        crate::audit_forward::Forwarder::from_repo(root).ok().flatten()
+        crate::audit_forward::Forwarder::from_repo(root)
+            .ok()
+            .flatten()
     }
 }
 
@@ -242,7 +259,11 @@ pub struct Entry {
 /// `only_refused` answers the question a person actually asks after an incident: what was tried and
 /// turned away.
 #[allow(dead_code)]
-pub fn read(root: &std::path::Path, only_refused: bool, limit: Option<usize>) -> ZResult<Vec<Entry>> {
+pub fn read(
+    root: &std::path::Path,
+    only_refused: bool,
+    limit: Option<usize>,
+) -> ZResult<Vec<Entry>> {
     let path = crate::repo_dir(root).join("audit.log");
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,

@@ -26,11 +26,7 @@ pub struct Rename {
 /// similar content. git does the same at diff time, and so does this: nothing is
 /// recorded when the change is committed, so a rename is detected whenever it is
 /// asked about.
-pub fn detect_renames(
-    conn: &Connection,
-    changeset: &str,
-    threshold: f64,
-) -> ZResult<Vec<Rename>> {
+pub fn detect_renames(conn: &Connection, changeset: &str, threshold: f64) -> ZResult<Vec<Rename>> {
     let files: Vec<(String, Option<String>, Option<String>)> = {
         let mut stmt = conn.prepare(
             "SELECT path, old_hash, new_hash FROM changeset_files
@@ -292,8 +288,8 @@ fn first_line(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::repo::tests::commit_files;
-    use crate::store::tests::mem_db;
     use crate::store::hash_content;
+    use crate::store::tests::mem_db;
     use std::fs;
 
     #[test]
@@ -305,11 +301,15 @@ mod tests {
         assert_eq!(similarity("", "a\n"), 0.0);
     }
 
-
     #[test]
     fn a_rename_is_detected_from_content() {
         let conn = mem_db();
-        commit_files(&conn, "cs1", "original", &[("app.py", "def run():\n    return 1\n")]);
+        commit_files(
+            &conn,
+            "cs1",
+            "original",
+            &[("app.py", "def run():\n    return 1\n")],
+        );
 
         // Rename: one path deleted, another added, with the same content.
         conn.execute(
@@ -339,7 +339,6 @@ mod tests {
         assert!(renames[0].similarity > 0.99);
     }
 
-
     #[test]
     fn an_unrelated_delete_and_add_is_not_a_rename() {
         let conn = mem_db();
@@ -365,9 +364,11 @@ mod tests {
         .unwrap();
 
         let renames = detect_renames(&conn, "cs1", 0.5).unwrap();
-        assert!(renames.is_empty(), "unrelated content must not look like a rename");
+        assert!(
+            renames.is_empty(),
+            "unrelated content must not look like a rename"
+        );
     }
-
 
     #[test]
     fn revert_restores_the_content_from_before_the_target() {
@@ -397,7 +398,10 @@ mod tests {
         fs::write(tmp.join("a.txt"), "B\n").unwrap();
 
         let rev = revert_changeset(&conn, &tmp, "cs2", "bot", Some("test")).unwrap();
-        assert_eq!(branch_head(&conn, "main").unwrap().as_deref(), Some(rev.as_str()));
+        assert_eq!(
+            branch_head(&conn, "main").unwrap().as_deref(),
+            Some(rev.as_str())
+        );
         assert_eq!(
             fs::read_to_string(tmp.join("a.txt")).unwrap(),
             "A\n",
@@ -406,7 +410,6 @@ mod tests {
 
         let _ = fs::remove_dir_all(&tmp);
     }
-
 
     #[test]
     fn reverting_a_revert_restores_the_change() {
@@ -435,12 +438,14 @@ mod tests {
 
         let r1 = revert_changeset(&conn, &tmp, "cs2", "bot", None).unwrap();
         let r2 = revert_changeset(&conn, &tmp, &r1, "bot", None).unwrap();
-        assert_eq!(branch_head(&conn, "main").unwrap().as_deref(), Some(r2.as_str()));
+        assert_eq!(
+            branch_head(&conn, "main").unwrap().as_deref(),
+            Some(r2.as_str())
+        );
         assert_eq!(fs::read_to_string(tmp.join("a.txt")).unwrap(), "B\n");
 
         let _ = fs::remove_dir_all(&tmp);
     }
-
 
     #[test]
     fn revert_refuses_an_uncommitted_changeset() {
@@ -455,11 +460,12 @@ mod tests {
             [],
         )
         .unwrap();
-        let err = revert_changeset(&conn, &tmp, "pend", "bot", None).unwrap_err().to_string();
+        let err = revert_changeset(&conn, &tmp, "pend", "bot", None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("never committed"), "got: {}", err);
         let _ = fs::remove_dir_all(&tmp);
     }
-
 
     #[test]
     fn revert_brings_back_a_deleted_file() {
@@ -494,5 +500,4 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&tmp);
     }
-
 }

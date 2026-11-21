@@ -11,8 +11,8 @@
 //! gives a repository that only has packs back its loose form. A pack reader is a different
 //! piece of work and is not pretended to be here.
 
-use crate::ZResult;
 use crate::bad;
+use crate::ZResult;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -166,7 +166,10 @@ impl Repo {
         // above X" is true for all four and useless for two, because a bundle is a single file that
         // holds a whole history and the reader has to clone it first. Say which case this is.
         if start.exists() && !start.is_dir() {
-            let name = start.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let name = start
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             if name.ends_with(".bundle") || name.ends_with(".pack") {
                 return Err(bad(format!(
                     "{} is a file, not a repository. A git bundle holds a whole history in one file, so it has to be cloned before it can be read:\n  git clone {} <some-directory>\n  gesta git import <some-directory>",
@@ -190,18 +193,14 @@ impl Repo {
         loop {
             let candidate = cur.join(".git");
             if candidate.is_dir() {
-                return Ok(Repo {
-                    git_dir: candidate,
-                });
+                return Ok(Repo { git_dir: candidate });
             }
             // A worktree's `.git` is a file naming the real directory.
             if candidate.is_file() {
                 let text = std::fs::read_to_string(&candidate)?;
                 if let Some(rest) = text.trim().strip_prefix("gitdir:") {
                     let p = cur.join(rest.trim());
-                    return Ok(Repo {
-                        git_dir: p,
-                    });
+                    return Ok(Repo { git_dir: p });
                 }
             }
             if !cur.pop() {
@@ -216,7 +215,10 @@ impl Repo {
     fn object_path(&self, hash: &str) -> PathBuf {
         // Loose objects are split by the first two characters, which keeps any one directory to
         // a workable number of entries.
-        self.git_dir.join("objects").join(&hash[..2]).join(&hash[2..])
+        self.git_dir
+            .join("objects")
+            .join(&hash[..2])
+            .join(&hash[2..])
     }
 
     /// Write an object and return its name. An object already present is not rewritten.
@@ -260,9 +262,12 @@ impl Repo {
             .position(|b| *b == 0)
             .ok_or_else(|| bad(format!("object {} has no header", hash)))?;
         let header = String::from_utf8_lossy(&raw[..nul]).to_string();
-        let (k, size) = header
-            .split_once(' ')
-            .ok_or_else(|| bad(format!("object {} has a malformed header: {}", hash, header)))?;
+        let (k, size) = header.split_once(' ').ok_or_else(|| {
+            bad(format!(
+                "object {} has a malformed header: {}",
+                hash, header
+            ))
+        })?;
         let kind = Kind::parse(k)
             .ok_or_else(|| bad(format!("object {} has an unknown kind: {}", hash, k)))?;
         let body = raw[nul + 1..].to_vec();
@@ -516,8 +521,6 @@ pub fn author_parts(line: &str) -> (String, String) {
         _ => (line.trim().to_string(), String::new()),
     }
 }
-
-
 
 impl Repo {
     /// The commit a branch points at, read the way git stores it.

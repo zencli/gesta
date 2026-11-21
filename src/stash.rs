@@ -13,9 +13,9 @@ use std::path::Path;
 use rusqlite::params;
 use rusqlite::Connection;
 
+use crate::now;
 use crate::repo;
 use crate::store::{get_object, put_object_against};
-use crate::now;
 use crate::worktree::{read_file, ReadOutcome};
 use crate::{bad, ZResult};
 
@@ -93,9 +93,7 @@ pub fn save(conn: &Connection, root: &Path, message: &str, author: &str) -> ZRes
                     rel
                 )))
             }
-            ReadOutcome::Unreadable(e) => {
-                return Err(bad(format!("cannot read {}: {}", rel, e)))
-            }
+            ReadOutcome::Unreadable(e) => return Err(bad(format!("cannot read {}: {}", rel, e))),
         };
         // Base the delta on whatever this path held at head, so a stash of a
         // slightly edited large file costs a delta rather than a whole copy.
@@ -157,17 +155,13 @@ fn load(conn: &Connection, id: Option<i64>) -> ZResult<Stash> {
             )
             .ok(),
     };
-    let (id, message, created_at) =
-        row.ok_or_else(|| bad("no stash to apply".to_string()))?;
+    let (id, message, created_at) = row.ok_or_else(|| bad("no stash to apply".to_string()))?;
 
     let files = {
         let mut stmt =
             conn.prepare("SELECT path, hash FROM stash_files WHERE stash_id = ?1 ORDER BY path")?;
         let rows = stmt.query_map(params![id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-            ))
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
@@ -200,7 +194,11 @@ pub fn list(conn: &Connection) -> ZResult<Vec<Stash>> {
 /// the same reason a merge refuses: the write would destroy work with no record
 /// of it. The stash is kept in that case and the caller gets the list of paths
 /// that blocked it.
-pub fn pop(conn: &Connection, root: &Path, id: Option<i64>) -> ZResult<(Stash, usize, Vec<String>)> {
+pub fn pop(
+    conn: &Connection,
+    root: &Path,
+    id: Option<i64>,
+) -> ZResult<(Stash, usize, Vec<String>)> {
     let stash = load(conn, id)?;
     let branch = crate::store::current_branch(conn)?;
     let d = repo::diff_worktree(conn, root, &branch)?;
@@ -305,8 +303,14 @@ mod tests {
         let (_s, written, blocked) = pop(&conn, &d, None).unwrap();
         assert!(blocked.is_empty());
         assert_eq!(written, 2);
-        assert_eq!(std::fs::read_to_string(d.join("f.txt")).unwrap(), "edited\n");
-        assert_eq!(std::fs::read_to_string(d.join("new.txt")).unwrap(), "added\n");
+        assert_eq!(
+            std::fs::read_to_string(d.join("f.txt")).unwrap(),
+            "edited\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.join("new.txt")).unwrap(),
+            "added\n"
+        );
 
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -385,7 +389,10 @@ mod tests {
             !dir.join("gone.txt").exists(),
             "popping must apply the deletion again"
         );
-        assert!(dir.join("keep.txt").exists(), "an unrelated file was touched");
+        assert!(
+            dir.join("keep.txt").exists(),
+            "an unrelated file was touched"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -412,7 +419,10 @@ mod tests {
         let (_id, saved) = save(&conn, &dir, "all three", "a").unwrap();
         assert_eq!(saved, 3, "expected every kind of change to be saved");
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
-        assert!(dir.join("c.txt").exists(), "the head state was not restored");
+        assert!(
+            dir.join("c.txt").exists(),
+            "the head state was not restored"
+        );
         assert!(!dir.join("d.txt").exists(), "the new file was not cleared");
 
         pop(&conn, &dir, None).unwrap();
@@ -424,7 +434,10 @@ mod tests {
             std::fs::read_to_string(dir.join("d.txt")).unwrap(),
             "brand new\n"
         );
-        assert!(!dir.join("c.txt").exists(), "the deletion was not reapplied");
+        assert!(
+            !dir.join("c.txt").exists(),
+            "the deletion was not reapplied"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

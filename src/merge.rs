@@ -25,7 +25,11 @@ pub fn diff_hunks(old: &str, new: &str) -> Vec<Hunk> {
     let mut hunks = Vec::new();
     let mut ai = 0usize;
     let mut bi = 0usize;
-    for (am, bm) in matches.iter().copied().chain(std::iter::once((a.len(), b.len()))) {
+    for (am, bm) in matches
+        .iter()
+        .copied()
+        .chain(std::iter::once((a.len(), b.len())))
+    {
         if am > ai || bm > bi {
             hunks.push(Hunk {
                 old_start: ai,
@@ -71,7 +75,8 @@ fn lcs_matches(a: &[&str], b: &[&str]) -> Vec<(usize, usize)> {
         pre += 1;
     }
     let mut suf = 0usize;
-    while suf < a.len() - pre && suf < b.len() - pre && a[a.len() - 1 - suf] == b[b.len() - 1 - suf] {
+    while suf < a.len() - pre && suf < b.len() - pre && a[a.len() - 1 - suf] == b[b.len() - 1 - suf]
+    {
         suf += 1;
     }
 
@@ -118,7 +123,11 @@ pub enum MergeResult {
     /// Clean merge.
     Clean(String),
     /// Both sides changed the same region in different ways.
-    Conflict { ours: String, theirs: String, merged: String },
+    Conflict {
+        ours: String,
+        theirs: String,
+        merged: String,
+    },
 }
 
 impl MergeResult {
@@ -377,7 +386,10 @@ mod tests {
         let ours = "ours version\n";
         let theirs = "theirs version\n";
         let r = merge3(base, ours, theirs);
-        assert!(r.is_conflict(), "same line changed differently must conflict");
+        assert!(
+            r.is_conflict(),
+            "same line changed differently must conflict"
+        );
         assert!(r.text().contains("<<<<<<<"));
         assert!(r.text().contains("ours version"));
         assert!(r.text().contains("theirs version"));
@@ -388,7 +400,10 @@ mod tests {
         let base = "a\nb\n";
         let both = "a\nB\n";
         let r = merge3(base, both, both);
-        assert!(!r.is_conflict(), "the same edit on both sides is not a conflict");
+        assert!(
+            !r.is_conflict(),
+            "the same edit on both sides is not a conflict"
+        );
         assert_eq!(r.text(), "a\nB\n");
     }
 

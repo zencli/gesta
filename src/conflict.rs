@@ -75,7 +75,11 @@ pub fn report(path: &str, base: &str, ours: &str, theirs: &str) -> Option<Confli
 /// that appears more than once resolves to the first match; that is a known
 /// limit of marker-based output and the reason the region carries the text
 /// itself, which is the part a resolver actually needs.
-fn split_regions(merged: &str, our_lines: &[String], their_lines: &[String]) -> Vec<ConflictRegion> {
+fn split_regions(
+    merged: &str,
+    our_lines: &[String],
+    their_lines: &[String],
+) -> Vec<ConflictRegion> {
     let mut regions = Vec::new();
     let lines: Vec<&str> = merged.lines().collect();
     let mut i = 0usize;
@@ -108,7 +112,9 @@ fn split_regions(merged: &str, our_lines: &[String], their_lines: &[String]) -> 
 
         let ours_start = cursor_ours + 1;
         let ours_end = cursor_ours + our_block.len();
-        let theirs_start = find_block(their_lines, &their_block).map(|p| p + 1).unwrap_or(ours_start);
+        let theirs_start = find_block(their_lines, &their_block)
+            .map(|p| p + 1)
+            .unwrap_or(ours_start);
         let theirs_end = theirs_start + their_block.len().saturating_sub(1);
 
         // Context comes from our side, which is what the working tree holds.
@@ -159,7 +165,10 @@ pub fn to_json(r: &ConflictReport) -> crate::json::Json {
                 ("ours_end", Json::int(g.ours_end as i64)),
                 ("theirs_start", Json::int(g.theirs_start as i64)),
                 ("theirs_end", Json::int(g.theirs_end as i64)),
-                ("ours", Json::arr(g.ours.iter().cloned().map(Json::str).collect())),
+                (
+                    "ours",
+                    Json::arr(g.ours.iter().cloned().map(Json::str).collect()),
+                ),
                 (
                     "theirs",
                     Json::arr(g.theirs.iter().cloned().map(Json::str).collect()),
@@ -192,10 +201,7 @@ pub fn reports_to_json(reports: &[ConflictReport]) -> crate::json::Json {
     use crate::json::Json;
     Json::obj(vec![
         ("conflict_count", Json::int(reports.len() as i64)),
-        (
-            "files",
-            Json::arr(reports.iter().map(to_json).collect()),
-        ),
+        ("files", Json::arr(reports.iter().map(to_json).collect())),
     ])
 }
 
@@ -271,7 +277,10 @@ mod tests {
         let theirs = "keep\nkeep2\n";
         let r = report("f.txt", base, ours, theirs);
         // One side unchanged and the other deleting is a clean merge.
-        assert!(r.is_none(), "a deletion with no opposing edit merges cleanly");
+        assert!(
+            r.is_none(),
+            "a deletion with no opposing edit merges cleanly"
+        );
     }
 
     #[test]

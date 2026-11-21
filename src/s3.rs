@@ -139,7 +139,7 @@ impl S3Config {
             false
         } else {
             return Err(bad(
-                "endpoint must start with https:// or http://".to_string(),
+                "endpoint must start with https:// or http://".to_string()
             ));
         };
         let rest = rest.trim_end_matches('/');
@@ -148,10 +148,7 @@ impl S3Config {
                 h.to_string(),
                 p.parse::<u16>().map_err(|e| bad(e.to_string()))?,
             ),
-            _ => (
-                rest.to_string(),
-                if tls { 443 } else { 80 },
-            ),
+            _ => (rest.to_string(), if tls { 443 } else { 80 }),
         };
         Ok((host, port, tls))
     }
@@ -164,7 +161,6 @@ pub fn key_for(prefix: &str, branch: &str) -> String {
     } else {
         format!("{}/{}.bundle", prefix, branch)
     }
-
 }
 
 impl S3Config {
@@ -250,7 +246,10 @@ impl S3Config {
             return Err(bad(format!(
                 "upload failed with status {}: {}",
                 status,
-                String::from_utf8_lossy(&resp).chars().take(300).collect::<String>()
+                String::from_utf8_lossy(&resp)
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
             )));
         }
         Ok(())
@@ -269,7 +268,10 @@ impl S3Config {
             return Err(bad(format!(
                 "download failed with status {}: {}",
                 status,
-                String::from_utf8_lossy(&resp).chars().take(300).collect::<String>()
+                String::from_utf8_lossy(&resp)
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
             )));
         }
         Ok(Some(resp))
@@ -350,7 +352,10 @@ impl S3Config {
             return Err(bad(format!(
                 "listing failed with status {}: {}",
                 status,
-                String::from_utf8_lossy(&body).chars().take(200).collect::<String>()
+                String::from_utf8_lossy(&body)
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
             )));
         }
         let text = String::from_utf8_lossy(&body);
@@ -440,7 +445,9 @@ mod tests {
     fn an_https_endpoint_is_accepted() {
         // The scheme check only, because the rest of `from_url` reads credentials from the process
         // environment or the secret store, and both are process-wide.
-        assert!(S3Config::plain_http_is_allowed("https://s3.ap-southeast-2.example.com"));
+        assert!(S3Config::plain_http_is_allowed(
+            "https://s3.ap-southeast-2.example.com"
+        ));
         assert!(S3Config::plain_http_is_allowed("https://s3.amazonaws.com"));
     }
 }

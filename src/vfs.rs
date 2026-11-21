@@ -69,16 +69,29 @@ impl TreeView {
     }
 
     fn children(&self, dir: &str) -> Vec<String> {
-        self.dirs.read().unwrap_or_else(|e| e.into_inner()).get(dir).cloned().unwrap_or_default()
+        self.dirs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(dir)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn is_dir(&self, path: &str) -> bool {
-        self.dirs.read().unwrap_or_else(|e| e.into_inner()).contains_key(path)
+        self.dirs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(path)
     }
 
     /// The size recorded for a path, without reading its body.
     fn size_of(&self, path: &str) -> u64 {
-        let hash = self.files.read().unwrap_or_else(|e| e.into_inner()).get(path).cloned();
+        let hash = self
+            .files
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .cloned();
         let Some(hash) = hash else { return 0 };
         let Ok(conn) = crate::store::open_db(std::path::Path::new(&self.root)) else {
             return 0;
@@ -93,7 +106,12 @@ impl TreeView {
     }
 
     fn body_of(&self, path: &str) -> Option<Vec<u8>> {
-        let hash = self.files.read().unwrap_or_else(|e| e.into_inner()).get(path).cloned()?;
+        let hash = self
+            .files
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .cloned()?;
         let conn = crate::store::open_db(std::path::Path::new(&self.root)).ok()?;
         crate::store::get_object_bytes(&conn, &hash).ok()
     }
@@ -110,7 +128,13 @@ impl FileSystemContext for TreeView {
     ) -> winfsp::Result<FileSecurity> {
         let path = Self::normalise(file_name);
         let is_dir = path == "." || self.is_dir(&path);
-        if is_dir || self.files.read().unwrap_or_else(|e| e.into_inner()).contains_key(&path) {
+        if is_dir
+            || self
+                .files
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&path)
+        {
             // The attributes are how the driver decides whether a path is a directory before it opens
             // it. Returning zero here made every path look like an unattributed entry, and the driver
             // stopped after this call: no open, no read_directory, and a mount that listed nothing.
@@ -178,7 +202,11 @@ impl FileSystemContext for TreeView {
     /// The trait's default returns `STATUS_INVALID_DEVICE_REQUEST`, which is what "Incorrect
     /// function" is. The driver flushes after it opens a handle, so every listing and every read
     /// came back as that error while the callbacks underneath were fine.
-    fn flush(&self, _context: Option<&Self::FileContext>, _file_info: &mut FileInfo) -> winfsp::Result<()> {
+    fn flush(
+        &self,
+        _context: Option<&Self::FileContext>,
+        _file_info: &mut FileInfo,
+    ) -> winfsp::Result<()> {
         Ok(())
     }
 
@@ -348,13 +376,13 @@ pub fn mount(root: &std::path::Path, branch: &str, mount_point: &str) -> crate::
     // The guard is named because `start` exists on two impls and the call site cannot infer which.
     // `CoarseGuard` serialises every callback behind one lock: with a read-only view over a shared
     // map there is nothing to gain from concurrent callbacks, and the coarse guard only needs `Send`.
-    let mut host: FileSystemHost<TreeView, CoarseGuard> =
-        FileSystemHost::new(params, view).map_err(|e| {
-        Box::new(crate::error::Error::new(
-            crate::error::Code::Usage,
-            format!("{}", e),
-        ))
-    })?;
+    let mut host: FileSystemHost<TreeView, CoarseGuard> = FileSystemHost::new(params, view)
+        .map_err(|e| {
+            Box::new(crate::error::Error::new(
+                crate::error::Code::Usage,
+                format!("{}", e),
+            ))
+        })?;
     host.mount(mount_point).map_err(|e| {
         Box::new(crate::error::Error::new(
             crate::error::Code::Usage,

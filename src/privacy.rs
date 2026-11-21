@@ -159,12 +159,17 @@ mod tests {
         assert_eq!(report.rewritten, 1);
         assert_eq!(report.dropped_signatures, 1);
         let (author, sig): (String, Option<String>) = conn
-            .query_row("SELECT author, signature FROM changesets WHERE id='cs1'", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+            .query_row(
+                "SELECT author, signature FROM changesets WHERE id='cs1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!(author, "anonymous");
-        assert!(sig.is_none(), "a signature over the old author cannot survive");
+        assert!(
+            sig.is_none(),
+            "a signature over the old author cannot survive"
+        );
     }
 
     #[test]
@@ -172,11 +177,13 @@ mod tests {
         let conn = repo();
         insert(&conn, "cs1", "keep@example.com", None);
         insert(&conn, "cs2", "go@example.com", None);
-        let report = rewrite_authors(&conn, "main", &["go@example.com".to_string()], "anonymous")
-            .unwrap();
+        let report =
+            rewrite_authors(&conn, "main", &["go@example.com".to_string()], "anonymous").unwrap();
         assert_eq!(report.rewritten, 1);
         let kept: String = conn
-            .query_row("SELECT author FROM changesets WHERE id='cs1'", [], |r| r.get(0))
+            .query_row("SELECT author FROM changesets WHERE id='cs1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(kept, "keep@example.com");
     }
@@ -186,8 +193,11 @@ mod tests {
         let conn = repo();
         insert(&conn, "cs1", "old@example.com", None);
         rewrite_authors(&conn, "main", &["old@example.com".to_string()], "anonymous").unwrap();
-        let again = rewrite_authors(&conn, "main", &["old@example.com".to_string()], "anonymous")
-            .unwrap();
-        assert_eq!(again.rewritten, 0, "nothing carries the old string any more");
+        let again =
+            rewrite_authors(&conn, "main", &["old@example.com".to_string()], "anonymous").unwrap();
+        assert_eq!(
+            again.rewritten, 0,
+            "nothing carries the old string any more"
+        );
     }
 }

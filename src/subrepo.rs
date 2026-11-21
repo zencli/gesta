@@ -82,7 +82,7 @@ fn clean_path(path: &str) -> ZResult<String> {
     }
     if p == crate::ZF_DIR || p == crate::LEGACY_DIR {
         return Err(bad(
-            "the repository directory cannot hold a subrepository".to_string(),
+            "the repository directory cannot hold a subrepository".to_string()
         ));
     }
     Ok(p.to_string())
@@ -130,9 +130,8 @@ pub fn remove(conn: &Connection, path: &str) -> ZResult<bool> {
 /// Record a new pin for the child, usually its current head.
 pub fn pin(conn: &Connection, path: &str, changeset: &str) -> ZResult<Sub> {
     init_schema(conn)?;
-    let mut sub = get(conn, path)?.ok_or_else(|| {
-        bad(format!("{} is not a subrepository", path))
-    })?;
+    let mut sub =
+        get(conn, path)?.ok_or_else(|| bad(format!("{} is not a subrepository", path)))?;
     sub.pinned = changeset.to_string();
     conn.execute(
         "UPDATE subrepos SET pinned = ?1 WHERE path = ?2",
@@ -247,7 +246,10 @@ mod tests {
         let subs = vec!["vendor/lib".to_string()];
         assert!(is_inside_sub("vendor/lib", &subs));
         assert!(is_inside_sub("vendor/lib/src/a.rs", &subs));
-        assert!(!is_inside_sub("vendor/libs", &subs), "a prefix is not a child");
+        assert!(
+            !is_inside_sub("vendor/libs", &subs),
+            "a prefix is not a child"
+        );
         assert!(!is_inside_sub("vendor", &subs));
     }
 

@@ -6,7 +6,20 @@ use std::path::{Path, PathBuf};
 use crate::{LEGACY_DIR, ZF_DIR};
 
 /// Directory names never descended into, regardless of ignore rules.
-const SKIP_DIRS: &[&str] = &[ZF_DIR, LEGACY_DIR, ".git", ".hg", ".svn", "node_modules", "target", ".venv", "venv", "dist", "build", "__pycache__"];
+const SKIP_DIRS: &[&str] = &[
+    ZF_DIR,
+    LEGACY_DIR,
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "target",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "__pycache__",
+];
 
 /// A gitignore-style pattern.
 ///
@@ -25,9 +38,9 @@ pub struct Pattern {
 #[derive(Debug, Clone)]
 enum Segment {
     Literal(char),
-    AnyChar,        // ?
-    AnyRun,         // *
-    AnyRunCross,    // **
+    AnyChar,     // ?
+    AnyRun,      // *
+    AnyRunCross, // **
 }
 
 impl Pattern {
@@ -109,7 +122,12 @@ impl Pattern {
                 _ => glob.push(Segment::Literal(c)),
             }
         }
-        Some(Pattern { glob, negated, dir_only, anchored })
+        Some(Pattern {
+            glob,
+            negated,
+            dir_only,
+            anchored,
+        })
     }
 
     /// Does this pattern match `path` (a `/`-separated repo-relative path)?
@@ -201,7 +219,9 @@ impl Pattern {
                     && &t[ti..ti + bytes.len()] == bytes
                     && self.match_bytes_from(gi + 1, ti + bytes.len(), t)
             }
-            Segment::AnyChar => ti < t.len() && t[ti] != b'/' && self.match_bytes_from(gi + 1, ti + 1, t),
+            Segment::AnyChar => {
+                ti < t.len() && t[ti] != b'/' && self.match_bytes_from(gi + 1, ti + 1, t)
+            }
             Segment::AnyRun => {
                 if self.match_bytes_from(gi + 1, ti, t) {
                     return true;
@@ -236,10 +256,10 @@ impl Pattern {
             return ti == t.len();
         }
         match &self.glob[gi] {
-            Segment::Literal(c) => ti < t.len() && t[ti] == *c && self.match_from(gi + 1, ti + 1, t),
-            Segment::AnyChar => {
-                ti < t.len() && t[ti] != '/' && self.match_from(gi + 1, ti + 1, t)
+            Segment::Literal(c) => {
+                ti < t.len() && t[ti] == *c && self.match_from(gi + 1, ti + 1, t)
             }
+            Segment::AnyChar => ti < t.len() && t[ti] != '/' && self.match_from(gi + 1, ti + 1, t),
             Segment::AnyRun => {
                 if self.match_from(gi + 1, ti, t) {
                     return true;
@@ -368,7 +388,6 @@ impl IgnoreRules {
         self.match_remaining(path, is_dir)
     }
 
-
     /// The general matcher, minus the shapes answered by the cheap tables.
     fn match_remaining(&self, path: &str, is_dir: bool) -> bool {
         let name = match path.rfind('/') {
@@ -428,7 +447,6 @@ impl IgnoreRules {
     pub fn len(&self) -> usize {
         self.patterns.len()
     }
-
 }
 
 /// Rules applied even when the repository has no ignore file.
@@ -438,7 +456,8 @@ pub const DEFAULT_IGNORES: &[&str] = &[
     "*.swp",
     "*.tmp",
     "*~",
-    "/.gesta/", "/.zenforge/",
+    "/.gesta/",
+    "/.zenforge/",
     "/.git/",
 ];
 
@@ -547,7 +566,10 @@ const STAT_THREADS: usize = 4;
 /// Chunked rather than queued: each thread gets one contiguous slice and touches no shared state, so
 /// there is no lock on the hot path. The queue version measured 31 ms against 24, and the lock is the
 /// difference.
-fn stat_in_parallel(mut found: Vec<(String, PathBuf)>, workers: usize) -> Vec<(String, fs::Metadata)> {
+fn stat_in_parallel(
+    mut found: Vec<(String, PathBuf)>,
+    workers: usize,
+) -> Vec<(String, fs::Metadata)> {
     if found.len() < 512 || workers < 2 {
         // Below this size the thread spawn costs more than the stats. A small repository, which is
         // most of them, takes the loop it always took.
@@ -680,7 +702,10 @@ mod tests {
     #[test]
     fn rel_path_uses_forward_slashes() {
         let root = Path::new("/tmp/repo");
-        assert_eq!(rel_path(root, Path::new("/tmp/repo/sub/file.txt")), "sub/file.txt");
+        assert_eq!(
+            rel_path(root, Path::new("/tmp/repo/sub/file.txt")),
+            "sub/file.txt"
+        );
     }
 
     #[test]
@@ -772,16 +797,17 @@ mod tests {
         fs::write(tmp.join(".env"), "SECRET=1").unwrap();
         fs::write(tmp.join("app.rs"), "fn main(){}").unwrap();
 
-        let r = IgnoreRules::with_defaults(&[
-            "secret/".to_string(),
-            ".env".to_string(),
-        ]);
+        let r = IgnoreRules::with_defaults(&["secret/".to_string(), ".env".to_string()]);
         let got: Vec<String> = scan_files_excluding(&tmp, &r, &[])
             .unwrap()
             .iter()
             .map(|(r, _)| r.clone())
             .collect();
-        assert_eq!(got, vec!["app.rs", "src/a.rs"], "ignored paths must not be tracked");
+        assert_eq!(
+            got,
+            vec!["app.rs", "src/a.rs"],
+            "ignored paths must not be tracked"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -833,7 +859,10 @@ mod tests {
 
         assert!(matches!(read_file(&text), ReadOutcome::Text(_)));
         assert!(matches!(read_file(&bin), ReadOutcome::Binary));
-        assert!(matches!(read_file(&tmp.join("missing")), ReadOutcome::Unreadable(_)));
+        assert!(matches!(
+            read_file(&tmp.join("missing")),
+            ReadOutcome::Unreadable(_)
+        ));
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -842,7 +871,10 @@ mod tests {
         let tmp = tmpdir("utf8");
         let p = tmp.join("vi.txt");
         fs::write(&p, "Tiếng Việt có dấu\n\u{7bc0}\u{70b9}\n").unwrap();
-        assert_eq!(read_text(&p).unwrap(), "Tiếng Việt có dấu\n\u{7bc0}\u{70b9}\n");
+        assert_eq!(
+            read_text(&p).unwrap(),
+            "Tiếng Việt có dấu\n\u{7bc0}\u{70b9}\n"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -870,10 +902,7 @@ mod tests {
 
     #[test]
     fn a_negated_rule_still_wins_over_a_fast_path_match() {
-        let rules = IgnoreRules::with_defaults(&[
-            "*.log".to_string(),
-            "!keep.log".to_string(),
-        ]);
+        let rules = IgnoreRules::with_defaults(&["*.log".to_string(), "!keep.log".to_string()]);
         assert!(rules.is_ignored("a.log", false));
         assert!(!rules.is_ignored("keep.log", false));
     }
@@ -883,14 +912,39 @@ mod tests {
     #[test]
     fn the_byte_matcher_agrees_with_the_char_matcher() {
         let patterns = [
-            "*.log", "a?c", "**/x", "deep/*.rs", "literal.txt", "*.tar.gz",
-            "a*b", "?*?", "**/build/**", "/root.txt", "*",
+            "*.log",
+            "a?c",
+            "**/x",
+            "deep/*.rs",
+            "literal.txt",
+            "*.tar.gz",
+            "a*b",
+            "?*?",
+            "**/build/**",
+            "/root.txt",
+            "*",
         ];
         let texts = [
-            "a.log", ".log", "log", "alog", "abc", "axc", "a/c", "deep/x.rs",
-            "x.rs", "literal.txt", "deep/literal.txt", "archive.tar.gz",
-            "aXXb", "ab", "root.txt", "deep/root.txt", "build/out/i.o",
-            "deep/build/out/i.o", "anything", "",
+            "a.log",
+            ".log",
+            "log",
+            "alog",
+            "abc",
+            "axc",
+            "a/c",
+            "deep/x.rs",
+            "x.rs",
+            "literal.txt",
+            "deep/literal.txt",
+            "archive.tar.gz",
+            "aXXb",
+            "ab",
+            "root.txt",
+            "deep/root.txt",
+            "build/out/i.o",
+            "deep/build/out/i.o",
+            "anything",
+            "",
         ];
         for pat in patterns {
             let p = Pattern::parse(pat).expect("pattern parses");
@@ -993,8 +1047,14 @@ mod tests {
         // The anchored shape is `/name/`, which is what turns the match into a prefix test.
         let rules = IgnoreRules::new(vec!["/target/".to_string()]);
         assert!(rules.is_ignored("target/debug/x", false));
-        assert!(!rules.is_ignored("targets/x", false), "a longer name matched the prefix");
-        assert!(!rules.is_ignored("src/target/x", false), "a nested one matched an anchored rule");
+        assert!(
+            !rules.is_ignored("targets/x", false),
+            "a longer name matched the prefix"
+        );
+        assert!(
+            !rules.is_ignored("src/target/x", false),
+            "a nested one matched an anchored rule"
+        );
         // And a non-ASCII path in front of it must not trip the byte slice.
         assert!(!rules.is_ignored("tồ/target/x", false));
     }

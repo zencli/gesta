@@ -179,7 +179,10 @@ pub fn run(root: &Path, name: &str, args: &[&str]) -> ZResult<()> {
         .code()
         .map(|c| c.to_string())
         .unwrap_or_else(|| "a signal".to_string());
-    Err(bad(format!("hook {} refused with exit code {}", name, code)))
+    Err(bad(format!(
+        "hook {} refused with exit code {}",
+        name, code
+    )))
 }
 
 /// Write a hook file and make it executable.
@@ -266,12 +269,7 @@ mod tests {
     #[test]
     fn a_hook_receives_the_operation_and_the_id() {
         let d = tmp("args");
-        install(
-            &d,
-            "pre-commit",
-            "#!/bin/sh\necho \"$1 $2\" > args.txt\n",
-        )
-        .unwrap();
+        install(&d, "pre-commit", "#!/bin/sh\necho \"$1 $2\" > args.txt\n").unwrap();
         run(&d, "pre-commit", &["commit", "cs123"]).unwrap();
         let seen = std::fs::read_to_string(d.join("args.txt")).unwrap();
         assert_eq!(seen.trim(), "commit cs123");
@@ -291,7 +289,10 @@ mod tests {
         install(&d, "post-commit", "#!/bin/sh\n").unwrap();
         let found = list(&d);
         assert_eq!(
-            found.iter().find(|(n, _)| n == "post-commit").map(|(_, i)| *i),
+            found
+                .iter()
+                .find(|(n, _)| n == "post-commit")
+                .map(|(_, i)| *i),
             Some(true)
         );
         assert!(remove(&d, "post-commit").unwrap());
