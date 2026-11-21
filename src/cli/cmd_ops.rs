@@ -59,9 +59,13 @@ pub fn cmd_ops_json(limit: usize) -> YResultAlias {
 pub fn cmd_stash(sub: crate::StashCmd, json: bool) -> ZResult<()> {
     use crate::StashCmd;
     match sub {
-        StashCmd::Save { message, author } => {
+        StashCmd::Save {
+            message,
+            author,
+            paths,
+        } => {
             let (root, conn) = open_repo()?;
-            let (id, n) = crate::repo::stash::save(&conn, &root, &message, &author)?;
+            let (id, n) = crate::repo::stash::save_paths(&conn, &root, &message, &author, &paths)?;
             if n == 0 {
                 println!("nothing to stash: the working tree matches the head");
                 return Ok(());

@@ -763,6 +763,13 @@ enum StashCmd {
         message: String,
         #[arg(long, default_value = "agent")]
         author: String,
+        /// Stash only these paths, leaving everything else in place
+        ///
+        /// Repeat the flag to name several. This is the non-interactive form of `git stash --patch`:
+        /// a caller that knows which files it wants to set aside says so, instead of being asked to
+        /// pick hunks from a prompt nothing can answer.
+        #[arg(long = "path")]
+        paths: Vec<String>,
     },
     /// List saved stashes, newest first
     List,

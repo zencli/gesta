@@ -52,6 +52,24 @@ fn init_schema(conn: &Connection) -> ZResult<()> {
 ///
 /// Returns the number of files saved, or zero when there was nothing to save.
 pub fn save(conn: &Connection, root: &Path, message: &str, author: &str) -> ZResult<(i64, usize)> {
+    save_paths(conn, root, message, author, &[])
+}
+
+/// Save part of the working tree aside.
+///
+/// This is the non-interactive form of `git stash --patch`: the caller names the paths it wants set
+/// aside and everything else stays where it is. An interactive picker is the wrong shape for an agent,
+/// which knows which files it is working on and cannot answer a prompt.
+///
+/// An empty `only` means the whole working set, which is what `save` has always meant, so the two
+/// entries share one implementation rather than one of them drifting.
+pub fn save_paths(
+    conn: &Connection,
+    root: &Path,
+    message: &str,
+    author: &str,
+    only: &[String],
+) -> ZResult<(i64, usize)> {
     init_schema(conn)?;
     let branch = crate::store::current_branch(conn)?;
     let head = crate::store::branch_head(conn, &branch)?;
@@ -61,11 +79,12 @@ pub fn save(conn: &Connection, root: &Path, message: &str, author: &str) -> ZRes
     // Every kind of change has to be captured, including a deletion. A stash that ignored
     // deletions reported "nothing to stash" when the only change was a removed file, so
     // switching branches silently dropped the fact that a file was meant to be gone.
+    let keep = |p: &String| only.is_empty() || only.iter().any(|o| o == p);
     let mut paths: Vec<String> = Vec::new();
-    paths.extend(d.added.iter().cloned());
-    paths.extend(d.modified.iter().cloned());
+    paths.extend(d.added.iter().filter(|p| keep(p)).cloned());
+    paths.extend(d.modified.iter().filter(|p| keep(p)).cloned());
     paths.sort();
-    let deleted: Vec<String> = d.deleted.clone();
+    let deleted: Vec<String> = d.deleted.iter().filter(|p| keep(p)).cloned().collect();
 
     if paths.is_empty() && deleted.is_empty() {
         return Ok((0, 0));
@@ -120,14 +139,41 @@ pub fn save(conn: &Connection, root: &Path, message: &str, author: &str) -> ZRes
     // Only after the stash is durable does the working tree go back to head.
     // The other order loses the work if the save fails.
     let _ = head;
-    repo::restore_worktree(conn, root, &branch)?;
+    if only.is_empty() {
+        repo::restore_worktree(conn, root, &branch)?;
+    } else {
+        // A partial stash must restore only what it took. `restore_worktree` rebuilds the whole tree
+        // from the branch head, which would throw away every file the caller asked to leave alone -
+        // the opposite of what a path filter means.
+        for rel in paths.iter().chain(deleted.iter()) {
+            match committed.get(rel) {
+                Some(hash) => {
+                    let body = crate::store::get_object(conn, hash)?;
+                    {
+                        let target = root.join(rel);
+                        if let Some(parent) = target.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&target, body)?;
+                    }
+                }
+                None => {
+                    // Not in the head, so it was new: the stash holds it and the tree should not.
+                    let target = root.join(rel);
+                    if target.is_file() {
+                        std::fs::remove_file(&target)?;
+                    }
+                }
+            }
+        }
+    }
 
     // restore_worktree only removes paths that were tracked at some point, and
     // a file added since the last commit was never tracked. Those are exactly
     // the files this stash just saved, so leaving them on disk would duplicate
     // the work: the stash holds a copy and the working tree still shows it as
     // new. Deleting them here is safe because the content is already stored.
-    for rel in &d.added {
+    for rel in d.added.iter().filter(|p| keep(p)) {
         let target = root.join(rel);
         if target.is_file() {
             std::fs::remove_file(&target)?;
@@ -270,6 +316,59 @@ mod tests {
         let d = tmp(tag);
         std::fs::write(d.join("f.txt"), "base\n").unwrap();
         d
+    }
+
+    #[test]
+    fn a_path_filter_takes_only_what_it_names_and_leaves_the_rest_editable() {
+        let d = tmp("pathfilter");
+        let conn = mem_db();
+        commit_files(
+            &conn,
+            "c1",
+            "first",
+            &[("keep.txt", "base\n"), ("take.txt", "base\n")],
+        );
+        std::fs::write(d.join("keep.txt"), "base\n").unwrap();
+        std::fs::write(d.join("take.txt"), "base\n").unwrap();
+
+        std::fs::write(d.join("keep.txt"), "EDITED keep\n").unwrap();
+        std::fs::write(d.join("take.txt"), "EDITED take\n").unwrap();
+        std::fs::write(d.join("brand-new.txt"), "never committed\n").unwrap();
+
+        let (id, n) = save_paths(&conn, &d, "only take", "t", &["take.txt".to_string()]).unwrap();
+        assert_eq!(id, 1);
+        assert_eq!(n, 1, "one file, not the whole tree");
+        assert_eq!(
+            std::fs::read_to_string(d.join("take.txt")).unwrap(),
+            "base\n",
+            "the stashed path goes back to what the branch holds"
+        );
+        // The two assertions below are the reason this exists. `restore_worktree` rebuilds the whole
+        // tree, so a filter that narrowed the save but not the reset would delete both of these.
+        assert_eq!(
+            std::fs::read_to_string(d.join("keep.txt")).unwrap(),
+            "EDITED keep\n",
+            "an unnamed path keeps its edit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.join("brand-new.txt")).unwrap(),
+            "never committed\n",
+            "an unnamed new file is not deleted along with the stashed one"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_empty_filter_still_means_the_whole_tree() {
+        // `save` delegates here, so this is what keeps the two entry points from drifting apart.
+        let d = repo_with_file("emptyfilter");
+        let conn = mem_db();
+        commit_files(&conn, "c1", "first", &[("f.txt", "base\n")]);
+        std::fs::write(d.join("f.txt"), "changed\n").unwrap();
+        let (_, n) = save_paths(&conn, &d, "wip", "t", &[]).unwrap();
+        assert_eq!(n, 1, "an empty filter selects everything");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

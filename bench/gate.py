@@ -1958,6 +1958,20 @@ def main():
             st[1][:200],
         )
 
+    if want("stash-path"):
+        # `stash save` resets the whole tree, so a path filter that does not also narrow the reset
+        # stashes one file and throws away every other edit - silently, with the work not in the
+        # stash. The bench checks the unnamed file keeps its edits, which is the whole point.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stash_path.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a stash can take part of the working tree and leave the rest alone",
+            r[0] == 0 and "8/8 stash-path checks pass" in r[1],
+            (r[1] or "")[-600:],
+        )
+
     if want("protocol-format"):
         # The store records which digest its objects use, and `stats` reports it. This is separate
         # from what the HTTP protocol advertises: the wire carries this tool's own changeset names,

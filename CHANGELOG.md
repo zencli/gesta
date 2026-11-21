@@ -14,6 +14,20 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### A stash can take part of the working tree
+
+- `stash save --path <p>`, repeatable, sets aside only the named files. This is the non-interactive
+  form of `git stash --patch`: a caller that knows which files it is working on says so, instead of
+  picking hunks from a prompt nothing can answer.
+- The bug this had to fix is severe and silent. `stash save` resets the whole tree to the branch head,
+  so a path filter that narrowed the save without narrowing the reset stashes one file and then throws
+  away every other edit - the work is gone, the stash does not hold it, and nothing reported an error.
+  The reset now touches only what was taken.
+- An empty `--path` means the whole working set, which is what `save` always meant, so both forms share
+  one implementation rather than one of them drifting.
+- `bench/stash_path.py`, eight checks, a gate step. The check that matters is that an unnamed file
+  keeps its edits and an unnamed new file stays on disk.
+
 ### A store records which digest its objects use
 
 - `git import` records the format it read, so a SHA-256 repository's names are 64 characters and the
