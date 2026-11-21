@@ -1918,7 +1918,7 @@ def main():
                      f"c=$({ZF} changeset list --json 2>/dev/null "
                      f"| python3 -c \"import json,sys; "
                      f"d=json.load(sys.stdin); "
-                     f"ids=[x['id'] for x in d.get('changesets',[]) if x.get('message')=='w{i}']; "
+                     f"ids=[x['id'] for x in d if x.get('message')=='w{i}']; "
                      f"print(ids[0] if ids else '')\"); "
                      f"[ -n \"$c\" ] && {ZF} changeset commit $c >/dev/null 2>&1; true"],
                     cwd=tmp,
