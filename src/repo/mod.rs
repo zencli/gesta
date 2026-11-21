@@ -6,6 +6,7 @@ pub mod conflict;
 pub mod history;
 pub mod hooks;
 pub mod merge;
+pub use merge::recursive_merge;
 pub mod rebase;
 pub mod stash;
 pub mod submodule;
@@ -20,7 +21,7 @@ use crate::repo::merge::{diff_hunks, merge3, MergeResult};
 use crate::store::walk::IgnoreRules;
 use crate::store::{
     branch_head, current_branch, get_object, hash_at_point, hash_content, latest_hash, merge_base,
-    new_changeset_id, put_object, put_object_for,
+    merge_bases, new_changeset_id, put_object, put_object_for,
 };
 use crate::{bad, now, repo_dir, ZResult};
 
@@ -872,9 +873,16 @@ pub fn merge_preview(
         return Ok(Vec::new());
     }
 
-    let base = match &tgt_head {
-        Some(t) => merge_base(conn, t, &src_head)?,
-        None => None,
+    let tgt_head_for_bases = tgt_head.clone().unwrap_or_default();
+    let bases = merge_bases(conn, &tgt_head_for_bases, &src_head)?;
+    let base: Option<String> = if bases.is_empty() {
+        None
+    } else if bases.len() == 1 {
+        Some(bases[0].clone())
+    } else {
+        // Multiple bases: recursively merge them to form a virtual base.
+        let virtual_base = recursive_merge(conn, &bases, &src_head, tgt_head.as_ref().unwrap())?;
+        Some(virtual_base)
     };
 
     let src_anc = crate::store::ancestors(conn, &src_head)?;

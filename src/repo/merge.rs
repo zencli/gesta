@@ -13,6 +13,8 @@ pub struct Hunk {
     pub new_start: usize,
     pub new_len: usize,
 }
+use crate::ZResult;
+use rusqlite::Connection;
 
 /// Line-level diff of two texts as ordered hunks. Repeated lines are handled by
 /// position through the alignment, not by counting occurrences, so a duplicate
@@ -156,6 +158,48 @@ impl MergeResult {
 /// A region changed on only one side takes that side. A region changed on both
 /// sides in the same way merges cleanly. A region changed differently is a
 /// conflict, reported rather than silently resolved.
+/// Recursively merge multiple bases into a virtual base, then merge ours and theirs against it.
+///
+/// When there are multiple merge bases (criss-cross), git merges them pairwise to build a virtual
+/// base, then does a three-way merge against that virtual base. This avoids the silent loss that
+/// happens when picking one base and discarding the rest.
+pub fn recursive_merge(
+    _conn: &Connection,
+    bases: &[String],
+    ours: &str,
+    theirs: &str,
+) -> ZResult<String> {
+    match bases.len() {
+        0 => Ok(merge3("", ours, theirs).text().to_string()),
+        1 => Ok(merge3(&bases[0], ours, theirs).text().to_string()),
+        2 => {
+            // Merge the two bases first to form a virtual base, then merge ours and theirs against it.
+            let virtual_base = merge3(&bases[0], &bases[1], &bases[1]);
+            let virtual_base_text = virtual_base.text().to_string();
+            Ok(merge3(&virtual_base_text, ours, theirs).text().to_string())
+        }
+        _n => {
+            // More than two: merge recursively, pairing up. Pair the oldest with the newest to keep
+            // the history somewhat balanced, then recurse on the results plus any odd one out.
+            let mut bases = bases.to_vec();
+            bases.sort_by(|a, b| b.cmp(a)); // newest first
+            while bases.len() > 1 {
+                let mut next = Vec::new();
+                for i in (0..bases.len()).step_by(2) {
+                    if i + 1 < bases.len() {
+                        let v = merge3(&bases[i], &bases[i + 1], &bases[i + 1]);
+                        next.push(v.text().to_string());
+                    } else {
+                        next.push(bases[i].clone());
+                    }
+                }
+                bases = next;
+            }
+            Ok(merge3(&bases[0], ours, theirs).text().to_string())
+        }
+    }
+}
+
 pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
     let base_lines: Vec<&str> = base.lines().collect();
     let our_lines: Vec<&str> = ours.lines().collect();

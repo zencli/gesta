@@ -970,17 +970,29 @@ pub fn ancestors(conn: &Connection, id: &str) -> ZResult<Vec<String>> {
 
 /// Best common ancestor of two changesets: the common ancestor that every other
 /// common ancestor also reaches. This is what a three-way merge diffs against.
-pub fn merge_base(conn: &Connection, a: &str, b: &str) -> ZResult<Option<String>> {
+/// Every best common ancestor of `a` and `b`, sorted newest first.
+///
+/// A merge base is a common ancestor that no other common ancestor reaches. For an ordinary fork there
+/// is one, and a three-way merge needs exactly that. For a criss-cross - two branches that each merged
+/// the other, then diverged again - there are two or more, and picking one silently discards the
+/// other's changes. git reports all of them and a recursive merge builds a virtual base from the set.
+///
+/// Returning the set is the honest shape. `merge_base` is the single-answer form, for callers that can
+/// only use one, and it says which it picked by being a different function.
+pub fn merge_bases(conn: &Connection, a: &str, b: &str) -> ZResult<Vec<String>> {
     let anc_a: HashSet<String> = ancestors(conn, a)?.into_iter().collect();
     let common: Vec<String> = ancestors(conn, b)?
         .into_iter()
         .filter(|x| anc_a.contains(x))
         .collect();
     if common.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
+
+    // Cheap path: one common ancestor is its own answer, and the reachability map below is the
+    // expensive part of this function.
     if common.len() == 1 {
-        return Ok(Some(common[0].clone()));
+        return Ok(common);
     }
 
     let cache: std::collections::HashMap<String, HashSet<String>> = common
@@ -988,8 +1000,7 @@ pub fn merge_base(conn: &Connection, a: &str, b: &str) -> ZResult<Option<String>
         .map(|c| Ok((c.clone(), ancestors(conn, c)?.into_iter().collect())))
         .collect::<ZResult<_>>()?;
 
-    // A merge base is a common ancestor that no other common ancestor reaches.
-    let mut best: Option<(String, i64)> = None;
+    let mut best: Vec<(String, i64)> = Vec::new();
     for cand in &common {
         let reached_by_another = common
             .iter()
@@ -1004,11 +1015,21 @@ pub fn merge_base(conn: &Connection, a: &str, b: &str) -> ZResult<Option<String>
                 |r| r.get(0),
             )
             .unwrap_or(0);
-        if best.as_ref().map(|(_, t)| ts > *t).unwrap_or(true) {
-            best = Some((cand.clone(), ts));
-        }
+        best.push((cand.clone(), ts));
     }
-    Ok(best.map(|(id, _)| id))
+
+    // Newest first, then by id so the order does not depend on the ancestor walk's traversal order.
+    best.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
+    Ok(best.into_iter().map(|(id, _)| id).collect())
+}
+
+/// The single best common ancestor, or none.
+///
+/// For a criss-cross this picks the newest and silently drops the rest, which is why `merge_bases`
+/// exists. Kept for the callers whose answer is a base to diff against rather than a base to merge
+/// from, and they should be audited one at a time rather than changed together.
+pub fn merge_base(conn: &Connection, a: &str, b: &str) -> ZResult<Option<String>> {
+    Ok(merge_bases(conn, a, b)?.into_iter().next())
 }
 
 /// Build the `IN (?, ?, ...)` placeholder list for `n` bound values.
@@ -1906,6 +1927,65 @@ pub(crate) mod tests {
             merge_base(&conn, "cs2", "cs3").unwrap().as_deref(),
             Some("cs2")
         );
+    }
+
+    #[test]
+    fn merge_base_returns_every_best_candidate_of_a_criss_cross() {
+        // The shape: two branches each merge the other, twice. A and B both descend from base; A1 and
+        // B1 merge each other's opposite, and then A2 and B2 merge those merges. There is no single
+        // best common ancestor - A1 and B1 are both best, because neither reaches the other - and any
+        // merge that picks one of them silently discards the other's changes.
+        //
+        //     base -> A1 --\        A2 --\
+        //              \   M1 ---...  \    M2
+        //               \  /            \  /
+        //     base -> B1 --/        B2 --/
+        //
+        // git reports both and lets a recursive merge build a virtual base from them. Returning one
+        // is what makes a criss-cross merge lose a change without reporting a conflict.
+        // Both merges have to be reached by both sides, or it is not a criss-cross. The first
+        // version of this fixture chained a2 -> m1a -> a1 and b2 -> m1b -> b1 separately, which left
+        // m1a unreachable from b2; the two answers that came back, a1 and b1, were correct for that
+        // graph. The shape only has two bases when each merge is an ancestor of both tips.
+        let conn = mem_db();
+        add_cs(&conn, "base", None, None);
+        add_cs(&conn, "a1", Some("base"), None);
+        add_cs(&conn, "b1", Some("base"), None);
+        add_cs(&conn, "m1a", Some("a1"), Some("b1"));
+        add_cs(&conn, "m1b", Some("b1"), Some("a1"));
+        add_cs(&conn, "a2", Some("m1a"), Some("m1b"));
+        add_cs(&conn, "b2", Some("m1b"), Some("m1a"));
+
+        let bases = merge_bases(&conn, "a2", "b2").unwrap();
+        let mut got: Vec<String> = bases;
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["m1a".to_string(), "m1b".to_string()],
+            "a criss-cross has two best common ancestors; returning fewer loses a change"
+        );
+    }
+
+    #[test]
+    fn merge_bases_returns_one_for_an_ordinary_fork() {
+        // The common case must not start returning two: one base is what a three-way merge needs, and
+        // a list of one is the honest shape of that.
+        let conn = mem_db();
+        add_cs(&conn, "cs1", None, None);
+        add_cs(&conn, "cs2", Some("cs1"), None);
+        add_cs(&conn, "cs3", Some("cs1"), None);
+        assert_eq!(
+            merge_bases(&conn, "cs2", "cs3").unwrap(),
+            vec!["cs1".to_string()]
+        );
+    }
+
+    #[test]
+    fn merge_bases_of_unrelated_history_is_empty() {
+        let conn = mem_db();
+        add_cs(&conn, "cs1", None, None);
+        add_cs(&conn, "cs2", None, None);
+        assert!(merge_bases(&conn, "cs1", "cs2").unwrap().is_empty());
     }
 
     #[test]
