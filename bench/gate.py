@@ -4282,7 +4282,7 @@ def main():
             if len(writes) < 4:
                 got[n] = None
                 continue
-            got[n] = (sorted(scans)[len(scans) // 2], sorted(writes)[len(writes) // 2])
+            got[n] = (min(scans), min(writes))
 
         small, large = got.get(sizes[0]), got.get(sizes[1])
         if small is None or large is None:
@@ -4304,10 +4304,21 @@ def main():
             # The scan is the other half of the picture, and it is allowed to grow. A repository
             # with no files would make the first assertion true and mean nothing, so the scan has
             # to be seen doing its work at both sizes.
+            # The assertion used to be `scan_large > scan_small`, which failed intermittently on a
+            # busy machine: measured 10.7 ms at 300 files against 16.1 ms at 3000, a real 1.5x that
+            # a scheduling spike can flatten to parity. Wall clock is the only way to see this cost,
+            # so the fix is a margin a spike cannot cross rather than a comparison of two noisy
+            # numbers. 1.2x sits well under the 1.5x measured and well over any jitter seen here.
+            #
+            # The minimum is used for the same reason: one first-scan outlier of 67 ms at 3000 files
+            # was present in the sample and pulled the median up on an otherwise quiet run, which
+            # made the check pass for the wrong reason. The minimum is the least contaminated
+            # estimate of what the scan costs when the machine is not interrupting it.
             record(
                 "and the scan that finds the change is measured apart from the write",
-                scan_large > scan_small,
-                f"scan {sizes[0]} files {scan_small:.1f} ms, {sizes[1]} files {scan_large:.1f} ms",
+                scan_small > 0 and scan_large >= scan_small * 1.2,
+                f"scan {sizes[0]} files {scan_small:.1f} ms, {sizes[1]} files {scan_large:.1f} ms, "
+                f"{scan_large / scan_small if scan_small else 0:.2f}x",
             )
 
     if want("attributes"):
@@ -4664,6 +4675,20 @@ def main():
         record(
             "blame survives a rename and a deleted file keeps no rows",
             r[0] == 0 and "6/6 blame checks pass" in r[1],
+            (r[1] or "")[-500:],
+        )
+
+    if want("bisect-run"):
+        # The manual bisect loop is step, answer, step, answer. Driving it from one command is the
+        # difference between a search over 30 changesets and five answers typed by hand, and the
+        # exit code convention - 0 good, else bad, 125 skip - is what makes it safe to automate.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bisect_run.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "one command drives a bisect search, and 125 skips a candidate",
+            r[0] == 0 and "6/6 bisect-run checks pass" in r[1],
             (r[1] or "")[-500:],
         )
 

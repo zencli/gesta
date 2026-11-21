@@ -597,6 +597,13 @@ enum BisectCmd {
     /// Report the changeset under test as good, or as bad
     Good,
     Bad,
+    /// Drive the search by running a command at each candidate
+    ///
+    /// Exit 0 means good, any other exit means bad, and 125 skips a candidate that cannot be tested.
+    Run {
+        /// Command to run at each candidate; its exit code is the answer
+        command: String,
+    },
     /// Show the state of the search
     Status,
     /// Abandon the search and put the working tree back

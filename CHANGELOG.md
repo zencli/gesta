@@ -14,6 +14,19 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### `bisect run` drives a search from one command
+
+- `gesta bisect run <command>` answers every question by running the command, adopting git's exit
+  code convention: 0 is good, any other code is bad, and **125 means skip**. The skip case is the
+  one that matters - a changeset whose build does not compile must be dropped from the range without
+  being reported as an answer, or the search names a commit that was never tested.
+- A command that cannot be started at all is an error, not a verdict. `sh: not found` is not evidence
+  that a changeset is bad.
+- Each verdict is printed as it is decided, because the useful part of an automated search is which
+  changeset first failed, not only the final name.
+- `bench/bisect_run.py`, six checks, a gate step, including the skip case and the assertion that the
+  working tree is back at the branch head afterwards.
+
 ### A SHA-256 git repository is read and written, not just refused
 
 - The previous entry refused the format by name. That was the honest half of not supporting it, and

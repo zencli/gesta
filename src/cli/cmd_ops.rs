@@ -185,6 +185,32 @@ pub fn cmd_bisect(sub: crate::BisectCmd) -> ZResult<()> {
             }
             Ok(())
         }
+        BisectCmd::Run { command } => {
+            let (root, conn) = open_repo()?;
+            if crate::repo::bisect::load(&conn)?.is_none() {
+                return Err(bad(
+                    "no bisect in progress (run `gesta bisect start`)".to_string()
+                ));
+            }
+            // Each answer is printed as it is decided, because the interesting part of an automated
+            // search is not the answer at the end but which changeset first failed and why.
+            let answer = crate::repo::bisect::run(&conn, &root, &command, |verdict, id| {
+                println!("{verdict} {}", &id[..id.len().min(14)]);
+            })?;
+            println!("first bad changeset: {answer}");
+            println!("the working tree is back at the branch head");
+            if let Ok(Some((msg, author))) = conn
+                .query_row(
+                    "SELECT message, author FROM changesets WHERE id = ?1",
+                    rusqlite::params![answer],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .map(Some)
+            {
+                println!("  {} by {}", msg, author);
+            }
+            Ok(())
+        }
         BisectCmd::Good | BisectCmd::Bad => {
             let is_good = matches!(sub, BisectCmd::Good);
             let (root, conn) = open_repo()?;

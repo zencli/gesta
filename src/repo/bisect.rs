@@ -271,6 +271,92 @@ pub fn step(conn: &Connection, root: &Path, good_answer: bool) -> ZResult<Step> 
     Ok(Step::Test(next))
 }
 
+/// Drive a whole search from one command, the way `git bisect run` does.
+///
+/// The manual loop is `step`, answer, `step`, answer; a caller that can decide good or bad without a
+/// human in the middle writes that loop once and it goes wrong once. The convention is git's and it
+/// is the reason this returns `Step` rather than a bool: a test says good with exit 0, bad with any
+/// other exit code, and **125 means skip** - the changeset cannot be tested at all, so it must be
+/// dropped from the range without being reported as either answer. Without that case a build that
+/// fails to compile on an old changeset ends the search with the wrong commit named as the culprit.
+///
+/// The command runs with the working directory at the repository root and inherits the environment,
+/// so a caller passes a shell command line exactly as it would type it. Its output goes to this
+/// process's stdout, because a search that discards the reason each step failed is a search nobody
+/// can debug when it names the wrong commit.
+pub fn run(
+    conn: &Connection,
+    root: &Path,
+    command: &str,
+    mut report: impl FnMut(&str, &str),
+) -> ZResult<String> {
+    let mut s = load(conn)?
+        .ok_or_else(|| bad("no bisect in progress (run `gesta bisect start`)".to_string()))?;
+
+    loop {
+        // Ask for the next candidate without answering anything: the answer comes from the command.
+        let next = match s.current.clone() {
+            Some(cur) => cur,
+            None => {
+                // First call after `start` already checked one out; if it did not, take the middle.
+                let mid = (s.candidates.len() - 1) / 2;
+                let id = s.candidates[mid].clone();
+                checkout(conn, root, &id)?;
+                s.current = Some(id.clone());
+                s.steps += 1;
+                store(conn, &s)?;
+                id
+            }
+        };
+
+        report("testing", &next);
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(root)
+            .status();
+
+        // A command that could not be started at all is not evidence about the changeset.
+        let code = match status {
+            Ok(st) => st.code(),
+            Err(e) => {
+                return Err(bad(format!("could not run the test command: {e}")));
+            }
+        };
+
+        // 125 is git's "skip": drop this candidate from the range and do not record it as an answer.
+        if code == Some(125) {
+            report("skipped", &next);
+            if let Some(pos) = s.candidates.iter().position(|c| c == &next) {
+                s.candidates.remove(pos);
+            }
+            s.current = None;
+            store(conn, &s)?;
+            if s.candidates.len() <= 1 {
+                let answer = s.candidates.first().cloned().ok_or_else(|| {
+                    bad("every candidate was skipped, so the search has no answer".to_string())
+                })?;
+                finish(conn, root)?;
+                return Ok(answer);
+            }
+            continue;
+        }
+
+        let good = code == Some(0);
+        report(if good { "good" } else { "bad" }, &next);
+        match step(conn, root, good)? {
+            Step::Test(_) => {
+                s = load(conn)?
+                    .ok_or_else(|| bad("the session vanished mid-search".to_string()))?;
+            }
+            Step::Found(id) => {
+                finish(conn, root)?;
+                return Ok(id);
+            }
+        }
+    }
+}
+
 /// Put the working tree back and forget the session.
 ///
 /// Called on cancel and on finding the answer. Restoring is what makes a bisect
@@ -491,5 +577,17 @@ mod tests {
         }
         assert!(ended, "the search must terminate, one way or the other");
         let _ = std::fs::remove_dir_all(&d);
+    }
+    #[test]
+    fn a_run_needs_a_session_and_says_so_plainly() {
+        // Without a session there is no range, and the command would otherwise be run once against
+        // whatever the tree happens to hold and reported as an answer.
+        let conn = crate::store::tests::mem_db();
+        let root = std::env::temp_dir();
+        let err = run(&conn, &root, "true", |_, _| {}).unwrap_err();
+        assert!(
+            format!("{err}").contains("no bisect in progress"),
+            "got: {err}"
+        );
     }
 }

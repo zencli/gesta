@@ -105,6 +105,7 @@ gesta blame src/main.rs
 | `cherry-pick <id> [--onto B]` | Apply one changeset's change onto a branch |
 | `bisect start <good> <bad>` | Begin a search for the changeset that introduced a fault |
 | `bisect good \| bad` | Answer about the changeset under test |
+| `bisect run <command>` | Drive the whole search from one command; exit 0 good, else bad, 125 skip |
 | `bisect status` | Remaining candidates and questions asked |
 | `bisect cancel` | Abandon the search and restore the working tree |
 | `undo` | Undo the last operation |
