@@ -189,6 +189,13 @@ pub fn import(conn: &Connection, git_root: &Path, prefix: Option<&str>) -> ZResu
     } else {
         store::set_state(conn, "current_branch", "main")?;
     }
+
+    // `history` reads `file_versions` and worked on imported repositories; `blame` reads
+    // `blame_ranges`, and this path never wrote them. Computing them once at the end costs one pass
+    // over the newest version of each path, against a `blame` that answered "never committed" for
+    // everything an import brought in.
+    let blamed = crate::repo::rebuild_all_blame(conn)?;
+    let _ = blamed;
     Ok(out)
 }
 

@@ -392,7 +392,195 @@ pub fn commit_one(conn: &Connection, id: &str) -> ZResult<usize> {
 /// the edit count. Measured on a 200 line file: 9 ms at 10 versions, 131 ms at
 /// 120. Only two versions are needed: lines that survived keep the owner they
 /// had, lines that appeared belong to the commit being made.
-fn recompute_blame(conn: &Connection, files: &[(String, String)]) -> ZResult<()> {
+/// Rebuild blame for one path by walking its whole version chain, oldest first.
+///
+/// `recompute_blame` compares the newest version against the one before it, which is what a commit
+/// that appended one version needs. An import writes the entire chain in one go, so when that
+/// function runs the previous version has no blame rows yet, every line of the newest version finds
+/// nothing to inherit, and the whole file is attributed to the last changeset that touched it.
+///
+/// Walking from the oldest version forwards fixes that: each step inherits from a chain that has
+/// already been computed. The per-step comparison is the same one `recompute_blame` uses, so there is
+/// one implementation of how blame propagates and this only decides the order.
+pub fn rebuild_blame_chain(conn: &Connection, path: &str) -> ZResult<()> {
+    let versions: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT version, hash FROM file_versions WHERE path = ?1 ORDER BY version ASC",
+        )?;
+        let rows = stmt.query_map(params![path], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if versions.is_empty() {
+        return Ok(());
+    }
+
+    // Clear first: a chain built on top of half-written rows attributes lines to whatever was there.
+    conn.execute("DELETE FROM blame_ranges WHERE path = ?1", params![path])?;
+
+    for (_version, hash) in &versions {
+        // One step: this version against the rows the previous step wrote. `recompute_blame` reads
+        // the newest `file_versions` row, so the chain is walked by asking it at each position and
+        // letting it inherit from what is already stored.
+        recompute_blame_at(conn, path, hash)?;
+    }
+    Ok(())
+}
+
+/// Attribute one version of a path, inheriting from whatever blame rows already exist.
+///
+/// This is the body of the per-path step in `recompute_blame`, split out so a chain walk can call it
+/// with whichever version it is on rather than always the newest.
+fn recompute_blame_at(conn: &Connection, path: &str, hash: &str) -> ZResult<()> {
+    let current = match get_object(conn, hash) {
+        Ok(text) => text,
+        Err(_) => {
+            // A binary file has no lines to attribute.
+            return Ok(());
+        }
+    };
+    let cur_lines: Vec<&str> = current.lines().collect();
+
+    // The changeset that wrote this version, found by the hash rather than by "newest", because a
+    // chain walk is not always on the newest one.
+    let (this_id, this_author, this_ts): (String, String, i64) = conn.query_row(
+        "SELECT cs.id, cs.author, cs.created_at
+         FROM file_versions fv JOIN changesets cs ON cs.id = fv.changeset_id
+         WHERE fv.path = ?1 AND fv.hash = ?2
+         ORDER BY fv.version ASC LIMIT 1",
+        params![path, hash],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+
+    // What the previous step attributed, one entry per line.
+    let previous: Vec<(String, String, i64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT start_line, end_line, changeset_id FROM blame_ranges
+             WHERE path = ?1 ORDER BY start_line ASC",
+        )?;
+        let ranges = stmt
+            .query_map(params![path], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut out = Vec::new();
+        for (start, end, cs) in ranges {
+            for _ in start..=end {
+                out.push((cs.clone(), String::new(), 0i64));
+            }
+        }
+        out
+    };
+
+    // The version immediately older than this one, by version number rather than by offset from the
+    // newest: in a chain walk the newest is not the reference point.
+    let this_version: i64 = conn.query_row(
+        "SELECT version FROM file_versions WHERE path = ?1 AND hash = ?2 ORDER BY version ASC LIMIT 1",
+        params![path, hash],
+        |r| r.get(0),
+    )?;
+    let prev_hash: Option<String> = conn
+        .query_row(
+            "SELECT hash FROM file_versions WHERE path = ?1 AND version < ?2
+             ORDER BY version DESC LIMIT 1",
+            params![path, this_version],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let old_lines: Vec<String> = match prev_hash {
+        Some(h) => get_object(conn, &h)
+            .map(|t| t.lines().map(|l| l.to_string()).collect())
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    // The two matching passes, unchanged from the single-step version.
+    let mut owner: Vec<Option<(String, String, i64)>> = vec![None; cur_lines.len()];
+    let mut used = vec![false; old_lines.len()];
+    let mut j = 0usize;
+    for (i, line) in cur_lines.iter().enumerate() {
+        let mut k = j;
+        while k < old_lines.len() {
+            if !used[k] && &old_lines[k] == line {
+                owner[i] = previous.get(k).cloned();
+                used[k] = true;
+                j = k + 1;
+                break;
+            }
+            k += 1;
+        }
+    }
+    let mut by_content: std::collections::HashMap<&str, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (k, line) in old_lines.iter().enumerate() {
+        if !used[k] {
+            by_content.entry(line.as_str()).or_default().push(k);
+        }
+    }
+    for i in 0..cur_lines.len() {
+        if owner[i].is_some() {
+            continue;
+        }
+        if let Some(cands) = by_content.get_mut(cur_lines[i]) {
+            if let Some(k) = cands.pop() {
+                if !used[k] {
+                    owner[i] = previous.get(k).cloned();
+                    used[k] = true;
+                }
+            }
+        }
+    }
+
+    // Anything still unattributed was written by this version.
+    let mut ranges: Vec<(i64, i64, String)> = Vec::new();
+    for (i, o) in owner.iter().enumerate() {
+        let cs = match o {
+            Some((id, _, _)) if !id.is_empty() => id.clone(),
+            _ => this_id.clone(),
+        };
+        let line = (i + 1) as i64;
+        match ranges.last_mut() {
+            Some((_, end, last)) if *last == cs && *end == line - 1 => *end = line,
+            _ => ranges.push((line, line, cs)),
+        }
+    }
+    conn.execute("DELETE FROM blame_ranges WHERE path = ?1", params![path])?;
+    let mut ins =
+        conn.prepare("INSERT INTO blame_ranges(path, start_line, end_line, changeset_id) VALUES(?1,?2,?3,?4)")?;
+    for (start, end, cs) in ranges {
+        ins.execute(params![path, start, end, cs])?;
+    }
+    let _ = (this_author, this_ts);
+    Ok(())
+}
+
+/// Rebuild blame for every path the store holds a newest version of.
+///
+/// A commit already knows which files it touched and calls `recompute_blame` with that list. An
+/// import does not: it writes a whole history at once, and nothing in that path collects the per-file
+/// list a commit would. Reading the store's own answer for "newest version of each path" is the same
+/// question asked once instead of per file, and it is what makes `blame` work on imported history.
+///
+/// `history` worked on imported repositories and `blame` did not, because only one of them reads
+/// `file_versions`. The lines a reader wants attributed were never computed.
+pub fn rebuild_all_blame(conn: &Connection) -> ZResult<usize> {
+    let paths: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT DISTINCT path FROM file_versions ORDER BY path")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for p in &paths {
+        rebuild_blame_chain(conn, p)?;
+    }
+    Ok(paths.len())
+}
+
+pub fn recompute_blame(conn: &Connection, files: &[(String, String)]) -> ZResult<()> {
     for (path, hash) in files {
         // A binary file has no lines, so there is nothing to attribute. Asking for it as text
         // failed the whole commit with a message about UTF-8, which stopped any repository

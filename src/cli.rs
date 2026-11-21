@@ -1034,8 +1034,11 @@ pub fn cmd_history(file: &str) -> ZResult<()> {
 
     let mut all: Vec<(String, i64, String, i64, String, String)> = Vec::new();
     for name in &chain {
+        // The second column is the changeset that wrote this version, not the version's content
+        // hash. A reader copies that column into `show`, and a content hash is a name no command
+        // resolves: it looked like the commit and was the file's own hash.
         let mut stmt = conn.prepare(
-            "SELECT fv.path, fv.version, fv.hash, fv.created_at, cs.message, cs.author
+            "SELECT fv.path, fv.version, cs.id, fv.created_at, cs.message, cs.author
              FROM file_versions fv JOIN changesets cs ON cs.id = fv.changeset_id
              WHERE fv.path = ?1 ORDER BY fv.version DESC",
         )?;
@@ -1149,7 +1152,12 @@ fn ls_entries(
 ) -> ZResult<Vec<(String, String)>> {
     let head = match rev {
         Some(r) => crate::store::resolve_rev(conn, r)?
-            .ok_or_else(|| crate::error::Error::not_found(format!("no such revision: {}", r)))?,
+            .ok_or_else(|| {
+                crate::error::Error::not_found(format!(
+                    "no such revision: {}. A revision may be HEAD, a branch, a tag, a changeset id, or an unambiguous prefix of one.",
+                    r
+                ))
+            })?,
         None => {
             let branch = current_branch(conn)?;
             crate::store::branch_head(conn, &branch)?.ok_or_else(|| {
@@ -1625,12 +1633,45 @@ fn grep_hits(s: &Search) -> ZResult<Vec<crate::grep::Hit>> {
 
 pub fn cmd_show(spec: &str) -> ZResult<()> {
     let (_root, conn) = open_repo()?;
-    let (rev, path) = match spec.split_once(':') {
-        Some((r, p)) => (r.to_string(), normalise(p)),
-        None => (current_branch(&conn)?, normalise(spec)),
+    let (rev, path, named_path) = match spec.split_once(':') {
+        Some((r, p)) => (r.to_string(), normalise(p), true),
+        None => (current_branch(&conn)?, normalise(spec), false),
     };
-    let cs = store::resolve_rev(&conn, &rev)?
-        .ok_or_else(|| crate::error::Error::not_found(format!("no such branch, tag or changeset: {}", rev)))?;
+    // `show v2` with no path: a version label belongs to a file, so this is a question with no answer
+    // rather than a name that does not exist. Checked against `spec`, because without a colon the
+    // revision is the current branch and `spec` is the path.
+    if !named_path {
+        if let Some(rest) = spec.strip_prefix('v') {
+            if rest.parse::<i64>().is_ok() {
+                return Err(crate::error::Error::new(
+                    crate::error::Code::Usage,
+                    format!(
+                        "{} is a per-file version, so it needs a path: `gesta show {}:<file>`",
+                        spec, spec
+                    ),
+                )
+                .into());
+            }
+        }
+    }
+    // A `vN` label names a version of one file. Here the file is named too, so it resolves; the
+    // ambiguous form is refused by `resolve_rev` with the paths it could mean.
+    let cs = match store::resolve_version_for_path(&conn, &rev, &path)? {
+        Some(id) => id,
+        None => match store::resolve_rev(&conn, &rev) {
+            Ok(Some(id)) => id,
+            // The resolver already refuses an ambiguous `vN` with the paths it could mean. Anything
+            // else is a name that matches nothing, and the message says which forms exist.
+            Err(e) => return Err(e),
+            Ok(None) => {
+                return Err(crate::error::Error::not_found(format!(
+                    "no such branch, tag or changeset: {}. A revision may be HEAD, a branch, a tag, a changeset id, an unambiguous prefix of one, or vN with a path.",
+                    rev
+                ))
+                .into())
+            }
+        },
+    };
     let hash = hash_at_point(&conn, &path, &cs)?
         .ok_or_else(|| {
             crate::error::Error::new(

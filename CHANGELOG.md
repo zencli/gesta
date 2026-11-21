@@ -14,6 +14,19 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### blame works on imported history, and revisions resolve
+
+- `git import` now builds the blame chain for every path. It wrote `file_versions` and never
+  `blame_ranges`, so `blame` answered `never committed` for every file an import brought in
+  while `history` found versions for the same path.
+- The chain is walked oldest first. Comparing only the newest version against nothing, which is
+  what the per-commit path does, attributed a whole file to the last changeset that touched it.
+- `resolve_rev` accepts `HEAD`, a git commit id or its abbreviation, and an unambiguous prefix
+  of a changeset id. A `vN` label resolves with a path and is refused with the form to use.
+- `history` prints the changeset id in its second column instead of the file version's content
+  hash, which looked like a commit and resolved to nothing.
+- `bench/revisions.py` takes each spelling from real output and feeds it to another command.
+
 - `.gitattributes` support for line endings. `text` normalises to LF in the object, `eol=lf` and
   `eol=crlf` decide what the working tree gets, and `-text` or `binary` stores bytes unchanged. Read
   from `.gitattributes` and from `.gesta/attributes`, with the last matching rule winning.

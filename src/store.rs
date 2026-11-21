@@ -926,7 +926,86 @@ pub fn in_placeholders(n: usize) -> String {
 /// This existed as a bug first: `show main:x` passed the branch name into a
 /// function that only walked changesets, so a file that was plainly in the head
 /// tree was reported missing.
+/// Resolve a `vN` version label for a path.
+///
+/// `history` prints `v26  9cbc02e9` for each row, and a reader who copies that label into `show` was
+/// told it did not exist. The label is per path, so this answers only when the caller names one.
+pub fn resolve_version_label(
+    conn: &Connection,
+    rev: &str,
+) -> ZResult<Option<(String, String)>> {
+    let Some(rest) = rev.strip_prefix('v') else {
+        return Ok(None);
+    };
+    let Ok(n) = rest.parse::<i64>() else {
+        return Ok(None);
+    };
+    if n <= 0 {
+        return Ok(None);
+    }
+    // Ambiguous across paths by construction, so it names the paths it could mean rather than
+    // choosing one. `show v26:path` resolves it properly through `resolve_for_path`.
+    let paths: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT path FROM file_versions WHERE version = ?1 GROUP BY path ORDER BY path LIMIT 6",
+        )?;
+        let rows = stmt.query_map(params![n], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    if paths.len() > 1 {
+        return Err(Box::new(crate::error::Error::new(
+            crate::error::Code::Usage,
+            format!(
+                "{} is a per-file version and {} paths have one: {}. Name the file as {}:<path>.",
+                rev,
+                paths.len(),
+                paths.iter().take(4).cloned().collect::<Vec<_>>().join(", "),
+                rev
+            ),
+        )));
+    }
+    let row: (String, String) = conn.query_row(
+        "SELECT changeset_id, hash FROM file_versions WHERE path = ?1 AND version = ?2",
+        params![paths[0], n],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(Some(row))
+}
+
+/// Resolve `vN` for one path, which is the form that is not ambiguous.
+pub fn resolve_version_for_path(
+    conn: &Connection,
+    rev: &str,
+    path: &str,
+) -> ZResult<Option<String>> {
+    let Some(rest) = rev.strip_prefix('v') else {
+        return Ok(None);
+    };
+    let Ok(n) = rest.parse::<i64>() else {
+        return Ok(None);
+    };
+    Ok(conn
+        .query_row(
+            "SELECT changeset_id FROM file_versions WHERE path = ?1 AND version = ?2",
+            params![path, n],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?)
+}
+
 pub fn resolve_rev(conn: &Connection, rev: &str) -> ZResult<Option<String>> {
+    let rev = rev.trim();
+
+    // `HEAD` is what `status` prints and what every reader of a tool's output copies first. Without
+    // this branch it was rejected as a branch named HEAD, which exists in no repository.
+    if rev.eq_ignore_ascii_case("HEAD") || rev == "@" {
+        let branch = current_branch(conn).unwrap_or_else(|_| "main".to_string());
+        return branch_head(conn, &branch);
+    }
+
     if let Ok(Some(head)) = branch_head(conn, rev) {
         return Ok(Some(head));
     }
@@ -935,6 +1014,81 @@ pub fn resolve_rev(conn: &Connection, rev: &str) -> ZResult<Option<String>> {
         .optional()?;
     if exists.is_some() {
         return Ok(exists);
+    }
+
+    // A `vN` label, as `history` prints beside each row. The version is per path, so the label only
+    // has a meaning when the caller also names a file; without one it is ambiguous and refused by
+    // `resolve_for_path` below rather than guessed at here.
+    if let Some((id, _)) = resolve_version_label(conn, rev)? {
+        return Ok(Some(id));
+    }
+
+    // A git commit id, which `git import` records and `log --oneline` may print. The two names are
+    // not derivable from one another, so this is a lookup rather than a transformation.
+    let by_commit: Option<String> = conn
+        .query_row(
+            "SELECT id FROM changesets WHERE git_commit = ?1",
+            params![rev],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if by_commit.is_some() {
+        return Ok(by_commit);
+    }
+    // An abbreviated git commit, as `history` prints it. Same rule as an id prefix: one match is an
+    // answer, several is an ambiguity worth naming, none falls through.
+    if rev.len() >= 7 && rev.chars().all(|c| c.is_ascii_hexdigit()) {
+        let hits: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM changesets WHERE git_commit LIKE ?1 ORDER BY created_at DESC LIMIT 8",
+            )?;
+            let rows = stmt.query_map(params![format!("{}%", rev)], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if hits.len() == 1 {
+            return Ok(Some(hits[0].clone()));
+        }
+        if hits.len() > 1 {
+            return Err(Box::new(crate::error::Error::new(
+                crate::error::Code::Usage,
+                format!("{} matches {} commits. Name more of the id.", rev, hits.len()),
+            )));
+        }
+    }
+
+    // An unambiguous prefix of a changeset id. `log --oneline` prints the short form, and a person
+    // copying one out of it was told the changeset did not exist. Two matches is a real ambiguity and
+    // has to say so rather than pick one.
+    // A prefix as `log` prints it carries the `cs` that every id starts with, so the test is on the
+    // whole string being a prefix of an id rather than on it being bare hex.
+    let looks_like_prefix = rev.len() >= 4;
+    if looks_like_prefix {
+        let matches: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM changesets WHERE id LIKE ?1 ORDER BY created_at DESC LIMIT 8",
+            )?;
+            let rows = stmt.query_map(params![format!("{}%", rev)], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if matches.len() == 1 {
+            return Ok(Some(matches[0].clone()));
+        }
+        if matches.len() > 1 {
+            return Err(Box::new(crate::error::Error::new(
+                crate::error::Code::Usage,
+                format!(
+                    "{} matches {} changesets: {}. Name more of the id.",
+                    rev,
+                    matches.len(),
+                    matches
+                        .iter()
+                        .take(3)
+                        .map(|m| m.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )));
+        }
     }
     // A tag is also a valid revision, and a tag may point at another tag. Following the chain
     // rather than reading one row is what keeps a re-tag honest; the bound stops a cycle written

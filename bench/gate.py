@@ -3242,6 +3242,20 @@ def main():
                     proc.kill()
                 _shv.rmtree(d, ignore_errors=True)
 
+    if want("revisions"):
+        # blame answered "never committed" for imported history, and show/ls accepted only one
+        # spelling of a revision. The contract is that whatever a command prints, another
+        # command accepts.
+        r = sh_out(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'revisions.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "blame works on imported history and every printed revision resolves",
+            r[0] == 0 and "10/10 revision and blame checks pass" in r[1],
+            (r[1] or "")[-400:],
+        )
+
     if want("multi-ack"):
         # A capability the client does not understand fails as a stall or a hung-up connection,
         # which reads like a broken pack. This drives a real client through clone and fetch.
