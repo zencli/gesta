@@ -42,6 +42,7 @@ mod packfile;
 mod pack;
 mod remote;
 mod rebase;
+mod protocol_v2;
 mod repo;
 mod s3;
 mod secrets;

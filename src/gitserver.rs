@@ -99,6 +99,14 @@ pub fn read_pkt_lines(body: &[u8]) -> Vec<String> {
                 i += 4;
                 continue;
             }
+            // 0001 is a delimiter and 0002 the end of the request, and neither is a payload length.
+            // Protocol v2 uses both: the command section ends with 0001, the arguments follow, and a
+            // reader that treats 0001 as a length reads one byte of the next header as data and then
+            // finds no command at all.
+            Ok(1) | Ok(2) => {
+                i += 4;
+                continue;
+            }
             Ok(n) => n,
             Err(_) => break,
         };

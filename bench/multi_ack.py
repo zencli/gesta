@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Does a real git client negotiate against this server under multi_ack_detailed and still succeed?
 
+The client is pinned to protocol v0: git 2.43 defaults to v2, which has no multi_ack_detailed at
+all, so an unpinned run measures the other protocol and the failure lands at the wrong seam.
 The capability changes the conversation, and a conversation the client does not understand fails in
 ways that look like a broken pack: a stall until timeout, or "fatal: the remote end hung up". So the
 check is a real clone, a real fetch and a real second fetch, with git's own packet trace read to
@@ -68,10 +70,11 @@ def main():
 
             # The advertisement carries the capability.
             trace_env = dict(os.environ, GIT_TRACE_PACKET="1")
-            rc_ls, ls = sh(f"git ls-remote {url}", d, env=trace_env)
+            v0 = "-c protocol.version=0"
+            rc_ls, ls = sh(f"git {v0} ls-remote {url}", d, env=trace_env)
             offered = "multi_ack_detailed" in ls
 
-            rc_clone, clone_out = sh(f"git clone -q {url} {clone}", work, env=trace_env)
+            rc_clone, clone_out = sh(f"git {v0} clone -q {url} {clone}", work, env=trace_env)
             cloned = rc_clone == 0 and os.path.isdir(os.path.join(clone, ".git"))
 
             # A commit on the server, then a fetch that negotiates.
@@ -82,7 +85,7 @@ def main():
             if m:
                 sh(f"{ZF} changeset commit {m.group(1)}", d)
 
-            rc_fetch, fetch = sh("git fetch origin", clone, env=trace_env)
+            rc_fetch, fetch = sh(f"git {v0} fetch origin", clone, env=trace_env)
             fetched = rc_fetch == 0
             acks = re.findall(r"ACK ([0-9a-f]{40})(?: (common|ready))?", fetch)
             acked = len(acks) > 0
@@ -93,7 +96,7 @@ def main():
 
             # A third fetch with nothing new must succeed rather than hang on a protocol it does not
             # finish: "everything up-to-date" is the answer a stall would replace.
-            rc_again, again = sh("git fetch origin", clone, env=trace_env)
+            rc_again, again = sh(f"git {v0} fetch origin", clone, env=trace_env)
             repeat_ok = rc_again == 0
         finally:
             server.terminate()

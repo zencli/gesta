@@ -37,6 +37,9 @@ pub struct Request {
     pub body: Vec<u8>,
     /// Raw `Authorization` header value, if the client sent one.
     pub authorization: Option<String>,
+    /// Raw `Git-Protocol` header value. A v2 client sends `version=2` on every request,
+    /// and that header is the only way to tell a v2 body from a v0 one before parsing it.
+    pub git_protocol: Option<String>,
 }
 
 impl Request {
@@ -617,6 +620,9 @@ fn read_request_generic<S: Read>(stream: &mut S) -> ZResult<Request> {
     let head = parse_head(&buf[..head_end])?;
     debug_assert_eq!(head.consumed, head_end, "header parser and reader disagree");
     let authorization = head.header("authorization").map(|s| s.to_string());
+    // A v2 client says which protocol it speaks on every request, including the advertisement.
+    // Read here, beside the credential, and before `head` is destructured.
+    let git_protocol = head.header("Git-Protocol").map(|v| v.to_string());
     let method = head.method;
     let path = head.path;
     let query = head.query;
@@ -642,7 +648,7 @@ fn read_request_generic<S: Read>(stream: &mut S) -> ZResult<Request> {
     }
     body.truncate(want);
 
-    Ok(Request { method, path, query, body, authorization })
+    Ok(Request { method, path, query, body, authorization, git_protocol })
 }
 
 /// Dispatch one request. Kept separate from socket code so routes and access
@@ -824,13 +830,33 @@ pub fn route(
         ("GET", p) if p.contains("/info/refs") => {
             let service = req.param("service").unwrap_or("");
             match service {
-                "git-upload-pack" => match crate::gitserver::advertise(root) {
-                    Ok(body) => {
-                        log_access(root, &who, "git-info-refs", p, &format!("{} bytes", body.len()));
-                        Response::ok_with_type(body, "application/x-git-upload-pack-advertisement")
+                "git-upload-pack" => {
+                    // A v2 client says so on every request, including this one. Answering with the v0
+                    // ref list would leave it parsing refs as capabilities and failing with a protocol
+                    // error that names nothing useful.
+                    if crate::protocol_v2::wants_v2(req.git_protocol.as_deref()) {
+                        let bytes =
+                            crate::protocol_v2::capability_advertisement(env!("CARGO_PKG_VERSION"));
+                        log_access(
+                            root,
+                            &who,
+                            "git-upload-pack-advert-v2",
+                            p,
+                            &format!("{} bytes", bytes.len()),
+                        );
+                        return Response::ok_with_type(
+                            bytes,
+                            "application/x-git-upload-pack-advertisement",
+                        );
                     }
-                    Err(e) => Response::error(500, "Internal Server Error", e.to_string()),
-                },
+                    match crate::gitserver::advertise(root) {
+                        Ok(body) => {
+                            log_access(root, &who, "git-info-refs", p, &format!("{} bytes", body.len()));
+                            Response::ok_with_type(body, "application/x-git-upload-pack-advertisement")
+                        }
+                        Err(e) => Response::error(500, "Internal Server Error", e.to_string()),
+                    }
+                }
                 "git-receive-pack" => match crate::gitserver::advertise_receive(root) {
                     Ok(bytes) => {
                         log_access(root, &who, "git-receive-pack-advert", p, &format!("{} bytes", bytes.len()));
@@ -869,12 +895,116 @@ pub fn route(
             }
         }
         ("POST", p) if p.ends_with("/git-upload-pack") => {
+            // A v2 request names its command in the first section. The v0 path reads `want` lines
+            // directly, and handing it a v2 body finds no wants and answers an empty pack, which
+            // looks like a repository with no objects rather than a protocol mismatch.
+            if crate::protocol_v2::wants_v2(req.git_protocol.as_deref()) {
+                let command = crate::protocol_v2::command_of(&req.body);
+                if command.as_deref() == Some("ls-refs") {
+                    let served = match crate::http::open_repo_for_serve(root) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return Response::error(500, "Internal Server Error", e.to_string())
+                        }
+                    };
+                    let head = if served.refs.iter().any(|(n, _)| n == "main") {
+                        Some("main")
+                    } else {
+                        served.refs.first().map(|(n, _)| n.as_str())
+                    };
+                    match crate::protocol_v2::ls_refs(&req.body, &served.refs, head) {
+                        Ok(bytes) => {
+                            log_access(
+                                root,
+                                &who,
+                                "git-v2-ls-refs",
+                                p,
+                                &format!("{} bytes", bytes.len()),
+                            );
+                            Response::ok_with_type(
+                                bytes,
+                                "application/x-git-upload-pack-result",
+                            )
+                        }
+                        Err(e) => Response::error(500, "Internal Server Error", e.to_string()),
+                    }
+                } else if command.as_deref() == Some("fetch") {
+                    // The v2 arguments are read here and handed to the same code that answers v0. A
+                    // second implementation of reachability would be a second thing to keep in step,
+                    // and the difference between the two requests is the framing, not the answer.
+                    let (wants, haves, done) = crate::protocol_v2::parse_fetch(&req.body);
+
+                    // A fetch that named haves and did not say `done` is a negotiation round: the
+                    // client asks whether anything is shared and expects `acknowledgments`, not a
+                    // pack. Answering with `packfile` makes it report `expected 'acknowledgments,
+                    // received 'packfile'`, which names neither side's mistake.
+                    if !haves.is_empty() && !done {
+                        let known: Vec<String> = match crate::http::open_repo_for_serve(root) {
+                            Ok(served) => {
+                                let server_shas: Vec<String> =
+                                    served.refs.iter().map(|(_, sha)| sha.clone()).collect();
+                                // A have counts as shared when the server holds a commit with that
+                                // id; the export names every object, but only refs are checked here
+                                // because a full reachability walk per round is what v2 exists to
+                                // avoid repeating.
+                                haves
+                                    .iter()
+                                    .filter(|h| server_shas.iter().any(|s| s == *h))
+                                    .cloned()
+                                    .collect()
+                            }
+                            Err(_) => Vec::new(),
+                        };
+                        let bytes = crate::protocol_v2::acknowledgments(&haves, &known);
+                        log_access(
+                            root,
+                            &who,
+                            "git-v2-ack",
+                            p,
+                            &format!("{} have(s), {} shared", haves.len(), known.len()),
+                        );
+                        return Response::ok_with_type(
+                            bytes,
+                            "application/x-git-upload-pack-result",
+                        );
+                    }
+
+                    let v0_body = crate::protocol_v2::v0_fetch_body(&wants, &haves, done);
+                    match crate::gitserver::upload_pack(root, &v0_body) {
+                        Ok(raw) => {
+                            // `upload_pack` answers in v0 framing. The bytes it names are the answer;
+                            // the header around them is the protocol.
+                            let pack = strip_v0_framing(&raw);
+                            let bytes = crate::protocol_v2::fetch_response(&pack);
+                            log_access(
+                                root,
+                                &who,
+                                "git-v2-fetch",
+                                p,
+                                &format!("{} bytes", bytes.len()),
+                            );
+                            Response::ok_with_type(
+                                bytes,
+                                "application/x-git-upload-pack-result",
+                            )
+                        }
+                        Err(e) => Response::error(500, "Internal Server Error", e.to_string()),
+                    }
+                } else {
+                    Response::error(
+                        400,
+                        "Bad Request",
+                        "a v2 request must name command=ls-refs or command=fetch",
+                    )
+                }
+            } else {
             match crate::gitserver::upload_pack(root, &req.body) {
                 Ok(body) => {
                     log_access(root, &who, "git-upload-pack", p, &format!("{} bytes", body.len()));
                     Response::ok_with_type(body, "application/x-git-upload-pack-result")
                 }
                 Err(e) => Response::error(500, "Internal Server Error", e.to_string()),
+            }
             }
         }
         ("GET", "/v1/file") => {
@@ -1380,6 +1510,7 @@ mod tests {
             query: vec![],
             body: vec![],
             authorization: None,
+            git_protocol: None,
         };
         let resp = route(Path::new("/tmp/does-not-matter"), &req, &Auth::from_entries(&[]), None);
         assert_eq!(resp.status, 405);
@@ -1393,6 +1524,7 @@ mod tests {
             query: vec![],
             body: vec![],
             authorization: None,
+            git_protocol: None,
         };
         let resp = route(Path::new("/tmp/does-not-matter"), &req, &Auth::from_entries(&[]), None);
         assert_eq!(resp.status, 405);
@@ -1406,6 +1538,7 @@ mod tests {
             query: vec![],
             body: vec![],
             authorization: None,
+            git_protocol: None,
         };
         let resp = route(Path::new("/tmp/does-not-matter"), &req, &Auth::from_entries(&[]), None);
         assert_eq!(resp.status, 200);
@@ -1443,6 +1576,39 @@ pub struct ServedRepository {
     pub refs: Vec<(String, String)>,
     /// Every object those refs reach.
     pub objects: Vec<crate::gitserver::Entry>,
+}
+
+/// Pull the pack out of a v0 upload-pack response.
+///
+/// v0 sends `NAK` then side-band chunks. A v2 fetch needs the same bytes under a different header, so
+/// the framing is removed and the pack returned whole. Doing it this way keeps one implementation of
+/// what objects to send, which is the part with the reasoning in it.
+fn strip_v0_framing(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 4 <= raw.len() {
+        let Ok(hex) = std::str::from_utf8(&raw[i..i + 4]) else {
+            break;
+        };
+        let len = match usize::from_str_radix(hex, 16) {
+            Ok(0) => {
+                i += 4;
+                continue;
+            }
+            Ok(n) if n >= 4 => n,
+            _ => break,
+        };
+        if i + len > raw.len() {
+            break;
+        }
+        let payload = &raw[i + 4..i + len];
+        // Band 1 carries the pack. A bare `NAK` has no band byte and is skipped.
+        if payload.first() == Some(&1u8) {
+            out.extend_from_slice(&payload[1..]);
+        }
+        i += len;
+    }
+    out
 }
 
 pub fn open_repo_for_serve(root: &Path) -> ZResult<ServedRepository> {

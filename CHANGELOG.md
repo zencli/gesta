@@ -14,6 +14,18 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+
+### Protocol v2
+
+- A request carrying `Git-Protocol: version=2` is answered with the capability list instead of
+  refs, and its POST is read as `command=ls-refs` or `command=fetch`.
+- `ls-refs` honours `symrefs`, `unborn` and `ref-prefix`, and names HEAD first.
+- A fetch that named haves and did not say `done` gets an `acknowledgments` section; one that
+  said `done` gets `packfile`.
+- `read_pkt_lines` now walks past `0001` and `0002`, the v2 delimiter and response-end.
+- `bench/protocol_v2.py` forces a real client to v2 and clones and fetches.
+
+
 ### blame works on imported history, and revisions resolve
 
 - `git import` now builds the blame chain for every path. It wrote `file_versions` and never

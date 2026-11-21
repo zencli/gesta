@@ -3242,6 +3242,7 @@ def main():
                     proc.kill()
                 _shv.rmtree(d, ignore_errors=True)
 
+
     if want("revisions"):
         # blame answered "never committed" for imported history, and show/ls accepted only one
         # spelling of a revision. The contract is that whatever a command prints, another
@@ -3253,6 +3254,20 @@ def main():
         record(
             "blame works on imported history and every printed revision resolves",
             r[0] == 0 and "10/10 revision and blame checks pass" in r[1],
+            (r[1] or "")[-400:],
+        )
+
+
+    if want("protocol-v2"):
+        # A v2 conversation the client cannot finish fails as a stall or an early EOF, and both
+        # read like a broken repository. This forces the client to v2 and does the work.
+        r = sh_out(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'protocol_v2.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a real git client clones and fetches over protocol v2",
+            r[0] == 0 and "5/5 protocol v2 checks pass" in r[1],
             (r[1] or "")[-400:],
         )
 
