@@ -4654,6 +4654,19 @@ def main():
             (r[1] or "")[-500:],
         )
 
+    if want("blame-rename"):
+        # `history` printed the right chain while `blame` on the same path credited the rename, so a
+        # unit test of the store's bookkeeping would have missed this. The check drives the binary.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'blame_rename.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "blame survives a rename and a deleted file keeps no rows",
+            r[0] == 0 and "6/6 blame checks pass" in r[1],
+            (r[1] or "")[-500:],
+        )
+
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
 

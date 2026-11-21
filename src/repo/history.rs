@@ -320,6 +320,258 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn a_rename_on_the_other_side_of_a_merge_is_still_found() {
+        // The shape: main renames a file, a side branch keeps editing it under the old name, and the
+        // merge takes the new name. Asking for the history of the new path has to cross into the
+        // second parent, because that is where the old name lived.
+        //
+        // Without the walk, `rename_history` looks only at changesets that wrote the path directly,
+        // finds the merge (which wrote it), sees no rename inside the merge itself, and stops. The
+        // chain then has one entry and the edits from the side branch are invisible.
+        let conn = mem_db();
+        commit_files(
+            &conn,
+            "cs1",
+            "base",
+            &[("app.py", "def run():\n    return 1\n")],
+        );
+
+        // cs2 on main renames app.py to main.py, content unchanged.
+        let h = put_object(&conn, "def run():\n    return 1\n").unwrap();
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
+             VALUES('cs2','rename','a',2,'pending','cs1','main')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs2','main.py',NULL,?1)",
+            params![h],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs2','app.py',?1,NULL)",
+            params![h],
+        )
+        .unwrap();
+        commit_one(&conn, "cs2").unwrap();
+
+        // cs3 on a side branch edits app.py, which still exists there. The branch has to exist
+        // before a changeset can name it: `commit_one` reads the head to re-parent onto, and a name
+        // with no row is a not-found rather than an empty branch.
+        conn.execute(
+            "INSERT INTO branches(name,head,created_at) VALUES('side','cs1',1)",
+            [],
+        )
+        .unwrap();
+        let edited = "def run():\n    return 2\n";
+        let h2 = put_object(&conn, edited).unwrap();
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
+             VALUES('cs3','edit on side','a',3,'pending','cs1','side')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs3','app.py',?1,?2)",
+            params![h, h2],
+        )
+        .unwrap();
+        commit_one(&conn, "cs3").unwrap();
+
+        // cs4 is the merge: parent is cs2, parent2 is cs3, and it carries main.py.
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,parent2,branch)
+             VALUES('cs4','merge','a',4,'pending','cs2','cs3','main')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs4','main.py',?1,?2)",
+            params![h, h2],
+        )
+        .unwrap();
+        commit_one(&conn, "cs4").unwrap();
+
+        let chain = rename_history(&conn, "main.py", 10).unwrap();
+        assert!(
+            chain.contains(&"app.py".to_string()),
+            "the rename recorded on the merged side must be reachable: {chain:?}"
+        );
+    }
+
+    #[test]
+    fn a_rename_on_an_unrelated_branch_is_not_claimed_as_ancestry() {
+        // Two branches that never merged. Branch `feature` renames a file; `main` has its own file
+        // that happens to sit at the same new path later. The rename on `feature` is not part of
+        // main's history, and a chain that includes it is telling the reader a file was moved here
+        // when it was moved somewhere else and never arrived.
+        let conn = mem_db();
+        commit_files(
+            &conn,
+            "cs1",
+            "base",
+            &[(
+                "shared.py",
+                "x = 1
+y = 2
+",
+            )],
+        );
+        conn.execute(
+            "INSERT INTO branches(name,head,created_at) VALUES('feature','cs1',1)",
+            [],
+        )
+        .unwrap();
+
+        // cs2 on feature renames shared.py to moved.py.
+        let h = put_object(
+            &conn,
+            "x = 1
+y = 2
+",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
+             VALUES('cs2','rename on feature','a',2,'pending','cs1','feature')",
+            [],
+        )
+        .unwrap();
+        for (path, old, new) in [("moved.py", None, Some(&h)), ("shared.py", Some(&h), None)] {
+            conn.execute(
+                "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash) VALUES('cs2',?1,?2,?3)",
+                params![path, old, new],
+            ).unwrap();
+        }
+        commit_one(&conn, "cs2").unwrap();
+
+        // cs3 on main edits shared.py and never sees the rename. main's history has no moved.py.
+        let h2 = put_object(
+            &conn,
+            "x = 1
+y = 3
+",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
+             VALUES('cs3','edit on main','a',3,'pending','cs1','main')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash) VALUES('cs3','shared.py',?1,?2)",
+            params![h, h2],
+        ).unwrap();
+        commit_one(&conn, "cs3").unwrap();
+
+        // Asking about shared.py on main must not report that it used to be called moved.py: the two
+        // names never met in this branch.
+        let chain = rename_history(&conn, "shared.py", 10).unwrap();
+        assert!(
+            !chain.contains(&"moved.py".to_string()),
+            "a rename on an unmerged branch must not appear in main's chain: {chain:?}"
+        );
+    }
+
+    #[test]
+    fn blame_survives_a_rename_and_names_the_author_who_wrote_the_line() {
+        // The shape: one commit writes a file, the next renames it with no edit. Blame on the new
+        // name must credit the author of the first commit for the lines it wrote.
+        //
+        // Before this test, blame credited the rename. Two separate causes, and fixing either alone
+        // left it broken: the rename deleted the old path's blame rows, and the new path has exactly
+        // one version so there was nothing to diff against even when the rows survived.
+        let tmp = std::env::temp_dir().join(format!("gesta-blame-rename-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let conn = mem_db();
+
+        fs::write(tmp.join("app.py"), "def run():\n    return 1\n").unwrap();
+        commit_files(
+            &conn,
+            "cs1",
+            "base",
+            &[("app.py", "def run():\n    return 1\n")],
+        );
+
+        // Rename with no edit: one path added, the other deleted, same content.
+        let h = put_object(&conn, "def run():\n    return 1\n").unwrap();
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
+             VALUES('cs2','rename','bob',2,'pending','cs1','main')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs2','main.py',NULL,?1)",
+            params![h],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs2','app.py',?1,NULL)",
+            params![h],
+        )
+        .unwrap();
+        commit_one(&conn, "cs2").unwrap();
+        let _ = fs::remove_file(tmp.join("app.py"));
+
+        let keep_me: String = conn
+            .query_row(
+                "SELECT changeset_id FROM blame_ranges
+                 WHERE path = 'main.py' AND start_line = 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("blame must answer for the renamed path");
+        assert_eq!(
+            keep_me, "cs1",
+            "the line was written before the rename, so the rename must not own it"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn blame_does_not_outlive_a_real_deletion() {
+        // The other side of the same decision: a file that is deleted rather than renamed must lose
+        // its blame rows, or the table grows a permanent entry for every path that ever existed.
+        let conn = mem_db();
+        commit_files(&conn, "cs1", "base", &[("gone.py", "x = 1\n")]);
+
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
+             VALUES('cs2','delete','a',2,'pending','cs1','main')",
+            [],
+        )
+        .unwrap();
+        let h = put_object(&conn, "x = 1\n").unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs2','gone.py',?1,NULL)",
+            params![h],
+        )
+        .unwrap();
+        commit_one(&conn, "cs2").unwrap();
+
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM blame_ranges WHERE path = 'gone.py'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "a deleted file leaves no blame rows behind");
+    }
+
+    #[test]
     fn similarity_scores_identical_as_one_and_rewrite_as_low() {
         assert_eq!(similarity("a\nb\n", "a\nb\n"), 1.0);
         assert!(similarity("a\nb\nc\nd\n", "a\nb\nc\nX\n") > 0.5);

@@ -371,7 +371,7 @@ pub fn commit_one(conn: &Connection, id: &str) -> ZResult<usize> {
 
     let mut written = 0usize;
     let mut touched: Vec<(String, String)> = Vec::new();
-    for (path, _old, new) in &files {
+    for (path, old, new) in &files {
         match new {
             Some(hash) => {
                 let latest: Option<String> = tx
@@ -403,9 +403,31 @@ pub fn commit_one(conn: &Connection, id: &str) -> ZResult<usize> {
                 touched.push((path.clone(), hash.clone()));
             }
             None => {
-                // Deletion: record it as a version with no hash so history can
-                // still answer "which changeset removed this file".
-                tx.execute("DELETE FROM blame_ranges WHERE path = ?1", params![path])?;
+                // Deletion: record it as a version with no hash so history can still answer "which
+                // changeset removed this file".
+                //
+                // The blame rows are kept when this changeset also added the same content under
+                // another path, because that is a rename: the file still exists, under a new name,
+                // and the lines keep the authors they had. Deleting them here was why `blame` after
+                // a rename attributed every surviving line to the commit that moved the file - the
+                // rows it would have inherited from were gone by the time anyone asked.
+                //
+                // A real deletion drops them, so `blame_ranges` does not grow a permanent row set
+                // for every path that ever existed.
+                let renamed = {
+                    let mut stmt = tx.prepare(
+                        "SELECT 1 FROM changeset_files
+                         WHERE changeset_id = ?1 AND old_hash IS NULL AND new_hash = ?2 AND path <> ?3
+                         LIMIT 1",
+                    )?;
+                    let found: Option<i64> = stmt
+                        .query_row(params![id, old, path], |r| r.get(0))
+                        .optional()?;
+                    found.is_some()
+                };
+                if !renamed {
+                    tx.execute("DELETE FROM blame_ranges WHERE path = ?1", params![path])?;
+                }
                 written += 1;
             }
         }
@@ -497,13 +519,46 @@ fn recompute_blame_at(conn: &Connection, path: &str, hash: &str) -> ZResult<()> 
     )?;
 
     // What the previous step attributed, one entry per line.
+    //
+    // The rows for this path are the normal case. When there are none, the lines came from a file
+    // that was renamed here, and reading only this path's rows attributes every surviving line to
+    // the commit that moved the file rather than the one that wrote the code.
+    //
+    // The rename is found through `rename_history`, which walks the chain the same way `gesta
+    // history` does. Writing a second detector here would let the two commands disagree about what
+    // counts as a rename, and the disagreement would only show up on a file old enough to matter.
+    let blame_source: String = {
+        let has_rows: bool = conn
+            .query_row(
+                "SELECT 1 FROM blame_ranges WHERE path = ?1 LIMIT 1",
+                params![path],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if has_rows {
+            path.to_string()
+        } else {
+            // The chain starts at this path and walks backwards, so the name the lines came
+            // from is the last entry. Taking the first returns the path itself, which looks
+            // harmless and silently puts every caller back on the branch with no previous
+            // version: one version means nothing to diff against, and every line is attributed
+            // to the rename.
+            crate::repo::history::rename_history(conn, path, 4)?
+                .into_iter()
+                .last()
+                .filter(|earlier| earlier != path)
+                .unwrap_or_else(|| path.to_string())
+        }
+    };
+
     let previous: Vec<(String, String, i64)> = {
         let mut stmt = conn.prepare(
             "SELECT start_line, end_line, changeset_id FROM blame_ranges
              WHERE path = ?1 ORDER BY start_line ASC",
         )?;
         let ranges = stmt
-            .query_map(params![path], |r| {
+            .query_map(params![blame_source], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, i64>(1)?,
@@ -522,19 +577,36 @@ fn recompute_blame_at(conn: &Connection, path: &str, hash: &str) -> ZResult<()> 
 
     // The version immediately older than this one, by version number rather than by offset from the
     // newest: in a chain walk the newest is not the reference point.
-    let this_version: i64 = conn.query_row(
-        "SELECT version FROM file_versions WHERE path = ?1 AND hash = ?2 ORDER BY version ASC LIMIT 1",
-        params![path, hash],
-        |r| r.get(0),
-    )?;
-    let prev_hash: Option<String> = conn
-        .query_row(
+    // Where the content came from, which is not always this path.
+    //
+    // Two shapes need different answers and the difference is the whole point:
+    //
+    // - an ordinary edit: this path's own previous version, one number below the newest
+    // - a rename: the renamed file's last version, because this path has exactly one version and
+    //   there is nothing below it. Asking for "the version older than this one" on a one-version
+    //   path returns nothing, `old_lines` comes back empty, and every surviving line is attributed
+    //   to the commit that moved the file rather than the one that wrote it.
+    let prev_hash: Option<String> = if blame_source == *path {
+        let this_version: i64 = conn.query_row(
+            "SELECT version FROM file_versions WHERE path = ?1 AND hash = ?2 ORDER BY version ASC LIMIT 1",
+            params![path, hash],
+            |r| r.get(0),
+        )?;
+        conn.query_row(
             "SELECT hash FROM file_versions WHERE path = ?1 AND version < ?2
              ORDER BY version DESC LIMIT 1",
             params![path, this_version],
             |r| r.get(0),
         )
-        .optional()?;
+        .optional()?
+    } else {
+        conn.query_row(
+            "SELECT hash FROM file_versions WHERE path = ?1 ORDER BY version DESC LIMIT 1",
+            params![blame_source],
+            |r| r.get(0),
+        )
+        .optional()?
+    };
     let old_lines: Vec<String> = match prev_hash {
         Some(h) => get_object(conn, &h)
             .map(|t| t.lines().map(|l| l.to_string()).collect())
@@ -649,6 +721,34 @@ pub fn recompute_blame(conn: &Connection, files: &[(String, String)]) -> ZResult
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
 
+        // Where the lines came from. Normally this path. When this path is new and has no blame of
+        // its own, the lines arrived through a rename, and the rows to inherit are the ones the old
+        // name still holds.
+        //
+        // `rename_history` is the same walk `gesta history` prints, so both commands agree about
+        // what counts as a rename. It returns this path first and the names it came from after, so
+        // the oldest is the last entry - taking the first would return the path itself and put the
+        // reader straight back on the one-version branch this block exists to avoid.
+        let blame_source: String = {
+            let has_rows: bool = conn
+                .query_row(
+                    "SELECT 1 FROM blame_ranges WHERE path = ?1 LIMIT 1",
+                    params![path],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if has_rows {
+                path.to_string()
+            } else {
+                crate::repo::history::rename_history(conn, path, 4)?
+                    .into_iter()
+                    .last()
+                    .filter(|earlier| earlier != path)
+                    .unwrap_or_else(|| path.to_string())
+            }
+        };
+
         // Blame comes back as ranges, and the match below walks two sequences line by line, so
         // the ranges are expanded here. Line order is what lets that walk run forward instead of
         // searching, and a range always covers consecutive lines.
@@ -659,7 +759,7 @@ pub fn recompute_blame(conn: &Connection, files: &[(String, String)]) -> ZResult
                  WHERE b.path = ?1 ORDER BY b.start_line ASC",
             )?;
             let ranges = stmt
-                .query_map(params![path], |r| {
+                .query_map(params![blame_source], |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
                         r.get::<_, i64>(1)?,
@@ -682,16 +782,25 @@ pub fn recompute_blame(conn: &Connection, files: &[(String, String)]) -> ZResult
         // line, so a file written in one commit costs one range and one pass, not one range and
         // N clones.
 
-        // The version before this one. Its lines tell which of the previous blame
-        // rows still describe a line that survived.
-        let prev_hash: Option<String> = conn
-            .query_row(
+        // The version the lines came from. On an ordinary edit that is the version before this one;
+        // after a rename it is the old name's last version, because this path has exactly one and
+        // there is nothing below it.
+        let prev_hash: Option<String> = if blame_source == *path {
+            conn.query_row(
                 "SELECT hash FROM file_versions WHERE path = ?1
                  ORDER BY version DESC LIMIT 1 OFFSET 1",
                 params![path],
                 |r| r.get(0),
             )
-            .optional()?;
+            .optional()?
+        } else {
+            conn.query_row(
+                "SELECT hash FROM file_versions WHERE path = ?1 ORDER BY version DESC LIMIT 1",
+                params![blame_source],
+                |r| r.get(0),
+            )
+            .optional()?
+        };
         let old_lines: Vec<String> = match prev_hash {
             Some(h) => get_object(conn, &h)
                 .map(|s| s.lines().map(|l| l.to_string()).collect())

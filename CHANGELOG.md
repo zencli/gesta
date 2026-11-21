@@ -14,6 +14,26 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### Blame survives a rename
+
+- A file renamed with no edit had every line credited to the commit that moved it. Two causes, and
+  fixing either alone left it broken: `commit_one` deleted the old path's blame rows because from
+  inside the loop a rename and a deletion look identical, and the new path has exactly one version so
+  there was nothing to diff against even when the rows survived.
+- A rename is now told apart from a deletion by asking whether this same changeset added the same
+  content under another path. A real deletion still drops its rows, so `blame_ranges` does not grow a
+  permanent entry for every path that ever existed - the two decisions look the same from inside the
+  loop and pulling one way breaks the other.
+- The rows to inherit are found through `rename_history`, the same walk `gesta history` prints, so
+  the two commands cannot disagree about what counts as a rename. That walk returns this path first
+  and the earlier names after, so the oldest is the last entry; taking the first returns the path
+  itself and puts the reader straight back on the one-version branch this exists to avoid.
+- `gesta history` was already correct, which is why a unit test of the store's bookkeeping missed
+  this: the chain printed `main.py <- app.py` while blame on `main.py` named the rename. The check
+  that catches it drives the binary.
+- `bench/blame_rename.py`, six checks, a gate step. It also asserts that a deleted file keeps no
+  blame rows, because that is the half a careless fix breaks.
+
 ### A large object leaves the tree as a pointer
 
 - `gesta serve` answers the git-lfs batch API and the object route, so a tree holding a pointer can
