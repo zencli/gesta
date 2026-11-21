@@ -4667,6 +4667,20 @@ def main():
             (r[1] or "")[-500:],
         )
 
+    if want("object-format"):
+        # A SHA-1 reader pointed at a SHA-256 repository reports a missing object, which sends a
+        # reader looking for a corruption that is not there. The check proves the refusal names the
+        # format and the way out, and that a sha1 repository still imports.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'object_format.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a sha256 repository is refused by name, and a sha1 one still opens",
+            r[0] == 0 and "7/7 object-format checks pass" in r[1],
+            (r[1] or "")[-500:],
+        )
+
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
 

@@ -150,6 +150,60 @@ pub struct Repo {
     pub git_dir: PathBuf,
 }
 
+/// Refuse a repository whose objects are named by something other than SHA-1.
+///
+/// git has supported `--object-format=sha256` since 2.29, and a repository made that way is not a
+/// repository this code can read: the oids are 64 hex characters, the pack format carries a different
+/// hash length in every trailer, and the protocol negotiates `object-format`. Reading one with a SHA-1
+/// reader does not fail cleanly - it finds no matching object and reports a missing file, which sends
+/// a person looking for a corruption that is not there.
+///
+/// Detecting it at the door and saying what happened is the honest half of not supporting it. The
+/// message names the setting so a reader can decide between converting the repository and keeping a
+/// second tool for it.
+fn refuse_unknown_object_format(git_dir: &Path) -> ZResult<()> {
+    let config = git_dir.join("config");
+    let Ok(text) = std::fs::read_to_string(&config) else {
+        // No config is not an error here: a fresh `git init --bare` writes one, and a repository
+        // assembled by hand may legitimately lack it. The default format is sha1.
+        return Ok(());
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("objectformat") {
+            continue;
+        }
+        let value = value.trim().to_ascii_lowercase();
+        if value == "sha1" {
+            return Ok(());
+        }
+        if value == "sha256" {
+            // Joined from separate literals rather than continued with a trailing backslash: that
+            // form swallows the leading whitespace of the next line, so the message printed
+            // "and carrythat length" and "would reportmissing objects" on a real terminal.
+            let why = concat!(
+                "The two formats name objects differently (64 hex characters against 40) and carry ",
+                "that length through the pack trailers and the protocol, so an import would report ",
+                "missing objects rather than the real reason."
+            );
+            return Err(bad(format!(
+                "{} is a SHA-256 git repository, and this tool reads SHA-1 git repositories only.\n{}\nConvert it first: git init --object-format=sha1 <new-dir>, then push into that.",
+                git_dir.display(),
+                why
+            )));
+        }
+        return Err(bad(format!(
+            "{} uses object format '{}', which this tool does not know",
+            git_dir.display(),
+            value
+        )));
+    }
+    Ok(())
+}
+
 impl Repo {
     /// Find the repository that contains `start`, or `start/.git` itself.
     pub fn open(start: &Path) -> ZResult<Repo> {
@@ -157,6 +211,7 @@ impl Repo {
         // no `.git` inside. Checking for that first is what lets an import read a bare clone or
         // a staging repository `git init --bare` just made.
         if start.join("objects").is_dir() && start.join("refs").is_dir() {
+            refuse_unknown_object_format(start)?;
             return Ok(Repo {
                 git_dir: start.to_path_buf(),
             });
@@ -193,6 +248,7 @@ impl Repo {
         loop {
             let candidate = cur.join(".git");
             if candidate.is_dir() {
+                refuse_unknown_object_format(&candidate)?;
                 return Ok(Repo { git_dir: candidate });
             }
             // A worktree's `.git` is a file naming the real directory.
@@ -598,6 +654,71 @@ mod tests {
 
     /// The SHA-1 of "abc" is published, and a hashing mistake here would name every object
     /// wrongly while looking fine.
+    #[test]
+    fn a_sha256_repository_is_refused_by_name_rather_than_read_wrong() {
+        // git has supported --object-format=sha256 since 2.29. Reading one with a SHA-1 reader does
+        // not fail cleanly: it finds no matching object and reports a missing file, so the reader
+        // goes looking for a corruption that is not there. The refusal has to name the format.
+        let tmp = std::env::temp_dir().join(format!("gesta-sha256-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("objects")).unwrap();
+        std::fs::create_dir_all(tmp.join("refs")).unwrap();
+        std::fs::write(
+            tmp.join("config"),
+            "[core]\n\trepositoryformatversion = 1\n\tobjectformat = sha256\n",
+        )
+        .unwrap();
+
+        let err = match Repo::open(&tmp) {
+            Ok(_) => panic!("a sha256 repository must not open"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("SHA-256") && err.contains("object-format=sha1"),
+            "the message has to name the format and the way out: {err}"
+        );
+
+        // A SHA-1 repository beside it must still open, or the guard has broken the normal path.
+        std::fs::write(
+            tmp.join("config"),
+            "[core]\n\trepositoryformatversion = 0\n\tobjectformat = sha1\n",
+        )
+        .unwrap();
+        assert!(
+            Repo::open(&tmp).map(|_| ()).is_ok(),
+            "a sha1 repository must still open"
+        );
+
+        // And a repository with no config at all keeps the git default.
+        std::fs::remove_file(tmp.join("config")).unwrap();
+        assert!(
+            Repo::open(&tmp).map(|_| ()).is_ok(),
+            "a repository with no config is sha1 by default"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn an_unknown_object_format_is_refused_rather_than_assumed() {
+        let tmp = std::env::temp_dir().join(format!("gesta-sha-unknown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("objects")).unwrap();
+        std::fs::create_dir_all(tmp.join("refs")).unwrap();
+        std::fs::write(tmp.join("config"), "[core]\n\tobjectformat = blake3\n").unwrap();
+
+        let err = match Repo::open(&tmp) {
+            Ok(_) => panic!("a sha256 repository must not open"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("blake3"),
+            "the message names what it found: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn the_sha1_matches_the_published_vectors() {
         assert_eq!(sha1(b""), "da39a3ee5e6b4b0d3255bfef95601890afd80709");

@@ -14,6 +14,21 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### A SHA-256 git repository is refused by name
+
+- `gesta git import` now reads `objectformat` from the repository's config and refuses anything other
+  than `sha1`, naming the format and the conversion. Before this, pointing the importer at a SHA-256
+  repository reported a missing object, which is the same message a corrupted store produces - so a
+  reader went looking for damage instead of a format mismatch.
+- This is a refusal, not support. Reading a SHA-256 repository means 64-character oids through the
+  store, a different hash length in every pack trailer, and `object-format` negotiated in the
+  protocol. There are 24 places in this code that assume a 40-character oid, and each one is a silent
+  wrong answer rather than a compile error, which is why the work has not been done in one commit.
+- A repository with no `objectformat` line keeps git's default and opens, so a hand-made bare
+  repository is not caught by the guard; `bench/object_format.py` checks that beside the refusal.
+- `bench/object_format.py`, seven checks, a gate step. The fixture is made by real git with
+  `--object-format=sha256`, not by writing a config by hand.
+
 ### Blame survives a rename
 
 - A file renamed with no edit had every line credited to the commit that moved it. Two causes, and
