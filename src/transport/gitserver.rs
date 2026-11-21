@@ -16,16 +16,17 @@
 //! the server's own history is exported into the scratch repository first. That one detail is the
 //! difference between a push that works and a push that reports a missing object.
 //!
-//! What is deliberately absent: the v2 protocol's capabilities beyond `ofs-delta`, multi-pack
-//! indexes, protocol v1's `multi_ack_detailed` state machine, ref deletion, and delta in the packs
-//! this server writes. Each is a negotiation that only a second round trip needs. A repository that
-//! advertises capability it does not implement is worse than one that advertises less: the client
-//! takes the offer and then hangs.
+//! What is served: protocol v2 (`ls-refs`, `fetch` with `acknowledgments`), `multi_ack_detailed`
+//! negotiation, `ofs-delta` in the packs, and ref deletion. What is deliberately absent: multipack
+//! indexes, shallow beyond announcing it, partial-clone filters, and `wait-for-done`. A repository
+//! that advertises a capability it does not implement is worse than one that advertises less: the
+//! client takes the offer and then hangs.
 //!
-//! The pack writes every object in full, with no delta. Measured on this project's history that is
-//! about 3x the size of a delta pack, and it is the right first version: a delta encoder that is
-//! wrong produces a pack git refuses with a message about a bad object number, and the failure looks
-//! like a protocol bug rather than an encoder bug.
+//! Packs carry deltas. `store::delta_pack::encode` tries each object against a candidate base and
+//! keeps the copy only when it measures smaller; a delta that does not verify against its hash is
+//! dropped rather than shipped, because a wrong delta produces a pack git refuses with a message
+//! about a bad object number, and that failure looks like a protocol bug rather than an encoder bug.
+//! This paragraph used to say the opposite, and said it long after the encoder landed.
 
 use crate::ZResult;
 

@@ -15,9 +15,15 @@ something rather than by reading the code. The order is by what blocks the most.
 
 ## Not closed, in the order they block
 
-### 1. Disk: 1.4x git, after grouping objects into shared streams
+### 1. Disk: 1.4x git on a real tree, 14.9x on a pathological one
 
-Measured on 11,301 files and 171 MB of content, both tools at their best:
+Two numbers answer the disk question and they belong together, because quoting either alone misleads.
+On 11,301 files holding 171 MB of content, both tools at their best, the ratio is **1.4x**. On 1,000
+files of seven bytes each - a tree whose whole content is smaller than the schema that indexes it - the
+ratio is **14.91x**, pinned by the `storage-cost` gate step at 18x. Per-row overhead dominates when
+every object is a few dozen bytes; nothing about the first number makes the second go away.
+
+The 11,301 file measurement, both tools at their best:
 
 ```
 work tree                      171.7 MB
@@ -146,9 +152,22 @@ The parser had a bug that made this look unimplemented. `read_pkt_lines` stopped
 and a fetch sends its `want`s, a flush, then its `have`s and `done`. Every `have` was dropped, so a
 server that read the list behaved exactly like one that ignored it.
 
-What is still absent: the v2 protocol, and `multi_ack_detailed`. A v0 client and this server agree on a
-single `NAK` and a full pack of the difference, which is what git's own v0 exchange does when the
-histories share no commit. Ref deletion works and is tested (`bench/gate.py git-push`).
+Protocol v2 is served, and `multi_ack_detailed` is negotiated. Both were listed here as absent for as
+long as they were absent, and then for longer than that - the paragraph you are reading said they were
+missing while `bench/protocol_v2.py` (5/5) and `bench/multi_ack.py` (6/6) were passing. A stale "not
+implemented" is worse than no note at all, because it sends the next reader to rewrite something that
+works.
+
+- **v2** answers `ls-refs` and `fetch` with `acknowledgments`. The check forces the client to v2 with
+  `-c protocol.version=2` and does a real clone and fetch: a v2 conversation the client cannot finish
+  fails as a stall or as "fatal: invalid server response", and both look like a broken repository
+  rather than a missing capability.
+- **`multi_ack_detailed`** is advertised because the negotiation answers it. Measured: a fetch with a
+  `have` returns 9 ACK lines across forms ``, `common` and `ready`. `bench/multi_ack.py` pins
+  `protocol.version=0`, because git 2.43 defaults to v2 where `multi_ack_detailed` does not exist at
+  all and an unpinned run would measure the other protocol and fail at the wrong seam.
+
+Ref deletion works and is tested (`bench/gate.py git-push`).
 
 ### 5. No SSH transport
 
@@ -602,6 +621,7 @@ is a difference from git that a person will notice.
 For one person on one machine, on text and binary files, with a remote over HTTP or object
 storage: nothing above blocks it today, and the daily cycle is measured and working.
 
-For a team: disk at 1.95x, no forge of its own, and no submodules in the git sense.
+For a team: disk at 1.4x on a real tree and 14.9x on a tree of tiny files, no forge of its own, and
+no submodules in the git sense.
 Those three are the real answer to the question, and two of them are schema and format work rather
 than new features.

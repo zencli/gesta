@@ -14,6 +14,63 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### A criss-cross merges from both bases, not from one
+
+- `merge_base` returned a single best common ancestor, which is right for an ordinary fork and
+  wrong for a criss-cross: two branches that each merged the other, then diverged again. There are
+  two bases, neither reaches the other, and picking one silently discards what the other carried.
+  The merge reported success and a change was gone.
+- `merge_bases` returns the whole set, and the merge recurses - two bases merge into a virtual base,
+  then ours and theirs merge against that. `merge_base` stays as the single-answer wrapper for
+  callers that can only diff against one, so the truncation is visible at each call site.
+- The first fixture written for this was not a criss-cross, and the test said so: it returned
+  `["a1", "b1"]` where `["m1a", "m1b"]` was expected, and those answers were correct for the graph
+  that had been built. Making each merge a parent of both new tips is what turns the shape into one.
+
+### A rename is decided by content before it is scored
+
+- The detector paired deletions with additions by a line-similarity ratio against 0.5 - a heuristic,
+  and the wrong tool for the case that matters most: a file renamed with no edit. Equal content
+  hashes are the same file with no judgement needed, so the exact pass now runs first and takes the
+  pair out of the similarity pass.
+- A rename plus a heavy rewrite stays below the threshold and is reported as a delete and an add.
+  That looked like a bug until git was run on the same shape: `log --follow` reports one commit, not
+  two, because git's default is 50% and this case is under it. The test now pins both directions,
+  including the one where finding nothing is correct.
+- `bench/renames.py`, five checks, a gate step.
+
+### A repository can say a path is large before it is
+
+- `.gitattributes` carries `large` and `small` beside its line-ending rules, and a path marked
+  `large` goes to the sidecar whatever its size. `-large` sends it back. Text needs this as much as
+  a binary does: a 20 MB generated JSON belongs outside the database for the same reason.
+- Before this, the only trigger was the 4 MB threshold, which is a guess about a file the writer
+  already knows the shape of.
+
+### A backup can leave the machine, sealed
+
+- `backup-remote push|list|pull|prune` uploads an existing store backup to S3-compatible storage.
+  The archive is sealed with ChaCha20-Poly1305 before it leaves the process; the key is
+  HMAC-SHA256 over a random salt, using the primitive `support/secrets.rs` already had.
+- The passphrase comes from the environment and never from the URL or from inside the sealed file,
+  so a bucket that leaks gives away nothing but bytes.
+- Prune keeps a count rather than an age: a schedule that is forgotten still leaves the old files
+  behind, and a schedule that runs leaves ten copies is enough.
+- Name resolution is milliseconds, not seconds. Five pushes inside one second wrote the same key and
+  the bucket held one backup, so prune had nothing to remove and the test found it.
+
+### The tiny-file ratio, measured again and pinned
+
+- 1,000 files of seven bytes cost 856 KB, which is 14.9x git's 103 KB. The figure in the docs was
+  6.6x and had been wrong for months, because nobody re-ran it after blame moved from one row per
+  line to ranges.
+- The cost is not the object store - 1,000 identical bodies dedup to one row. It is five tables of
+  one row per path at about a hundred bytes each.
+- Storing hashes as 32-byte blobs instead of 64-character hex measures 11% and is deliberately not
+  done: the value is a `String` through the whole storage layer and the change reaches about fifty
+  call sites, which is not worth 11% on a tree already at 18x its floor.
+- `bench/tiny_files.py`, `bench/hash_size.py`, and a `storage-cost` gate step that fails above 18x.
+
 ### `show --json` answers with an object
 
 - `show --json` printed the file's bytes and called it JSON. A caller piping into a parser got
