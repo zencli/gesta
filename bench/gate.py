@@ -4626,6 +4626,20 @@ def main():
             (r[1] or "")[-400:],
         )
 
+    if want("renames"):
+        # An exact-content pass runs before the line-ratio scoring, so a rename with no edit is decided
+        # by evidence rather than by rounding. The check also pins the case where finding nothing is
+        # correct: below the threshold, git's log --follow reports nothing either.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'renames.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a rename is found where it is, and not invented where it is not",
+            r[0] == 0 and "5/5 rename checks pass" in r[1],
+            (r[1] or "")[-400:],
+        )
+
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
 
