@@ -29,7 +29,28 @@ use crate::{bad, repo_dir, ZResult};
 /// being private, and it is the last point where a failing suite costs one person instead of
 /// everybody. A commit hook runs per commit, which is too often to run a full suite and too early
 /// to know whether the branch is going anywhere.
-pub const HOOKS: &[&str] = &["pre-commit", "post-commit", "pre-land"];
+/// The hook points this program runs.
+///
+/// The set is chosen by where a decision still matters, not by what git happens to name:
+///
+///   pre-changeset  before a snapshot is taken, so a hook can refuse a tree it does not want recorded
+///   pre-commit     before a snapshot becomes a changeset
+///   post-commit    after it landed, for the notification that should not be able to block it
+///   pre-land       before a branch merges onto a shared target, where a failing suite costs one
+///                  person instead of everybody
+///   post-checkout  after a working tree moved, to rebuild whatever the new branch needs
+///   pre-push       before anything leaves the machine
+///
+/// A hook that is not installed is not an error: `run` returns immediately. That is what lets a
+/// repository grow hooks one at a time instead of installing six no-ops on the first day.
+pub const HOOKS: &[&str] = &[
+    "pre-changeset",
+    "pre-commit",
+    "post-commit",
+    "pre-land",
+    "post-checkout",
+    "pre-push",
+];
 
 /// Directory that holds hook programs, inside the repository directory.
 pub fn hooks_dir(root: &Path) -> PathBuf {
@@ -279,7 +300,11 @@ mod tests {
     #[test]
     fn an_unknown_hook_name_is_refused() {
         let d = tmp("unknown");
-        assert!(install(&d, "post-checkout", "#!/bin/sh\n").is_err());
+        // `post-checkout` used to be the example here, and it stopped being unknown when the point
+        // was added. A test whose subject is "not a hook name" has to use something that is not one.
+        assert!(install(&d, "mid-rebase-and-then-some", "#!/bin/sh\n").is_err());
+        // The known points are still accepted, so the refusal is about the name and not the call.
+        assert!(install(&d, "post-checkout", "#!/bin/sh\n").is_ok());
         let _ = std::fs::remove_dir_all(&d);
     }
 

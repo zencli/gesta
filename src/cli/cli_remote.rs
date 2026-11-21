@@ -264,6 +264,10 @@ pub fn cmd_inspect(
 }
 
 pub fn cmd_push(remote_name: &str, branch: &str) -> ZResult<()> {
+    // Before anything leaves the machine. A pre-push hook is the last place a repository can refuse
+    // to publish, and unlike a server-side check it can look at the whole local history.
+    let push_root = crate::repo_root()?;
+    crate::repo::hooks::run(&push_root, "pre-push", &[remote_name, branch])?;
     let (root, conn) = open_repo()?;
     let url = remote_url(&conn, remote_name)?;
 

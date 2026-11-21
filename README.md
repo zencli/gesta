@@ -106,6 +106,8 @@ gesta blame src/main.rs
 | `bisect start <good> <bad>` | Begin a search for the changeset that introduced a fault |
 | `bisect good \| bad` | Answer about the changeset under test |
 | `bisect run <command>` | Drive the whole search from one command; exit 0 good, else bad, 125 skip |
+| `hook install <name>` | Install a hook program; reads the body from stdin |
+| `hook list` / `hook status` | Which points are installed, and whether a body changed since |
 | `notes add <cs> -m <text>` | Attach a note to a changeset without changing it |
 | `notes show <cs>` | The note a changeset carries |
 | `notes remove <cs>` | Drop the note, leaving the changeset alone |

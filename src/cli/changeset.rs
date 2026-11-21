@@ -21,6 +21,11 @@ pub fn cmd_changeset_create_paths(
     let (root, conn) = open_repo()?;
     let branch = current_branch(&conn)?;
 
+    // Before the snapshot, not after: a hook that refuses a tree has to refuse it while refusing costs
+    // nothing. This is also the only point where a hook can see what is about to be recorded rather
+    // than what already was.
+    repo::hooks::run(&root, "pre-changeset", &["changeset", &branch])?;
+
     match store::with_retry(|| repo::create_changeset_scoped(&conn, &root, message, author, paths))?
     {
         None => {
@@ -298,6 +303,10 @@ fn cmd_changeset_create_json(
 ) -> YResultAlias {
     let (root, conn) = open_repo()?;
     let branch = current_branch(&conn)?;
+    // The same hook the text path runs. It was missing here, so `changeset create --json` - the form
+    // every agent uses, and the base of every bench in this repository - skipped `pre-changeset`
+    // entirely while the hook was listed as installed.
+    repo::hooks::run(&root, "pre-changeset", &["changeset", &branch])?;
     let made =
         store::with_retry(|| repo::create_changeset_scoped(&conn, &root, message, author, paths))?;
     let Some(cs) = made else {

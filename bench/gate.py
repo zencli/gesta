@@ -1958,6 +1958,20 @@ def main():
             st[1][:200],
         )
 
+    if want("hooks"):
+        # A hook list is easy to declare and easy to leave unconnected, and the failure is silent: the
+        # guard is listed as installed and never runs. Each check installs a real program, performs the
+        # action, and looks for the mark it left.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hooks.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "every hook point runs where it says it does, and a refusal stops the action",
+            r[0] == 0 and "10/10 hook checks pass" in r[1],
+            (r[1] or "")[-600:],
+        )
+
     if want("notes"):
         # A changeset is immutable and the thing worth saying about it usually arrives later. The
         # check that matters most is the one about identity: a note must not rewrite the changeset it

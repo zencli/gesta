@@ -164,6 +164,9 @@ pub fn add(conn: &Connection, root: &Path, path: &Path, branch: &str) -> ZResult
 
     // The same content the branch holds in the main tree, so the worktree starts usable.
     let (written, removed) = crate::repo::restore_worktree(conn, path, branch)?;
+    // A new working tree is a checkout too, so the same hook runs. `tail -f`-style rebuilds are the
+    // reason this point exists, and a tree that appears without them starts in a state nobody set up.
+    crate::repo::hooks::run(path, "post-checkout", &["worktree", branch])?;
     register(conn, path, branch)?;
     println!(
         "worktree at {} on branch {branch}: {written} file(s) written, {removed} removed",

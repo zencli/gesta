@@ -14,6 +14,22 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### Six hook points, and two of them were not connected
+
+- The set is now `pre-changeset`, `pre-commit`, `post-commit`, `pre-land`, `post-checkout`,
+  `pre-push`. Three were new; two of those turned up bugs in wiring that already claimed to work.
+- **`pre-land` never ran on `branch merge`.** It was called from `land_branch`, which is the review
+  queue's path, so a repository that installed the hook and merged branches directly had a guard that
+  was listed as installed and did nothing. A `branch merge` is a landing: the change stops being
+  private there.
+- **`changeset create --json` skipped `pre-changeset` entirely.** The JSON path had its own copy of
+  the create logic and the hook was only in the text path. Every agent and every bench in this
+  repository uses the JSON form, so the hook was tested by nothing that could have noticed.
+- `pre-push` and `post-checkout` are new, wired into `remote push`, `branch switch` and `worktree add`.
+- `bench/hooks.py`, ten checks, a gate step. Each installs a real program that appends its own name to
+  a file and counts the name before and after the action, because a declared hook that never runs is
+  the failure this is for. Two checks assert refusals stop the action rather than warn.
+
 ### Notes on a changeset, kept apart from it
 
 - A changeset is immutable and the thing worth saying about it usually arrives afterwards: which ticket

@@ -86,6 +86,9 @@ pub fn cmd_branch_switch(name: &str) -> ZResult<()> {
     // next status would report every file as modified.
     let (written, removed) = repo::restore_worktree(&conn, &root, name)?;
     ops::record(&conn, "branch switch", Some(name), None)?;
+    // After the tree has moved, so a hook that rebuilds something sees the files it is rebuilding
+    // from. A hook that ran before the checkout would read the branch it is leaving.
+    repo::hooks::run(&root, "post-checkout", &["branch", name])?;
     println!(
         "switched to branch {} ({} file(s) materialised, {} removed, head {})",
         name,
@@ -256,6 +259,10 @@ pub fn cmd_merge_preview(source: &str, target: &str) -> ZResult<()> {
 
 pub fn cmd_branch_merge(source: &str, target: &str, author: &str) -> ZResult<()> {
     let (root, conn) = open_repo()?;
+    // A `branch merge` is a landing: the change stops being private here. `pre-land` used to run only
+    // on the review queue's path through `land_branch`, so a repository that installed the hook and
+    // merged directly never had it fire - the guard was listed as installed and did nothing.
+    repo::hooks::run(&root, "pre-land", &[source, target])?;
     let out = store::with_retry(|| repo::merge_branch(&conn, &root, source, target, author))?;
 
     if !out.conflicts.is_empty() {
