@@ -150,6 +150,14 @@ pub enum HashKind {
 }
 
 impl HashKind {
+    /// The value git writes and reads as `object-format`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HashKind::Sha1 => "sha1",
+            HashKind::Sha256 => "sha256",
+        }
+    }
+
     /// Characters in a hex name. Used wherever a name is parsed or a zero-id is built.
     pub fn hex_len(self) -> usize {
         match self {

@@ -31,6 +31,10 @@ pub struct Imported {
 /// commit graph is not topologically sorted in the way a branch walk returns it.
 pub fn import(conn: &Connection, git_root: &Path, prefix: Option<&str>) -> ZResult<Imported> {
     let repo = Repo::open(git_root)?;
+    // Remember the format the objects are being read in. Every name written from here on is that
+    // length, and the store has to be able to say which length it used when it serves the repository
+    // over the network later.
+    crate::store::set_hash_kind(conn, repo.hash)?;
     let mut out = Imported::default();
 
     let branches = repo.branches()?;

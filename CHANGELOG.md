@@ -14,6 +14,20 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### A store records which digest its objects use
+
+- `git import` records the format it read, so a SHA-256 repository's names are 64 characters and the
+  store can say so. `gesta stats` prints it, with the length spelled out, because a reader comparing
+  an id against `git rev-parse` needs to know which length they are looking at.
+- The HTTP capability advertisement stays `object-format=sha1`, and the attempt to make it follow the
+  store was reverted after measuring it. This server puts its **own** changeset names on the wire (`cs`
+  plus twelve hex characters), not git object ids, so telling a real client `sha256` made it parse those
+  names as 64-character ids and answer `invalid ls-refs response`. The advertisement reports what is
+  served, which is the only thing it can honestly report.
+- Serving a SHA-256 repository over the protocol is therefore still not done, and the reason is now
+  specific rather than a note: the names on the wire would have to be git oids, and they are not.
+- `bench/protocol_format.py`, four checks, a gate step.
+
 ### Six hook points, and two of them were not connected
 
 - The set is now `pre-changeset`, `pre-commit`, `post-commit`, `pre-land`, `post-checkout`,

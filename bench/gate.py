@@ -1958,6 +1958,20 @@ def main():
             st[1][:200],
         )
 
+    if want("protocol-format"):
+        # The store records which digest its objects use, and `stats` reports it. This is separate
+        # from what the HTTP protocol advertises: the wire carries this tool's own changeset names,
+        # so the advertisement stays sha1 and that is the honest answer, not a limitation to fix here.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'protocol_format.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a store records its object format, and a sha1 repository still reports sha1",
+            r[0] == 0 and ("4/4 format checks pass" in r[1] or "0/0 (skipped)" in r[1]),
+            (r[1] or "")[-500:],
+        )
+
     if want("hooks"):
         # A hook list is easy to declare and easy to leave unconnected, and the failure is silent: the
         # guard is listed as installed and never runs. Each check installs a real program, performs the

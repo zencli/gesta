@@ -916,6 +916,24 @@ pub fn object_store_bytes(conn: &Connection) -> ZResult<(i64, i64)> {
 
 // repo state.
 
+/// Which digest this repository names its objects with.
+///
+/// A gesta repository keeps no `.git/config` - the whole store is a database and a directory of
+/// objects - so `Repo::open` cannot answer this and the served protocol would always claim SHA-1. The
+/// answer belongs in the store beside the branch name, and defaults to `Sha1` so every repository
+/// written before this existed keeps its meaning.
+pub fn hash_kind(conn: &Connection) -> ZResult<gitobj::HashKind> {
+    match get_state(conn, "object_format")?.as_deref() {
+        Some("sha256") => Ok(gitobj::HashKind::Sha256),
+        _ => Ok(gitobj::HashKind::Sha1),
+    }
+}
+
+/// Record the format this repository's object names use.
+pub fn set_hash_kind(conn: &Connection, kind: gitobj::HashKind) -> ZResult<()> {
+    set_state(conn, "object_format", kind.as_str())
+}
+
 pub fn get_state(conn: &Connection, key: &str) -> ZResult<Option<String>> {
     Ok(conn
         .query_row(

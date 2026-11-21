@@ -957,6 +957,16 @@ pub fn cmd_stats() -> ZResult<()> {
         objects, raw, stored, delta_bytes, total_stored, ratio
     );
     println!("changesets:  {}", changesets);
+    // Which digest names this repository's objects. Worth printing because it changes what every id
+    // in the output means: a SHA-256 repository's names are 64 characters, and a reader comparing
+    // against `git rev-parse` output needs to know which they are looking at.
+    println!(
+        "format:      {}",
+        match crate::store::hash_kind(&conn)? {
+            crate::store::gitobj::HashKind::Sha1 => "sha1 (40 character names)",
+            crate::store::gitobj::HashKind::Sha256 => "sha256 (64 character names)",
+        }
+    );
     println!("versions:    {}", versions);
     println!("blame rows:  {}", blame);
     println!("branches:    {}", branches);

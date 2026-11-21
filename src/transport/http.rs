@@ -987,6 +987,11 @@ pub fn route(
                     // ref list would leave it parsing refs as capabilities and failing with a protocol
                     // error that names nothing useful.
                     if crate::transport::protocol_v2::wants_v2(req.git_protocol.as_deref()) {
+                        // `object-format=sha1` is what this server can actually serve, whatever the
+                        // store's objects were imported as. `ls-refs` and the pack stream carry this
+                        // tool's own changeset names (`cs` plus 12 hex characters), which are not git
+                        // oids at all; claiming sha256 made a real client answer `invalid ls-refs
+                        // response` because it parsed those names as 64-character object ids.
                         let bytes = crate::transport::protocol_v2::capability_advertisement(env!(
                             "CARGO_PKG_VERSION"
                         ));
