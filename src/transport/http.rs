@@ -585,6 +585,16 @@ pub fn serve(
     Ok(())
 }
 
+/// The part of a path before `/info/lfs/`, so the batch href resolves to the same prefix the client
+/// called. A client that asked `/x/repo.git/info/lfs/objects/batch` needs `/x/repo.git/info/lfs/...`,
+/// and building the link from a fixed string loses whatever the repository is mounted under.
+fn lfs_prefix(path: &str) -> String {
+    match path.find("/info/lfs/") {
+        Some(i) => path[..i].to_string(),
+        None => String::new(),
+    }
+}
+
 fn handle_connection(
     mut stream: TcpStream,
     root: &Path,
@@ -862,6 +872,103 @@ pub fn route(
                 }
                 Ok(None) => Response::error(404, "Not Found", format!("no branch {}", branch)),
                 Err(e) => Response::error(500, "Internal Server Error", e.to_string()),
+            }
+        }
+        // ---- git-lfs ----
+        //
+        // The batch call is how a client learns where to fetch a large object, and the object route is
+        // what it fetches. Both sit under the same prefix so one auth decision covers them: a client
+        // that may read the repository may read the objects its trees point at.
+        //
+        // The `href` is a path, not an absolute URL. `Request` carries no host and no scheme, and
+        // inventing one from the path would produce a link that is wrong behind any proxy. A client
+        // resolves a relative href against the endpoint it called, which is the correct answer by
+        // construction.
+        ("POST", p) if p.ends_with("/info/lfs/objects/batch") => {
+            let (op, wanted) = match crate::transport::lfs::parse_batch(&req.body) {
+                Some(v) => v,
+                None => {
+                    return Response::error(
+                        422,
+                        "Unprocessable Entity",
+                        "a batch body must name an operation and its objects".to_string(),
+                    )
+                }
+            };
+            if op != "download" && op != "upload" {
+                return Response::error(
+                    422,
+                    "Unprocessable Entity",
+                    format!("this server does not serve the {op} operation"),
+                );
+            }
+            // The answer comes from the store, never from what the request claimed. An oid the store
+            // does not hold is reported as missing inside the batch, so a client learns the object is
+            // gone instead of retrying a link that never worked.
+            let mut results = Vec::new();
+            let mut present = 0usize;
+            let mut held = 0usize;
+            for obj in &wanted {
+                // An upload asks "do you need these bytes?" and the answer for an object the store
+                // already holds is "no", with no actions block. That is a different answer from
+                // Missing: a client that reads Missing for an upload retries forever, while
+                // AlreadyThere tells it the transfer is done.
+                let found = match crate::store::sidecar::read(root, &obj.oid) {
+                    Some(bytes) => {
+                        present += 1;
+                        if op == "upload" {
+                            held += 1;
+                            crate::transport::lfs::Found::AlreadyThere
+                        } else {
+                            crate::transport::lfs::Found::Present {
+                                size: bytes.len() as u64,
+                            }
+                        }
+                    }
+                    None if op == "upload" => crate::transport::lfs::Found::Missing,
+                    None => crate::transport::lfs::Found::Missing,
+                };
+                results.push((obj.clone(), found));
+            }
+            let prefix = lfs_prefix(p);
+            let body = crate::transport::lfs::batch_response(
+                &results,
+                |oid| format!("{prefix}/info/lfs/objects/{oid}"),
+                "2099-01-01T00:00:00Z",
+            );
+            log_access(
+                root,
+                &who,
+                "git-lfs-batch",
+                p,
+                &format!(
+                    "{} asked, {present} present, {held} already held",
+                    results.len()
+                ),
+            );
+            Response::ok_with_type(body.into_bytes(), "application/vnd.git-lfs+json")
+        }
+        ("GET", p) if p.contains("/info/lfs/objects/") => {
+            let oid = p.rsplit('/').next().unwrap_or("");
+            if oid.len() != 64 || !oid.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Response::error(
+                    400,
+                    "Bad Request",
+                    "an oid is 64 hex characters".to_string(),
+                );
+            }
+            match crate::store::sidecar::read(root, oid) {
+                Some(bytes) => {
+                    log_access(
+                        root,
+                        &who,
+                        "git-lfs-object",
+                        p,
+                        &format!("{} bytes", bytes.len()),
+                    );
+                    Response::ok_with_type(bytes, "application/octet-stream")
+                }
+                None => Response::error(404, "Not Found", format!("no object {oid}")),
             }
         }
         // ---- git smart HTTP ----

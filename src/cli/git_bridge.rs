@@ -136,7 +136,22 @@ pub fn import(conn: &Connection, git_root: &Path, prefix: Option<&str>) -> ZResu
         let mut old_now: HashMap<String, String> = HashMap::new();
         for (path, git_hash) in &here {
             let body = repo.read_object(git_hash)?;
-            let our_hash = store::put_object(conn, &String::from_utf8_lossy(&body.body))?;
+            // A pointer file names its oid, and the bytes it stands for are not in this pack. The
+            // store already holds them when the import runs on the machine that made the export, so
+            // the pointer is resolved against the sidecar and the real object is written under its
+            // own hash. When the object is absent the pointer is stored as the text it is, which
+            // keeps the round trip lossless and leaves the missing object visible rather than
+            // inventing bytes for it.
+            let our_hash = match crate::transport::lfs::Pointer::parse(&body.body) {
+                Some(pointer) => match crate::store::sidecar::read(
+                    &crate::store::root_of(conn).unwrap_or_default(),
+                    &pointer.oid,
+                ) {
+                    Some(bytes) => store::put_object(conn, &String::from_utf8_lossy(&bytes))?,
+                    None => store::put_object(conn, &String::from_utf8_lossy(&body.body))?,
+                },
+                None => store::put_object(conn, &String::from_utf8_lossy(&body.body))?,
+            };
             old_now.insert(path.clone(), our_hash.clone());
             if parent_tree.get(path) == Some(&our_hash) {
                 continue;
@@ -371,8 +386,27 @@ fn write_tree_for(conn: &Connection, repo: &Repo, changeset: &str) -> ZResult<St
     // Group the paths by their directory, and write each file's blob once.
     let mut by_dir: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
     for (path, hash) in &files {
-        let body = store::get_object(conn, hash)?;
-        let blob = repo.write_object(Kind::Blob, body.as_bytes())?;
+        // A large object leaves the tree as a pointer rather than as its bytes. git has no way to
+        // learn a blob is large on its own, so the exporter writes what git-lfs expects: a three line
+        // text file naming the oid and the size. The bytes stay in the sidecar and are served by
+        // `info/lfs/objects`, which is the half the protocol module implements.
+        //
+        // This is invisible until a client asks: a repository with no large files exports exactly as
+        // it did, because nothing here runs for an object the store kept inline.
+        // Bytes, not a `String`: a binary object is not valid UTF-8 and the text reader refuses it
+        // with a message about encoding, which is how an export of a large binary failed with the
+        // store's own hash as the error message.
+        let body = store::get_object_bytes(conn, hash)?;
+        let blob = match store::object_is_sidecar(conn, hash) {
+            true => {
+                let pointer = crate::transport::lfs::Pointer {
+                    oid: hash.clone(),
+                    size: body.len() as u64,
+                };
+                repo.write_object(Kind::Blob, pointer.render().as_bytes())?
+            }
+            false => repo.write_object(Kind::Blob, &body)?,
+        };
         let (dir, name) = match path.rsplit_once('/') {
             Some((d, n)) => (d.to_string(), n.to_string()),
             None => (String::new(), path.clone()),

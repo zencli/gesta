@@ -732,6 +732,31 @@ pub fn delta_stats(conn: &Connection) -> ZResult<(i64, i64)> {
     Ok((count, saved))
 }
 
+/// The store's root directory, for a caller that has to reach the sidecar directly.
+///
+/// `db_root` stays private because most code should not need a path at all, but an importer that
+/// resolves a pointer needs the directory the objects live in.
+pub fn root_of(conn: &Connection) -> Option<std::path::PathBuf> {
+    db_root(conn)
+}
+
+/// Whether this object's bytes live in a file beside the database rather than inside a row.
+///
+/// A caller that writes the object somewhere else needs to know the difference, because the two
+/// shapes are not interchangeable downstream: a git export writes the bytes into a blob and a
+/// large one has to leave as a pointer instead. Reading the flag is cheaper and more honest than
+/// guessing from the size, because a `.gitattributes` rule can send a small file out and keep a
+/// large one in.
+pub fn object_is_sidecar(conn: &Connection, hash: &str) -> bool {
+    conn.query_row(
+        "SELECT sidecar FROM objects WHERE hash = ?1",
+        params![hash],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|v| v != 0)
+    .unwrap_or(false)
+}
+
 pub fn get_object(conn: &Connection, hash: &str) -> ZResult<String> {
     // A stored object is either whole, or a delta against another object. The
     // base may itself be a delta, so this recurses through get_object rather

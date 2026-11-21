@@ -4640,6 +4640,20 @@ def main():
             (r[1] or "")[-400:],
         )
 
+    if want("lfs"):
+        # The pointer and the batch endpoint are two halves of one promise: a pointer nobody can
+        # resolve is a file the client never gets, and an endpoint with no pointer moves the bytes
+        # anyway. The check drives both against real HTTP and a real 5 MB payload.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lfs.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a large object leaves the tree as a pointer and comes back when asked",
+            r[0] == 0 and "10/10 lfs checks pass" in r[1],
+            (r[1] or "")[-500:],
+        )
+
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
 

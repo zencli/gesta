@@ -1,0 +1,76 @@
+Serve the git-lfs protocol, so a pointer in a tree can be resolved
+
+`store::sidecar` already kept a large object outside the database. That is half a feature: the tree
+still held the payload, so a clone moved 200 MB nobody asked for. This is the other half.
+
+## The two routes
+
+| Route | Answers |
+|---|---|
+| `POST /<repo>/info/lfs/objects/batch` | which requested oids the store holds, and where to fetch each |
+| `GET /<repo>/info/lfs/objects/<oid>` | the object's bytes |
+
+Both sit under the repository prefix, so one auth decision covers them: a client that may read the
+repository may read the objects its trees point at.
+
+## Three decisions, each a way this goes wrong
+
+**The `href` is a path, not an absolute URL.** `Request` carries no host and no scheme. Building an
+absolute link from the path produces one that is wrong behind a proxy and on any non-default port.
+A client resolves a relative href against the endpoint it called, which is correct by construction.
+
+**A missing object is answered inside a `200`, not as an HTTP error.** One absent oid must not fail
+the other ninety-nine in the same batch. The client reads `error.code` per object.
+
+**An `upload` for an object the store holds gets no actions block.** That is a different answer from
+`Missing`, and the difference matters: a client reading "missing" for an upload retries forever.
+
+## The tree
+
+`gesta git export` writes the three-line pointer instead of the payload when the store kept the object
+in the sidecar, and `gesta git import` resolves the pointer against the sidecar and writes the real
+bytes under their own hash. A round trip through git keeps a binary intact rather than replacing it
+with the pointer text.
+
+The export path used `get_object`, which returns `String`, so a binary export failed with the store's
+own hash as the error message:
+
+```
+gesta: object 2e7cab63... is not valid UTF-8
+```
+
+`get_object_bytes` was the right reader and already existed. One check in `bench/lfs.py` exists for
+that failure alone.
+
+## Verified end to end, against a real server
+
+`bench/lfs.py`, ten checks, a new gate step. It writes a 5 MB payload, marks it `large` through
+`.gitattributes`, exports to a real git repository and reads the blob back through `git cat-file` to
+prove it is three lines of text rather than a size assertion on our own output. Then it starts a real
+server and drives the batch API over HTTP, including a missing oid beside the held one, and compares
+what the download link serves against what was committed, byte for byte.
+
+```
+[PASS] the large file left the tree as a pointer
+[PASS] the pointer names the object and its size
+[PASS] a small file exports as its own content
+[PASS] a missing object is reported inside the batch, not as an error
+[PASS] the href serves the payload byte for byte
+10/10 lfs checks pass
+```
+
+The "small file" check is the one that guards against the worse bug: marking everything large would
+pass every other check in the file.
+
+## What is still absent
+
+No lock API, and no transfer adapter other than `basic`. `expires_at` is emitted because a strict
+client rejects a response without it, and the object route does not enforce it afterwards. Written up
+in `docs/lfs.md` rather than left to be discovered.
+
+```
+cargo test --release                      480 passed  (472 + 8)
+cargo clippy --all-targets -D warnings    0
+python3 bench/docs.py                     32/32
+python3 bench/gate.py                     314/314
+```

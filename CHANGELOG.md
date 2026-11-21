@@ -14,6 +14,26 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### A large object leaves the tree as a pointer
+
+- `gesta serve` answers the git-lfs batch API and the object route, so a tree holding a pointer can
+  be resolved by a client that speaks LFS. Both sit under the same prefix as the repository, so one
+  auth decision covers them.
+- The `href` in a batch response is a path rather than an absolute URL. The request carries no host
+  and no scheme, and inventing one produces a link that is wrong behind a proxy or on a non-default
+  port; a client resolves a relative href against the endpoint it called.
+- A missing object is reported inside a `200` batch response, not as an HTTP error, because one
+  absent oid must not fail the other ninety-nine. An `upload` for an object the store already holds
+  gets no actions block, which is a different answer from missing: a client reading "missing" for an
+  upload retries forever.
+- `gesta git export` writes the three-line pointer instead of the payload when the store kept the
+  object in the sidecar, and `gesta git import` resolves it back. The export path used the text
+  reader, so a binary export failed with the store's own hash as the error message - one check in
+  `bench/lfs.py` exists for that alone.
+- `bench/lfs.py`, ten checks, a gate step. It exports a 5 MB payload to a real git repository, reads
+  the blob back through `git cat-file` to prove it is text, then drives the batch API against a real
+  server and compares what the download link serves against what was committed.
+
 ### A criss-cross merges from both bases, not from one
 
 - `merge_base` returned a single best common ancestor, which is right for an ordinary fork and

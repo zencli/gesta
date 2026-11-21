@@ -4,6 +4,7 @@ pub mod auth;
 pub mod gitserver;
 pub mod http;
 pub mod keyring;
+pub mod lfs;
 pub mod mcp;
 pub mod protocol_v2;
 pub mod remote;
