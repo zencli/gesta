@@ -88,7 +88,18 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> ZR
     let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
     let existing: Vec<String> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     if !existing.iter().any(|c| c == column) {
-        conn.execute(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, decl), [])?;
+        // The check above and the ALTER below are not one atomic step. Twenty processes starting on a
+        // fresh repository all find the column missing and all try to add it; one wins and the rest
+        // get "duplicate column name". That is the migration having already happened elsewhere, which
+        // is the outcome the caller wanted, so it is success rather than an error.
+        //
+        // Found by `bench/concurrency.py`, which failed about one run in eight with exactly this
+        // message while every other check passed.
+        match conn.execute(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, decl), []) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(_, Some(ref m))) if m.contains("duplicate column") => {}
+            Err(e) => return Err(e.into()),
+        }
     }
     Ok(())
 }
