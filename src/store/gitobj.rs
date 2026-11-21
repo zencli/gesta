@@ -136,18 +136,53 @@ fn sha1(data: &[u8]) -> String {
     h.iter().map(|x| format!("{:08x}", x)).collect()
 }
 
-/// The name git gives an object: the SHA-1 of its header and body.
-pub fn object_hash(kind: Kind, body: &[u8]) -> String {
+/// Which digest names an object in a repository.
+///
+/// git has carried two of these since 2.29. The difference is not a setting to tune: a SHA-256
+/// repository holds 64 character names where a SHA-1 one holds 40, and that length appears in every
+/// place an oid is written - the loose object path, the tree entry, the commit's parent line, the pack
+/// trailer, and the protocol's ref advertisement. Code that assumes 40 is not broken loudly, it is
+/// broken silently: it finds nothing and reports a missing object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashKind {
+    Sha1,
+    Sha256,
+}
+
+impl HashKind {
+    /// Characters in a hex name. Used wherever a name is parsed or a zero-id is built.
+    pub fn hex_len(self) -> usize {
+        match self {
+            HashKind::Sha1 => 40,
+            HashKind::Sha256 => 64,
+        }
+    }
+}
+
+/// The name git gives an object: the digest of its header and body, under the repository's format.
+pub fn object_hash_with(kind: Kind, body: &[u8], hash: HashKind) -> String {
     let header = format!("{} {}\0", kind.as_str(), body.len());
     let mut full = header.into_bytes();
     full.extend_from_slice(body);
-    sha1(&full)
+    match hash {
+        HashKind::Sha1 => sha1(&full),
+        HashKind::Sha256 => sha256_hex(&full),
+    }
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    hex::encode(h.finalize())
 }
 
 /// Where a repository keeps its objects and refs.
 pub struct Repo {
     /// `.git` for a normal repository, or the path a worktree's git dir points at.
     pub git_dir: PathBuf,
+    /// Which digest this repository names its objects with.
+    pub hash: HashKind,
 }
 
 /// Refuse a repository whose objects are named by something other than SHA-1.
@@ -161,12 +196,12 @@ pub struct Repo {
 /// Detecting it at the door and saying what happened is the honest half of not supporting it. The
 /// message names the setting so a reader can decide between converting the repository and keeping a
 /// second tool for it.
-fn refuse_unknown_object_format(git_dir: &Path) -> ZResult<()> {
+fn read_object_format(git_dir: &Path) -> ZResult<HashKind> {
     let config = git_dir.join("config");
     let Ok(text) = std::fs::read_to_string(&config) else {
         // No config is not an error here: a fresh `git init --bare` writes one, and a repository
         // assembled by hand may legitimately lack it. The default format is sha1.
-        return Ok(());
+        return Ok(HashKind::Sha1);
     };
     for line in text.lines() {
         let line = line.trim();
@@ -177,43 +212,38 @@ fn refuse_unknown_object_format(git_dir: &Path) -> ZResult<()> {
             continue;
         }
         let value = value.trim().to_ascii_lowercase();
-        if value == "sha1" {
-            return Ok(());
-        }
-        if value == "sha256" {
-            // Joined from separate literals rather than continued with a trailing backslash: that
-            // form swallows the leading whitespace of the next line, so the message printed
-            // "and carrythat length" and "would reportmissing objects" on a real terminal.
-            let why = concat!(
-                "The two formats name objects differently (64 hex characters against 40) and carry ",
-                "that length through the pack trailers and the protocol, so an import would report ",
-                "missing objects rather than the real reason."
-            );
-            return Err(bad(format!(
-                "{} is a SHA-256 git repository, and this tool reads SHA-1 git repositories only.\n{}\nConvert it first: git init --object-format=sha1 <new-dir>, then push into that.",
+        return match value.as_str() {
+            "sha1" => Ok(HashKind::Sha1),
+            "sha256" => Ok(HashKind::Sha256),
+            other => Err(bad(format!(
+                "{} uses object format '{}', which this tool does not know",
                 git_dir.display(),
-                why
-            )));
-        }
-        return Err(bad(format!(
-            "{} uses object format '{}', which this tool does not know",
-            git_dir.display(),
-            value
-        )));
+                other
+            ))),
+        };
     }
-    Ok(())
+    Ok(HashKind::Sha1)
 }
 
 impl Repo {
+    /// The name this repository gives an object.
+    ///
+    /// A caller holding a `Repo` must use this rather than the free `object_hash`, because the free
+    /// one only knows SHA-1 and a SHA-256 repository would silently receive 40 character names that
+    /// match nothing a client can find.
+    pub fn object_hash(&self, kind: Kind, body: &[u8]) -> String {
+        object_hash_with(kind, body, self.hash)
+    }
+
     /// Find the repository that contains `start`, or `start/.git` itself.
     pub fn open(start: &Path) -> ZResult<Repo> {
         // A bare repository is its own git directory: it has `objects` and `refs` directly, and
         // no `.git` inside. Checking for that first is what lets an import read a bare clone or
         // a staging repository `git init --bare` just made.
         if start.join("objects").is_dir() && start.join("refs").is_dir() {
-            refuse_unknown_object_format(start)?;
             return Ok(Repo {
                 git_dir: start.to_path_buf(),
+                hash: read_object_format(start)?,
             });
         }
         // Four things reach this function and only two of them are a directory: a repository, a
@@ -248,15 +278,19 @@ impl Repo {
         loop {
             let candidate = cur.join(".git");
             if candidate.is_dir() {
-                refuse_unknown_object_format(&candidate)?;
-                return Ok(Repo { git_dir: candidate });
+                let hash = read_object_format(&candidate)?;
+                return Ok(Repo {
+                    git_dir: candidate,
+                    hash,
+                });
             }
             // A worktree's `.git` is a file naming the real directory.
             if candidate.is_file() {
                 let text = std::fs::read_to_string(&candidate)?;
                 if let Some(rest) = text.trim().strip_prefix("gitdir:") {
                     let p = cur.join(rest.trim());
-                    return Ok(Repo { git_dir: p });
+                    let hash = read_object_format(&p)?;
+                    return Ok(Repo { git_dir: p, hash });
                 }
             }
             if !cur.pop() {
@@ -279,7 +313,7 @@ impl Repo {
 
     /// Write an object and return its name. An object already present is not rewritten.
     pub fn write_object(&self, kind: Kind, body: &[u8]) -> ZResult<String> {
-        let hash = object_hash(kind, body);
+        let hash = self.object_hash(kind, body);
         let path = self.object_path(&hash);
         if path.exists() {
             return Ok(hash);
@@ -440,6 +474,17 @@ fn collect_refs(base: &Path, dir: &Path, out: &mut BTreeMap<String, String>) -> 
 /// Parse a tree body into its entries. Git sorts entries by name with directories treated as
 /// ending in a slash, and the order matters because it is part of the hash.
 pub fn parse_tree(body: &[u8]) -> ZResult<Vec<Entry>> {
+    parse_tree_with(body, HashKind::Sha1)
+}
+
+/// Parse a tree body written by a repository of the given format.
+///
+/// The raw hash is 20 bytes under SHA-1 and 32 under SHA-256, and that length is not recorded
+/// anywhere in the entry: the parser has to know it. Assuming 20 on a SHA-256 tree reads the first
+/// twelve bytes of the hash as the next entry's mode, which surfaces as "tree entry has no mode
+/// separator" on a tree that is perfectly well formed - an error naming the wrong thing.
+pub fn parse_tree_with(body: &[u8], kind: HashKind) -> ZResult<Vec<Entry>> {
+    let raw = kind.hex_len() / 2;
     let mut out = Vec::new();
     let mut i = 0;
     while i < body.len() {
@@ -456,21 +501,26 @@ pub fn parse_tree(body: &[u8]) -> ZResult<Vec<Entry>> {
             + space
             + 1;
         let name = String::from_utf8_lossy(&body[space + 1..nul]).to_string();
-        if nul + 21 > body.len() {
-            return Err(bad("tree entry is shorter than its hash"));
+        if nul + 1 + raw > body.len() {
+            return Err(bad(format!(
+                "tree entry {name:?} is shorter than its {}-byte hash",
+                raw
+            )));
         }
-        let hash = body[nul + 1..nul + 21]
+        let hash = body[nul + 1..nul + 1 + raw]
             .iter()
             .map(|b| format!("{:02x}", b))
             .collect();
         out.push(Entry { mode, name, hash });
-        i = nul + 21;
+        i = nul + 1 + raw;
     }
     Ok(out)
 }
 
 /// Build a tree body from entries, sorted the way git sorts them.
-pub fn build_tree(mut entries: Vec<Entry>) -> Vec<u8> {
+/// Build a tree body in the given format.
+pub fn build_tree_with(mut entries: Vec<Entry>, kind: HashKind) -> Vec<u8> {
+    let raw = kind.hex_len() / 2;
     // A directory sorts as if its name ended in a slash, so it comes after any file sharing its
     // prefix. Sorting on the key git uses is what makes the hash match.
     entries.sort_by(|a, b| {
@@ -484,7 +534,7 @@ pub fn build_tree(mut entries: Vec<Entry>) -> Vec<u8> {
         out.push(b' ');
         out.extend_from_slice(e.name.as_bytes());
         out.push(0);
-        for i in 0..20 {
+        for i in 0..raw {
             let byte = u8::from_str_radix(&e.hash[i * 2..i * 2 + 2], 16).unwrap_or(0);
             out.push(byte);
         }
@@ -655,10 +705,10 @@ mod tests {
     /// The SHA-1 of "abc" is published, and a hashing mistake here would name every object
     /// wrongly while looking fine.
     #[test]
-    fn a_sha256_repository_is_refused_by_name_rather_than_read_wrong() {
-        // git has supported --object-format=sha256 since 2.29. Reading one with a SHA-1 reader does
-        // not fail cleanly: it finds no matching object and reports a missing file, so the reader
-        // goes looking for a corruption that is not there. The refusal has to name the format.
+    fn a_sha256_repository_opens_and_names_objects_with_sixty_four_characters() {
+        // git has supported --object-format=sha256 since 2.29. The repository now opens rather than
+        // being refused, and every name it produces has to be 64 characters: a 40 character name in a
+        // SHA-256 repository is not a shorter name, it is a name that matches nothing.
         let tmp = std::env::temp_dir().join(format!("gesta-sha256-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("objects")).unwrap();
@@ -669,34 +719,52 @@ mod tests {
         )
         .unwrap();
 
-        let err = match Repo::open(&tmp) {
-            Ok(_) => panic!("a sha256 repository must not open"),
-            Err(e) => e.to_string(),
-        };
-        assert!(
-            err.contains("SHA-256") && err.contains("object-format=sha1"),
-            "the message has to name the format and the way out: {err}"
+        let repo = Repo::open(&tmp).expect("a sha256 repository must open");
+        assert_eq!(repo.hash, HashKind::Sha256);
+
+        let name = repo.object_hash(Kind::Blob, b"hello\n");
+        assert_eq!(name.len(), 64, "a sha256 name is 64 characters: {name}");
+        assert!(name.chars().all(|c| c.is_ascii_hexdigit()));
+        // The same bytes under SHA-1 must give a different name, or the format is not being honoured.
+        assert_ne!(
+            name,
+            object_hash_with(Kind::Blob, b"hello\n", HashKind::Sha1)
         );
 
-        // A SHA-1 repository beside it must still open, or the guard has broken the normal path.
+        // A SHA-1 repository beside it keeps the 40 character shape.
         std::fs::write(
             tmp.join("config"),
             "[core]\n\trepositoryformatversion = 0\n\tobjectformat = sha1\n",
         )
         .unwrap();
-        assert!(
-            Repo::open(&tmp).map(|_| ()).is_ok(),
-            "a sha1 repository must still open"
-        );
+        let repo1 = Repo::open(&tmp).unwrap();
+        assert_eq!(repo1.hash, HashKind::Sha1);
+        assert_eq!(repo1.object_hash(Kind::Blob, b"hello\n").len(), 40);
 
-        // And a repository with no config at all keeps the git default.
+        // And a repository with no config at all keeps git's default.
         std::fs::remove_file(tmp.join("config")).unwrap();
-        assert!(
-            Repo::open(&tmp).map(|_| ()).is_ok(),
-            "a repository with no config is sha1 by default"
-        );
+        assert_eq!(Repo::open(&tmp).unwrap().hash, HashKind::Sha1);
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn the_sha256_name_matches_git_itself() {
+        // The published vectors prove the SHA-1 path. For SHA-256 the check that matters is that a
+        // real git agrees, because our own encoder agreeing with itself proves nothing. This asserts
+        // the value git computes for one known blob; the bench run against real git covers the rest.
+        // Computed with a separate implementation, not with this crate:
+        //   sha256(b"blob 6\0hello\n") = 2cf8d83d...
+        let name = object_hash_with(Kind::Blob, b"hello\n", HashKind::Sha256);
+        assert_eq!(
+            name, "2cf8d83d9ee29543b34a87727421fdecb7e3f3a183d337639025de576db9ebb4",
+            "sha256 of a known blob header and body: got {name}"
+        );
+        // The SHA-1 arm of the same input, so a copy-paste that ignored the format would show here.
+        assert_eq!(
+            object_hash_with(Kind::Blob, b"hello\n", HashKind::Sha1),
+            "ce013625030ba8dba906f756967f9e9ca394464a"
+        );
     }
 
     #[test]
@@ -734,7 +802,7 @@ mod tests {
     #[test]
     fn an_empty_blob_has_the_name_git_gives_it() {
         assert_eq!(
-            object_hash(Kind::Blob, b""),
+            object_hash_with(Kind::Blob, b"", HashKind::Sha1),
             "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
         );
     }
@@ -780,7 +848,7 @@ mod tests {
                 hash: "ce013625030ba8dba906f756967f9e9ca394464a".into(),
             },
         ];
-        let body = build_tree(entries);
+        let body = build_tree_with(entries, HashKind::Sha1);
         let back = parse_tree(&body).unwrap();
         assert_eq!(back.len(), 2);
         // A directory named "a" sorts before a file named "b".

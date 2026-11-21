@@ -67,6 +67,16 @@ pub fn flush() -> Vec<u8> {
 
 /// What the server offers a client that has not asked for anything yet.
 ///
+/// Whether a string could be an object name in either format this repository knowledge allows.
+///
+/// The two lengths are 40 (SHA-1) and 64 (SHA-256). This is deliberately a shape check and not a
+/// per-repository one: these functions receive names from a client before any repository has been
+/// consulted, and rejecting a 64 character name outright turns a format mismatch into "the server
+/// holds nothing", which is the failure that took longest to diagnose elsewhere.
+fn is_oid(s: &str) -> bool {
+    (s.len() == 40 || s.len() == 64) && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// `git-upload-pack` wants the first ref annotated with the capabilities, and every line terminated
 /// by NUL only on that first one. A client that receives capabilities on the wrong line ignores them
 /// and then asks for a side-band it was never offered.
@@ -382,7 +392,7 @@ pub fn upload_pack(root: &std::path::Path, body: &[u8]) -> ZResult<Vec<u8>> {
             line.strip_prefix("want ")
                 .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
         })
-        .filter(|s| s.len() == 40)
+        .filter(|s| is_oid(s))
         .collect();
 
     // What the client already holds. A fetch after the first one names the commits it has, and every
@@ -394,7 +404,7 @@ pub fn upload_pack(root: &std::path::Path, body: &[u8]) -> ZResult<Vec<u8>> {
             line.strip_prefix("have ")
                 .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
         })
-        .filter(|s| s.len() == 40)
+        .filter(|s| is_oid(s))
         .collect();
 
     // One export gives both the refs and every object they reach, so nothing is walked twice.
@@ -536,7 +546,7 @@ pub fn split_push(body: &[u8]) -> ZResult<(Vec<PushCommand>, Vec<u8>)> {
         let old = parts.next().unwrap_or("").to_string();
         let new = parts.next().unwrap_or("").to_string();
         let name = parts.next().unwrap_or("").to_string();
-        if old.len() != 40 || new.len() != 40 || name.is_empty() {
+        if !is_oid(&old) || !is_oid(&new) || name.is_empty() {
             return Err(bad(format!(
                 "a push named a ref in a shape that is not one: {}",
                 line

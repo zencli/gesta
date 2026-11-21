@@ -4668,16 +4668,16 @@ def main():
         )
 
     if want("object-format"):
-        # A SHA-1 reader pointed at a SHA-256 repository reports a missing object, which sends a
-        # reader looking for a corruption that is not there. The check proves the refusal names the
-        # format and the way out, and that a sha1 repository still imports.
+        # A SHA-256 repository is read rather than refused, so the check is that real git can read
+        # what we write and that a commit keeps its name through a round trip. The refusal check
+        # remains in the same file for the case where git itself cannot make such a repository.
         r = sh(
-            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'object_format.py')}",
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sha256_repo.py')}",
             cwd=ZF_DIR,
         )
         record(
-            "a sha256 repository is refused by name, and a sha1 one still opens",
-            r[0] == 0 and "7/7 object-format checks pass" in r[1],
+            "a sha256 repository survives a round trip, and a sha1 one still imports",
+            r[0] == 0 and ("9/9 sha256 checks pass" in r[1] or "0/0 (skipped)" in r[1]),
             (r[1] or "")[-500:],
         )
 

@@ -260,7 +260,7 @@ fn flatten(
 ) -> ZResult<HashMap<String, String>> {
     let mut out = HashMap::new();
     let obj = repo.read_object(tree)?;
-    for e in gitobj::parse_tree(&obj.body)? {
+    for e in gitobj::parse_tree_with(&obj.body, repo.hash)? {
         let path = if prefix.is_empty() {
             e.name.clone()
         } else {
@@ -465,7 +465,7 @@ fn write_tree_for(conn: &Connection, repo: &Repo, changeset: &str) -> ZResult<St
                 hash,
             });
         }
-        let body = gitobj::build_tree(entries);
+        let body = gitobj::build_tree_with(entries, repo.hash);
         let hash = repo.write_object(Kind::Tree, &body)?;
         written.insert(dir, hash);
     }
@@ -681,15 +681,16 @@ fn adjust_remote_head(remote: &str, branches: &[String]) -> ZResult<()> {
 
 /// Write this repository into a git directory that is already a bare repository.
 fn export_bare(conn: &Connection, git_dir: &Path, branch: Option<&str>) -> ZResult<Exported> {
-    let repo = Repo {
-        git_dir: git_dir.to_path_buf(),
-    };
+    // The caller already made the directory, so the format is read from what is on disk rather
+    // than assumed: exporting into a SHA-256 bare repository has to write 64 character names.
+    let repo = Repo::open(git_dir)?;
     export_into(conn, &repo, branch)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::gitobj::HashKind;
 
     fn temp(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("gesta-gb-{}-{}", std::process::id(), name));
@@ -713,11 +714,14 @@ mod tests {
         let tree1 = repo
             .write_object(
                 Kind::Tree,
-                &gitobj::build_tree(vec![Entry {
-                    mode: "100644".into(),
-                    name: "a.txt".into(),
-                    hash: blob_a.clone(),
-                }]),
+                &gitobj::build_tree_with(
+                    vec![Entry {
+                        mode: "100644".into(),
+                        name: "a.txt".into(),
+                        hash: blob_a.clone(),
+                    }],
+                    HashKind::Sha1,
+                ),
             )
             .unwrap();
         let c1 = repo
@@ -731,18 +735,21 @@ mod tests {
         let tree2 = repo
             .write_object(
                 Kind::Tree,
-                &gitobj::build_tree(vec![
-                    Entry {
-                        mode: "100644".into(),
-                        name: "a.txt".into(),
-                        hash: blob_a,
-                    },
-                    Entry {
-                        mode: "100644".into(),
-                        name: "b.txt".into(),
-                        hash: blob_b,
-                    },
-                ]),
+                &gitobj::build_tree_with(
+                    vec![
+                        Entry {
+                            mode: "100644".into(),
+                            name: "a.txt".into(),
+                            hash: blob_a,
+                        },
+                        Entry {
+                            mode: "100644".into(),
+                            name: "b.txt".into(),
+                            hash: blob_b,
+                        },
+                    ],
+                    HashKind::Sha1,
+                ),
             )
             .unwrap();
         let c2 = repo
@@ -942,31 +949,40 @@ mod tests {
         let inner = repo
             .write_object(
                 Kind::Tree,
-                &gitobj::build_tree(vec![Entry {
-                    mode: "100644".into(),
-                    name: "c.rs".into(),
-                    hash: blob,
-                }]),
+                &gitobj::build_tree_with(
+                    vec![Entry {
+                        mode: "100644".into(),
+                        name: "c.rs".into(),
+                        hash: blob,
+                    }],
+                    HashKind::Sha1,
+                ),
             )
             .unwrap();
         let mid = repo
             .write_object(
                 Kind::Tree,
-                &gitobj::build_tree(vec![Entry {
-                    mode: "40000".into(),
-                    name: "b".into(),
-                    hash: inner,
-                }]),
+                &gitobj::build_tree_with(
+                    vec![Entry {
+                        mode: "40000".into(),
+                        name: "b".into(),
+                        hash: inner,
+                    }],
+                    HashKind::Sha1,
+                ),
             )
             .unwrap();
         let root = repo
             .write_object(
                 Kind::Tree,
-                &gitobj::build_tree(vec![Entry {
-                    mode: "40000".into(),
-                    name: "a".into(),
-                    hash: mid,
-                }]),
+                &gitobj::build_tree_with(
+                    vec![Entry {
+                        mode: "40000".into(),
+                        name: "a".into(),
+                        hash: mid,
+                    }],
+                    HashKind::Sha1,
+                ),
             )
             .unwrap();
         let c = repo

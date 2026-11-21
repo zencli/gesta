@@ -14,6 +14,26 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### A SHA-256 git repository is read and written, not just refused
+
+- The previous entry refused the format by name. That was the honest half of not supporting it, and
+  it is now replaced by support: `git import` reads a `--object-format=sha256` repository and
+  `git export` writes one, and a round trip reproduces the original commit hash exactly.
+- The length of a name is the whole problem, and it is not in one place. `HashKind` travels on `Repo`,
+  and `parse_tree`/`build_tree` take it as an argument because the raw hash is 20 bytes under SHA-1
+  and 32 under SHA-256 and the entry does not record which. A parser that assumes 20 reads the first
+  twelve bytes of a SHA-256 hash as the next entry's mode, which surfaced as "tree entry has no mode
+  separator" on a tree git had just written correctly - an error naming the wrong thing.
+- `object_hash_with` computes the name under a given format, and `Repo::object_hash` picks the
+  repository's. The free `object_hash` stays as the SHA-1 default for callers with no repository in
+  hand, so a test fixture keeps its meaning.
+- The protocol still advertises `object-format=sha1`. Serving a SHA-256 repository over HTTP needs
+  the capability negotiated per repository and the ref advertisement to carry 64-character names, and
+  that is not done here.
+- `bench/sha256_repo.py`, nine checks, a gate step. It makes a real repository with real git, imports
+  it, exports into a fresh SHA-256 repository, and lets `git fsck` and `git rev-parse` judge the
+  result. A SHA-1 round trip runs beside it, because every change here is on a shared path.
+
 ### A SHA-256 git repository is refused by name
 
 - `gesta git import` now reads `objectformat` from the repository's config and refuses anything other
