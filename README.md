@@ -1,5 +1,7 @@
 # gesta
 
+<img src="assets/gesta.svg" alt="gesta" width="112" align="right">
+
 [![repo](https://img.shields.io/badge/github-zencli%2Fgesta-181717?logo=github)](https://github.com/zencli/gesta)
 
 Source control for AI agents. Changesets live in SQLite, objects are content addressed and compressed, blame and history are derived on commit. One Rust binary, no daemon.

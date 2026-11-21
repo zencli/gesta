@@ -10,5 +10,16 @@ fn main() {
     #[cfg(windows)]
     winfsp::build::winfsp_link_delayload();
 
+    // The icon goes into the executable, so Explorer, the taskbar and the Start menu show the mark
+    // rather than a blank generic file. A missing or malformed icon is a hard error here rather than
+    // a silently blank one, because the failure would otherwise only be visible by looking at a file
+    // listing on a Windows machine.
+    #[cfg(windows)]
+    {
+        println!("cargo:rerun-if-changed=assets/gesta.ico");
+        println!("cargo:rerun-if-changed=assets/gesta.rc");
+        embed_resource::compile("assets/gesta.rc", embed_resource::NONE);
+    }
+
     println!("cargo:rerun-if-changed=build.rs");
 }

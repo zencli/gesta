@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="gesta">
+  <title>gesta</title>
+
+  <!--
+    The mark is a glass tile over a dark field, with a geometric single-storey "g" whose bowl is
+    crossed by a measurement axis. The axis is the part that says what this tool is: a changeset is a
+    point on a line, and the dots are the revisions either side of it.
+  -->
+
+  <defs>
+    <!-- The rim: teal at upper left, running through violet to amber at lower right, which is the
+         order the eye follows round a lit edge. -->
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0.00" stop-color="#6FF7FF"/>
+      <stop offset="0.18" stop-color="#00E5FF"/>
+      <stop offset="0.38" stop-color="#4FC3FF"/>
+      <stop offset="0.52" stop-color="#7A3CFF"/>
+      <stop offset="0.70" stop-color="#A64CFF"/>
+      <stop offset="0.84" stop-color="#FFB45C"/>
+      <stop offset="1.00" stop-color="#00D9D9"/>
+    </linearGradient>
+
+    <linearGradient id="bevel" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.55"/>
+      <stop offset="0.45" stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.35"/>
+    </linearGradient>
+
+    <!-- The field inside the tile. -->
+    <radialGradient id="nebulaLeft" cx="0.18" cy="0.42" r="0.62">
+      <stop offset="0" stop-color="#00B8C8" stop-opacity="0.85"/>
+      <stop offset="0.55" stop-color="#0A6E8C" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#0B0A2A" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="nebulaRight" cx="0.86" cy="0.34" r="0.66">
+      <stop offset="0" stop-color="#6A2CFF" stop-opacity="0.80"/>
+      <stop offset="0.6" stop-color="#3A1B8A" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#0B0A2A" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="nebulaGold" cx="0.80" cy="0.88" r="0.52">
+      <stop offset="0" stop-color="#FFB347" stop-opacity="0.62"/>
+      <stop offset="0.6" stop-color="#8A4A10" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#0B0A2A" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="base" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#0D1030"/>
+      <stop offset="0.5" stop-color="#0B0A2A"/>
+      <stop offset="1" stop-color="#160B2E"/>
+    </linearGradient>
+
+    <!-- The letter: pearl white, cool on the shadow side, so it sits in the field rather than on it. -->
+    <linearGradient id="letter" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.55" stop-color="#F4F6FF"/>
+      <stop offset="1" stop-color="#C8D4FF"/>
+    </linearGradient>
+
+    <!-- A grid faint enough to read as a technical surface and not as a pattern. -->
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0 H0 V32" fill="none" stroke="#8FE9FF" stroke-opacity="0.07" stroke-width="1"/>
+    </pattern>
+
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="7" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="softGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+
+    <!-- Everything inside the tile is clipped to the squircle. -->
+    <clipPath id="tileClip">
+      <rect x="28" y="28" width="456" height="456" rx="116" ry="116"/>
+    </clipPath>
+
+    <filter id="letterShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="5" stdDeviation="9" flood-color="#050418" flood-opacity="0.55"/>
+    </filter>
+  </defs>
+
+  <g clip-path="url(#tileClip)">
+    <rect x="28" y="28" width="456" height="456" rx="116" ry="116" fill="url(#base)"/>
+    <rect x="28" y="28" width="456" height="456" rx="116" ry="116" fill="url(#grid)"/>
+    <rect x="28" y="28" width="456" height="456" rx="116" ry="116" fill="url(#nebulaLeft)"/>
+    <rect x="28" y="28" width="456" height="456" rx="116" ry="116" fill="url(#nebulaRight)"/>
+    <rect x="28" y="28" width="456" height="456" rx="116" ry="116" fill="url(#nebulaGold)"/>
+
+    <!--
+      The letter. Drawn as a stroked path so the bowl, the stem and the hook share one weight: a
+      geometric g is one thick line bent into a shape, and outlining it as a filled shape would show
+      the joints.
+    -->
+    <g filter="url(#letterShadow)">
+      <circle cx="236" cy="236" r="66" fill="none" stroke="url(#letter)" stroke-width="40"/>
+      <path d="M302 236 V330 A34 34 0 0 1 268 364 H246"
+            fill="none" stroke="url(#letter)" stroke-width="40"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+
+    <!-- The axis: a measurement line across the bowl, with the revisions either side of it. -->
+    <g filter="url(#glow)">
+      <path d="M150 236 H322" stroke="#E8FFFF" stroke-opacity="0.85" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="176" cy="236" r="4.5" fill="#BFEFFF" fill-opacity="0.9"/>
+      <circle cx="206" cy="236" r="4.5" fill="#BFEFFF" fill-opacity="0.9"/>
+      <circle cx="236" cy="236" r="7" fill="#00FFFF"/>
+      <circle cx="266" cy="236" r="4.5" fill="#BFEFFF" fill-opacity="0.9"/>
+      <circle cx="296" cy="236" r="4.5" fill="#BFEFFF" fill-opacity="0.9"/>
+    </g>
+
+    <!-- The sparkle: the changeset that has just been made. -->
+    <g filter="url(#glow)">
+      <path d="M392 74 L397 112 L435 117 L397 122 L392 160 L387 122 L349 117 L387 112 Z"
+            fill="#EAFFFF"/>
+    </g>
+    <circle cx="367" cy="142" r="3" fill="#7FE8FF" fill-opacity="0.85"/>
+
+    <!-- Glass: a highlight along the top edge and a shadow along the bottom, both inside the tile. -->
+    <rect x="28" y="28" width="456" height="456" rx="116" ry="116"
+          fill="none" stroke="url(#bevel)" stroke-width="16" stroke-opacity="0.5"/>
+  </g>
+
+  <!-- The rim itself, drawn twice: a wide soft pass for the bloom, a narrow bright one for the edge. -->
+  <rect x="28" y="28" width="456" height="456" rx="116" ry="116"
+        fill="none" stroke="url(#rim)" stroke-width="16" filter="url(#softGlow)" opacity="0.75"/>
+  <rect x="28" y="28" width="456" height="456" rx="116" ry="116"
+        fill="none" stroke="url(#rim)" stroke-width="7"/>
+  <rect x="36" y="36" width="440" height="440" rx="109" ry="109"
+        fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="1.5"/>
+</svg>

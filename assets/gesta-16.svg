@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="gesta">
+  <title>gesta (16 px)</title>
+
+  <!--
+    16 px only. The measured problem was not the letter's shape but its area: at 16 px the bowl was
+   7 pixels tall, so the counter was one pixel and the descender merged into it. Here the tile is
+   full bleed and the letter fills 46 of 64 units, which gives the counter three pixels of hole and
+   keeps the hook separate from the bowl. Nothing else survives at this size, so nothing else is
+   drawn.
+  -->
+
+  <defs>
+    <linearGradient id="rim16" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6FF7FF"/>
+      <stop offset="0.5" stop-color="#8A5CFF"/>
+      <stop offset="1" stop-color="#FFB45C"/>
+    </linearGradient>
+    <clipPath id="clip16">
+      <rect x="0" y="0" width="64" height="64" rx="14" ry="14"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#clip16)">
+    <rect x="0" y="0" width="64" height="64" fill="#131C42"/>
+    <rect x="0" y="32" width="64" height="32" fill="#1E0F3E"/>
+  </g>
+
+  <!-- Bowl centred at 30,30 with an outer radius of 15 and a 9 unit stroke: hole 6 units across. -->
+  <circle cx="30" cy="30" r="15" fill="none" stroke="#FFFFFF" stroke-width="9"/>
+  <!-- The stem and hook, kept clear of the bowl's lower edge so the two do not fuse. -->
+  <path d="M41 30 V44 A5 5 0 0 1 36 49 H31"
+        fill="none" stroke="#FFFFFF" stroke-width="9"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="0.5" y="0.5" width="63" height="63" rx="13.5" ry="13.5"
+        fill="none" stroke="url(#rim16)" stroke-width="1.6"/>
+</svg>

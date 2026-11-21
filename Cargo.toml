@@ -71,3 +71,4 @@ strip = true
 
 [target.'cfg(windows)'.build-dependencies]
 winfsp = "0.13.2"
+embed-resource = "2"
