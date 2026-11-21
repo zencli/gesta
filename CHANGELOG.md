@@ -12,7 +12,7 @@ published, so the version numbers in `Cargo.toml` were the only boundary.
 Each section is the work that landed at that version, newest first. A section grows while its
 version is current and freezes when the number changes, so `0.6.0` is a record and not a plan.
 
-## Unreleased
+## 0.9.0, 2026-11-22
 
 ### A stash can take part of the working tree
 
@@ -331,10 +331,6 @@ no delta, no v2, no ref deletion.
   a plain `git gc` detaches and returns before it has packed anything.
 - The remaining gap is cross-file compression, measured at 1.50x by joining the objects into one
   stream. Raising the zlib level changes nothing (47.3 MB at level 6, 47.2 at level 9).
-
-
-## Unreleased
-
 ### The tree scan stats in parallel
 
 - The walk collects paths, then stats them over four threads in contiguous slices. At 100,003
