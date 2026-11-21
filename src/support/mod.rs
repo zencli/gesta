@@ -5,6 +5,7 @@ pub mod attributes;
 pub mod audit;
 pub mod audit_forward;
 pub mod backup;
+pub mod backup_remote;
 pub mod clock;
 pub mod error;
 pub mod grep;

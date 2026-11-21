@@ -134,3 +134,248 @@ pub fn cmd_secret(sub: crate::SecretCmd) -> ZResult<()> {
         }
     }
 }
+
+/// Where the off-site copy lives, and with what credentials.
+///
+/// The URL carries no secrets, the same rule as every other remote: `s3://bucket/prefix` plus
+/// `GESTA_S3_ENDPOINT` and its key variables. A passphrase in an environment variable rather than an
+/// argument keeps it out of shell history and out of `ps`.
+fn remote_target(
+    passphrase: Option<String>,
+) -> ZResult<(crate::transport::s3::S3Config, String, String)> {
+    let url = std::env::var("GESTA_BACKUP_URL").map_err(|_| {
+        crate::error::Error::new(
+            crate::error::Code::Usage,
+            "set GESTA_BACKUP_URL to where the backup should go, for example \
+             s3://bucket/backups; the S3 credentials come from GESTA_S3_ENDPOINT, \
+             GESTA_S3_REGION, GESTA_S3_ACCESS_KEY and GESTA_S3_SECRET_KEY"
+                .to_string(),
+        )
+    })?;
+    let (cfg, prefix) = crate::transport::s3::S3Config::from_url(&url)?;
+
+    let pass = match passphrase {
+        Some(p) => p,
+        None => std::env::var("GESTA_BACKUP_PASSPHRASE").map_err(|_| {
+            crate::error::Error::new(
+                crate::error::Code::Usage,
+                "a backup must be sealed, so it needs a passphrase: pass --passphrase or set \
+                 GESTA_BACKUP_PASSPHRASE. An unencrypted copy of the whole history in an object \
+                 store is a disclosure, not a backup."
+                    .to_string(),
+            )
+        })?,
+    };
+    if pass.is_empty() {
+        return Err(crate::error::Error::new(
+            crate::error::Code::Usage,
+            "the passphrase is empty, which seals nothing".to_string(),
+        )
+        .into());
+    }
+    Ok((cfg, prefix, pass))
+}
+
+/// `backup remote push|list|pull|prune`.
+pub fn cmd_backup_remote(sub: crate::BackupRemoteCmd) -> ZResult<()> {
+    use crate::support::json::Json;
+
+    match sub {
+        crate::BackupRemoteCmd::Push {
+            prefix,
+            keep,
+            passphrase,
+            json_remote,
+        } => {
+            let (cfg, url_prefix, pass) = remote_target(passphrase)?;
+            let prefix = if prefix == "backups" {
+                url_prefix
+            } else {
+                prefix
+            };
+            let (root, conn) = open_repo()?;
+            let _ = root;
+            let pushed = crate::support::backup_remote::push(&conn, &cfg, &prefix, &pass, keep)?;
+            if json_remote {
+                println!(
+                    "{}",
+                    Json::obj(vec![
+                        ("schema", Json::str(super::SCHEMA_VERSION)),
+                        ("key", Json::str(pushed.key.clone())),
+                        ("plain_bytes", Json::int(pushed.plain_bytes as i64)),
+                        ("sealed_bytes", Json::int(pushed.sealed_bytes as i64)),
+                        ("changesets", Json::int(pushed.changesets)),
+                        ("objects", Json::int(pushed.objects)),
+                        ("kept", Json::int(keep as i64)),
+                    ])
+                    .render()
+                );
+                return Ok(());
+            }
+            println!(
+                "sealed {} change(s), {} object(s) into {} ({} bytes sealed from {}, {}x the plain file)",
+                pushed.changesets,
+                pushed.objects,
+                pushed.key,
+                pushed.sealed_bytes,
+                pushed.plain_bytes,
+                if pushed.plain_bytes == 0 {
+                    "0".to_string()
+                } else {
+                    format!(
+                        "{:.2}",
+                        pushed.sealed_bytes as f64 / pushed.plain_bytes as f64
+                    )
+                }
+            );
+            println!("the newest {} are kept; older ones are deleted", keep);
+            Ok(())
+        }
+
+        crate::BackupRemoteCmd::List {
+            prefix,
+            json_remote,
+        } => {
+            let url = std::env::var("GESTA_BACKUP_URL").map_err(|_| {
+                crate::error::Error::new(
+                    crate::error::Code::Usage,
+                    "set GESTA_BACKUP_URL to list backups".to_string(),
+                )
+            })?;
+            let (cfg, url_prefix) = crate::transport::s3::S3Config::from_url(&url)?;
+            let prefix = if prefix == "backups" {
+                url_prefix
+            } else {
+                prefix
+            };
+            let keys = cfg.list_keys(&prefix)?;
+            if json_remote {
+                println!(
+                    "{}",
+                    Json::obj(vec![
+                        ("schema", Json::str(super::SCHEMA_VERSION)),
+                        (
+                            "backups",
+                            Json::arr(keys.iter().map(|k| Json::str(k.clone())).collect())
+                        ),
+                        ("count", Json::int(keys.len() as i64)),
+                    ])
+                    .render()
+                );
+                return Ok(());
+            }
+            if keys.is_empty() {
+                println!("no backup under {}", prefix);
+                return Ok(());
+            }
+            println!("{} backup(s) under {}:", keys.len(), prefix);
+            for k in &keys {
+                println!("  {}", k);
+            }
+            Ok(())
+        }
+
+        crate::BackupRemoteCmd::Pull {
+            key,
+            prefix,
+            passphrase,
+            yes,
+        } => {
+            let (cfg, url_prefix, pass) = remote_target(passphrase)?;
+            let prefix = if prefix == "backups" {
+                url_prefix
+            } else {
+                prefix
+            };
+
+            let target = if key == "latest" {
+                let keys = cfg.list_keys(&prefix)?;
+                match keys.last() {
+                    Some(k) => k.clone(),
+                    None => {
+                        return Err(crate::error::Error::not_found(format!(
+                            "there is no backup under {}, so there is nothing to restore",
+                            prefix
+                        ))
+                        .into())
+                    }
+                }
+            } else if key.contains('/') {
+                key.clone()
+            } else {
+                format!("{}/{}", prefix.trim_end_matches('/'), key)
+            };
+
+            let body = cfg.get(&target)?.ok_or_else(|| {
+                crate::error::Error::not_found(format!("{} is not in the bucket", target))
+            })?;
+
+            // Unsealed before the question, so a wrong passphrase does not make the reader answer a
+            // prompt about replacing their store and then fail.
+            let plain = crate::support::backup_remote::unseal(&body, &pass)?;
+            let tmp = std::env::temp_dir().join(format!(
+                "gesta-pull-{}-{}.db",
+                std::process::id(),
+                crate::support::clock::unix_now()
+            ));
+            std::fs::write(&tmp, &plain)?;
+            let contents = match crate::support::backup::verify(&tmp) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
+            };
+
+            if !yes {
+                println!(
+                    "{} holds {} change(s), {} object(s), {} branch(es), {} tag(s).",
+                    target, contents.changesets, contents.objects, contents.branches, contents.tags
+                );
+                print!(
+                    "Restoring replaces this repository's store and cannot be undone. Continue? [y/N] "
+                );
+                use std::io::Write;
+                std::io::stdout().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    let _ = std::fs::remove_file(&tmp);
+                    println!("nothing was changed");
+                    return Ok(());
+                }
+            }
+
+            let root = repo_root()?;
+            let restored = crate::support::backup::restore(&root, &tmp);
+            let _ = std::fs::remove_file(&tmp);
+            let c = restored?;
+            println!(
+                "restored {} change(s), {} object(s), {} branch(es), {} tag(s) from {}",
+                c.changesets, c.objects, c.branches, c.tags, target
+            );
+            Ok(())
+        }
+
+        crate::BackupRemoteCmd::Prune { prefix, keep } => {
+            let url = std::env::var("GESTA_BACKUP_URL").map_err(|_| {
+                crate::error::Error::new(
+                    crate::error::Code::Usage,
+                    "set GESTA_BACKUP_URL to prune backups".to_string(),
+                )
+            })?;
+            let (cfg, url_prefix) = crate::transport::s3::S3Config::from_url(&url)?;
+            let prefix = if prefix == "backups" {
+                url_prefix
+            } else {
+                prefix
+            };
+            let removed = crate::support::backup_remote::prune(&cfg, &prefix, keep)?;
+            println!(
+                "removed {} backup(s); the newest {} are kept",
+                removed, keep
+            );
+            Ok(())
+        }
+    }
+}

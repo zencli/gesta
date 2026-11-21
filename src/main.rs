@@ -324,6 +324,11 @@ enum Cmd {
         #[arg(long)]
         json_backup: bool,
     },
+    /// Encrypted backups to an S3 bucket, and back
+    BackupRemote {
+        #[command(subcommand)]
+        sub: BackupRemoteCmd,
+    },
     /// Check a backup file without touching the repository
     VerifyBackup {
         /// The backup file
@@ -596,6 +601,54 @@ enum BisectCmd {
     Status,
     /// Abandon the search and put the working tree back
     Cancel,
+}
+
+/// Moving an encrypted backup off the machine the repository lives on.
+///
+/// A backup on the same disk as the store protects against a bad commit and not against a dead disk,
+/// which is the failure it most needs to survive.
+#[derive(Subcommand)]
+pub enum BackupRemoteCmd {
+    /// Snapshot, seal and upload
+    Push {
+        /// S3 prefix, e.g. `backups`
+        #[arg(long, default_value = "backups")]
+        prefix: String,
+        /// Keeps the newest N and deletes the rest
+        #[arg(long, default_value_t = 7)]
+        keep: usize,
+        /// Passphrase the backup is sealed with. Read from GESTA_BACKUP_PASSPHRASE when omitted
+        #[arg(long)]
+        passphrase: Option<String>,
+        #[arg(long)]
+        json_remote: bool,
+    },
+    /// List what is in the bucket
+    List {
+        #[arg(long, default_value = "backups")]
+        prefix: String,
+        #[arg(long)]
+        json_remote: bool,
+    },
+    /// Download, unseal and restore
+    Pull {
+        /// The key to restore, or `latest`
+        key: String,
+        #[arg(long, default_value = "backups")]
+        prefix: String,
+        #[arg(long)]
+        passphrase: Option<String>,
+        /// Skip the question. Without it, restoring asks first because it replaces the store
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Delete everything past the newest N
+    Prune {
+        #[arg(long, default_value = "backups")]
+        prefix: String,
+        #[arg(long, default_value_t = 7)]
+        keep: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1177,6 +1230,7 @@ fn run() -> ZResult<()> {
         Cmd::Checkout { file, changeset } => cli::cmd_checkout(&file, changeset.as_deref()),
         Cmd::Restore { file } => cli::cmd_restore(&file),
         Cmd::Backup { dest, json_backup } => cli::cmd_backup(&dest, json_backup),
+        Cmd::BackupRemote { sub } => cli::cmd_backup_remote(sub),
         Cmd::VerifyBackup { file } => cli::cmd_verify_backup(&file),
         Cmd::RestoreRepo { file, yes } => cli::cmd_restore_repo(&file, yes),
         Cmd::Undo => cli::cmd_undo(),

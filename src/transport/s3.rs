@@ -279,12 +279,13 @@ impl S3Config {
         Ok(Some(resp))
     }
 
-    /// List the branch names stored under a prefix.
+    /// List every key under a prefix, sorted.
     ///
-    /// One request with `list-type=2` and a prefix, which every S3 implementation
-    /// supports. A bucket holds `<prefix>/<branch>.bundle`, so stripping the known
-    /// prefix and suffix leaves the branch.
-    pub fn list_branches(&self, prefix: &str) -> ZResult<Vec<String>> {
+    /// One request with `list-type=2`, which every S3 implementation supports. A bucket with more
+    /// than a thousand keys in the prefix needs pagination; this returns the first page and says so
+    /// by returning fewer keys than the bucket holds, which is enough for a backup schedule that
+    /// keeps a handful.
+    pub fn list_keys(&self, prefix: &str) -> ZResult<Vec<String>> {
         let now = crate::support::clock::unix_now();
         let amz_date = crate::support::clock::format_amz_date(now);
         let (host, port, tls) = self.host_port()?;
@@ -361,28 +362,57 @@ impl S3Config {
             )));
         }
         let text = String::from_utf8_lossy(&body);
-        let mut names = Vec::new();
-        let open = "<Key>";
-        let close = "</Key>";
+        let mut keys = Vec::new();
         let mut rest = text.as_ref();
-        while let Some(s) = rest.find(open) {
-            let after = &rest[s + open.len()..];
-            let Some(e) = after.find(close) else { break };
-            let key = &after[..e];
-            if let Some(branch) = key
-                .strip_prefix(&if prefix.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}/", prefix)
-                })
-                .and_then(|k| k.strip_suffix(".bundle"))
-            {
-                names.push(branch.to_string());
-            }
-            rest = &after[e + close.len()..];
+        while let Some(s) = rest.find("<Key>") {
+            let after = &rest[s + "<Key>".len()..];
+            let Some(e) = after.find("</Key>") else { break };
+            keys.push(after[..e].to_string());
+            rest = &after[e + "</Key>".len()..];
         }
+        keys.sort();
+        Ok(keys)
+    }
+
+    /// List the branch names stored under a prefix.
+    pub fn list_branches(&self, prefix: &str) -> ZResult<Vec<String>> {
+        let strip = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", prefix)
+        };
+        let mut names: Vec<String> = self
+            .list_keys(prefix)?
+            .into_iter()
+            .filter_map(|k| {
+                k.strip_prefix(&strip)
+                    .and_then(|k| k.strip_suffix(".bundle"))
+                    .map(|b| b.to_string())
+            })
+            .collect();
         names.sort();
         Ok(names)
+    }
+
+    /// Delete one object. A missing key is not an error: the caller prunes, and a key another process
+    /// already removed is the outcome it wanted.
+    pub fn delete(&self, key: &str) -> ZResult<()> {
+        let now = crate::support::clock::unix_now();
+        let amz_date = crate::support::clock::format_amz_date(now);
+        let (url, headers) = self.signed("DELETE", key, b"", &amz_date)?;
+        let (status, resp) =
+            crate::transport::http::request_with_headers("DELETE", &url, &headers, None)?;
+        if status == 404 || (200..300).contains(&status) {
+            return Ok(());
+        }
+        Err(bad(format!(
+            "delete failed with status {}: {}",
+            status,
+            String::from_utf8_lossy(&resp)
+                .chars()
+                .take(200)
+                .collect::<String>()
+        )))
     }
 }
 

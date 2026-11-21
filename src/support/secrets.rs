@@ -148,7 +148,7 @@ fn restrict_permissions(_path: &Path) -> ZResult<()> {
 }
 
 /// Derive the 32 byte key from a passphrase and a salt.
-fn derive_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
+pub(crate) fn derive_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
     // HMAC-SHA256 with the salt as the key and the passphrase as the message. One
     // pass is enough here: the passphrase is chosen with real entropy and this is
     // opened on every push, so stretching it would be paid constantly to slow an

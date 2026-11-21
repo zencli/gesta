@@ -4572,6 +4572,20 @@ def main():
             rc, out = sh(f"bash {BUGHUNTER}/run.sh {ZF_DIR}", timeout=900)
             record("bughunter scenarios", rc == 0, out[-600:])
 
+    if want("backup-remote"):
+        # A backup that cannot be restored is worse than none, because it is believed. This runs the
+        # whole path against a server that answers S3's four calls, destroys the store, and reads a
+        # file back.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backup_remote.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "an encrypted backup goes off-site and comes back readable",
+            r[0] == 0 and "15/15 off-site backup checks pass" in r[1],
+            (r[1] or "")[-400:],
+        )
+
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
 
@@ -4597,10 +4611,12 @@ def main():
         )
         return 2
 
+
     print(f"\n{passed}/{total} gate steps pass")
 
     # Name what did not run, and make the final sentence depend on it. "Releasable" over a run with
     # a skipped check is a claim about work nobody did.
+
     if skipped:
         print(f"\n{len(skipped)} check(s) did not run:")
         for n, why in skipped:
