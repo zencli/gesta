@@ -14,6 +14,17 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### `show --json` answers with an object
+
+- `show --json` printed the file's bytes and called it JSON. A caller piping into a parser got
+  the file's contents where an object should be, and had no way to tell.
+- The body is `content` when it is UTF-8, and `content_base64` when it is not, with `binary`
+  saying which. A body that is not UTF-8 cannot be a JSON string at all.
+- `--json` now reaches `cmd_show`. The flag was declared and dropped on the way, so it read as
+  an option that did nothing rather than an option that failed.
+- `show` without `--json` still writes the bytes untouched, which is what a pipe into a file
+  expects, and the check pins that too.
+
 
 ### Protocol v2
 

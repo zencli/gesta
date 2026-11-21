@@ -1669,7 +1669,7 @@ fn grep_hits(s: &Search) -> ZResult<Vec<crate::grep::Hit>> {
     }
 }
 
-pub fn cmd_show(spec: &str) -> ZResult<()> {
+pub fn cmd_show(spec: &str, json: bool) -> ZResult<()> {
     let (_root, conn) = open_repo()?;
     let (rev, path, named_path) = match spec.split_once(':') {
         Some((r, p)) => (r.to_string(), normalise(p), true),
@@ -1719,6 +1719,29 @@ pub fn cmd_show(spec: &str) -> ZResult<()> {
     // Bytes, not text. `show` on a binary file failed with a message about UTF-8 because it went
     // through the text reader, and a large binary is exactly the file somebody shows.
     let bytes = crate::store::get_object_bytes(&conn, &hash)?;
+    if json {
+        // `--json` printed the file's bytes and called it JSON, so a caller piping into a parser got
+        // the file's contents where an object should be and had no way to tell. A body that is not
+        // UTF-8 cannot be a JSON string at all.
+        let text = std::str::from_utf8(&bytes).ok();
+        let mut fields = vec![
+            ("path", crate::json::Json::str(path.clone())),
+            ("rev", crate::json::Json::str(rev.clone())),
+            ("changeset", crate::json::Json::str(cs.clone())),
+            ("hash", crate::json::Json::str(hash.clone())),
+            ("size", crate::json::Json::int(bytes.len() as i64)),
+            ("binary", crate::json::Json::Bool(text.is_none())),
+        ];
+        match text {
+            Some(t) => fields.push(("content", crate::json::Json::str(t))),
+            None => fields.push((
+                "content_base64",
+                crate::json::Json::str(crate::remote::enc_base64(&bytes)),
+            )),
+        }
+        emit_object(fields);
+        return Ok(());
+    }
     use std::io::Write;
     std::io::stdout().write_all(&bytes)?;
     Ok(())

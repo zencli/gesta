@@ -290,6 +290,10 @@ enum Cmd {
     Show {
         /// Path, optionally as `rev:path`
         spec: String,
+        /// Print a JSON object instead of the file's bytes. A binary body is base64, and `binary`
+        /// says so, because a terminal writes raw bytes without a word about what they are.
+        #[arg(long)]
+        json: bool,
     },
     /// List the files a revision holds
     Ls {
@@ -1161,7 +1165,7 @@ fn run() -> ZResult<()> {
         },
         Cmd::Blame { file, ignore_rev } => cli::cmd_blame(&file, &ignore_rev),
         Cmd::History { file } => cli::cmd_history(&file),
-        Cmd::Show { spec } => cli::cmd_show(&spec),
+        Cmd::Show { spec, json } => cli::cmd_show(&spec, json),
         Cmd::Ls { rev, path, long: _ } if json => cli::cmd_ls_json(rev.as_deref(), path.as_deref()),
         Cmd::Ls { rev, path, long } => cli::cmd_ls(rev.as_deref(), path.as_deref(), long),
         Cmd::Git { sub } => match sub {

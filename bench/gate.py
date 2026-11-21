@@ -132,6 +132,20 @@ def main():
             f"{len(diffs)} file(s) need formatting: {', '.join(sorted(set(diffs))[:8])}",
         )
 
+    if want("show-json"):
+        # `--json` printed the file's bytes and called it JSON, so a caller piping into a parser got
+        # the file's contents where an object should be and had no way to tell. A body that is not
+        # UTF-8 cannot be a JSON string at all, so it travels as base64 with a flag saying so.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'show_json.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "show --json answers with an object, and base64 when the body is binary",
+            r[0] == 0 and "9/9 show --json checks pass" in r[1],
+            (r[1] or "")[-400:],
+        )
+
     if want("audit"):
         rc, out = sh("bash -lc 'source $HOME/.cargo/env && cargo audit'", timeout=600)
         vulns = "vulnerability found" in out or "Vulnerabilities found" in out

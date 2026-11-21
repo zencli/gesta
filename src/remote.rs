@@ -329,7 +329,7 @@ fn dec_str(s: &str) -> String {
     out
 }
 
-fn enc_base64(bytes: &[u8]) -> String {
+pub(crate) fn enc_base64(bytes: &[u8]) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
