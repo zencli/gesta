@@ -14,9 +14,36 @@ Sections before 0.10.0 were written as freeform prose headings. They are present
 the six standard categories, with the original text of every entry unchanged: the grouping is a
 reading aid applied afterwards, not a claim about how the change was described at the time.
 
-## [Unreleased]
+## [0.10.1] - 2026-11-22
+
+### Added
+
+- A hook written for `.git/hooks` runs at the matching point. This tool's own hook takes precedence;
+  when there is none, the git one runs and `hook list` says `from git` rather than `absent`. `pre-land`
+  has no git equivalent, so it never reaches into `.git/hooks`.
+- A git submodule survives an import and an export as a pointer. Import records a tree entry with mode
+  160000 as a subrepository pinned to the child commit, and export writes it back as a gitlink.
+
+### Changed
+
+- Thirteen benches that asserted behaviour but were in no gate step now are, and two step names that
+  had been duplicated for a while are distinct: `gate.py secrets` and `gate.py worktree` had been
+  running only the first of two steps each.
 
 ### Fixed
+
+- Import dropped every tree entry with mode 160000, so a repository with a git submodule lost the
+  submodule and nothing reported it. Including the entry without also skipping it when reading blobs
+  then failed the whole import with a message about an object that lives in another repository.
+- `three_way` failed with `FileNotFoundError` on a runner without svn, which reads as a defect in this
+  project. It now skips, naming what is missing.
+- `docs/storage.md` led with 14.9x for a tree of 1000 tiny files. The ratio does not follow from the
+  numbers printed beside it (856 against 103 is 8.3x), and the measurement counted the working tree on
+  both sides and compared this tool mid-WAL against a packed git. Measured properly: 5.6x.
+- `bench/object_format.py` asserted that a SHA-256 repository is refused, which was true before the
+  tool read and wrote them. It went red the day the code improved.
+- One em dash in `bench/backup_remote.py`, from a paste. The project's rule is a plain hyphen and was
+  unenforced; the gate now refuses an en or em dash and any CJK character in a tracked file.
 
 - `stash pop` put a hunk back at the top of the file when it was not the first hunk of the diff.
   `apply_hunk` used the hunk's ordinal as a line index, and the bench only ever took the first of two
