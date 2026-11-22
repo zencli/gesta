@@ -13,8 +13,9 @@ import sys
 import tempfile
 import time
 
-BIN = sys.argv[1] if len(sys.argv) > 1 else "/tmp/gdelta2"
-SRC = "/work/gesta"
+_PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BIN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_PROJECT, "target", "release", "gesta")
+SRC = os.environ.get("GESTA_SRC", _PROJECT)
 
 
 def sh(cmd, cwd=None):

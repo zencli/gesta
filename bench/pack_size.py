@@ -23,7 +23,13 @@ def sh(cmd, cwd=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--repo", default=os.environ.get("GESTA_REPO", "/work/gesta"))
+    ap.add_argument(
+        "--repo",
+        default=os.environ.get(
+            "GESTA_REPO",
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ),
+    )
     args = ap.parse_args()
 
     src = args.repo
