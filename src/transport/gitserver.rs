@@ -840,6 +840,9 @@ pub fn receive_pack_allowing(
         // After the import every pushed commit has a changeset, so the branch can point at it.
         let mut out = pkt_line(b"unpack ok\n");
         for c in &commands {
+            // Filled when a refusal could not be undone. A refusal is only honest if the branch really
+            // did not move, so a failed rollback has to reach the client rather than a log.
+            let mut rollback_errors: Vec<String> = Vec::new();
             let branch = c
                 .name
                 .strip_prefix("refs/heads/")
@@ -883,29 +886,50 @@ pub fn receive_pack_allowing(
                         .and_then(|(_, _, id)| id.clone());
                     match had {
                         Some(prev) => {
-                            let _ = crate::store::set_branch_head(&conn, &branch, &prev);
-                            let _ = crate::store::refresh_branch_tree(&conn, &branch);
+                            // A rollback that fails silently leaves the branch moved while the client is
+                            // told `! [remote rejected]`: the refusal is then a lie, and the store is in
+                            // a state nobody knows about. The failures are collected rather than
+                            // discarded so the report can say the branch may have moved.
+                            if let Err(e) = crate::store::set_branch_head(&conn, &branch, &prev) {
+                                rollback_errors.push(format!("restore head: {}", e));
+                            }
+                            if let Err(e) = crate::store::refresh_branch_tree(&conn, &branch) {
+                                rollback_errors.push(format!("restore tree: {}", e));
+                            }
                         }
                         // A push that created the branch: undo the creation.
                         None => {
-                            let _ = conn.execute(
+                            if let Err(e) = conn.execute(
                                 "DELETE FROM branches WHERE name = ?1",
                                 rusqlite::params![branch],
-                            );
-                            let _ = conn.execute(
+                            ) {
+                                rollback_errors.push(format!("drop branch: {}", e));
+                            }
+                            if let Err(e) = conn.execute(
                                 "DELETE FROM branch_tree WHERE branch = ?1",
                                 rusqlite::params![branch],
-                            );
+                            ) {
+                                rollback_errors.push(format!("drop tree: {}", e));
+                            }
                         }
                     }
+                    let reason = if rollback_errors.is_empty() {
+                        format!("{}", e)
+                    } else {
+                        format!(
+                            "{} (and the branch could not be put back: {})",
+                            e,
+                            rollback_errors.join("; ")
+                        )
+                    };
                     out.extend_from_slice(
-                        pkt_line(format!("ng {} {}\n", c.name, e).as_bytes()).as_slice(),
+                        pkt_line(format!("ng {} {}\n", c.name, reason).as_bytes()).as_slice(),
                     );
                     crate::support::audit::local::push_refused(
                         root,
                         &branch,
                         pusher,
-                        &e.to_string(),
+                        &reason,
                     );
                     continue;
                 }

@@ -991,9 +991,13 @@ pub fn merge_preview(
     } else if bases.len() == 1 {
         Some(bases[0].clone())
     } else {
-        // Multiple bases: recursively merge them to form a virtual base.
-        let virtual_base = recursive_merge(conn, &bases, &src_head, tgt_head.as_ref().unwrap())?;
-        Some(virtual_base)
+        // Multiple bases: recursively merge them to form a virtual base. The target head is needed for
+        // that, and a target with no commits cannot have produced multiple merge bases - but the
+        // unwrap that used to sit here turned "cannot happen" into a panic if it ever did.
+        match tgt_head.as_ref() {
+            Some(t) => Some(recursive_merge(conn, &bases, &src_head, t)?),
+            None => Some(bases[0].clone()),
+        }
     };
 
     let src_anc = crate::store::ancestors(conn, &src_head)?;
