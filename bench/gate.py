@@ -9,6 +9,7 @@ Run: python3 bench/gate.py
 Exit code is 0 only when every step passes.
 """
 
+import io
 import os
 import re
 import subprocess
@@ -4807,6 +4808,44 @@ def main():
             ok = r[0] == 0 and (summary is None or summary in r[1])
             record(f"{filename.replace('_', ' ').removesuffix('.py')} still holds", ok,
                    (r[1] or "")[-600:])
+
+    if want("typography"):
+        # A long dash is not a character this project uses. It arrives by pasting prose from a
+        # document that has them, and once one is in the tree every later paste copies the style.
+        # Checked over the files git tracks rather than the working tree, so an untracked scratch
+        # file does not fail the gate.
+        tracked = sh("git ls-files", cwd=ZF_DIR)[1].split("\n")
+        bad = []
+        for f in tracked:
+            if not f or f.endswith((".png", ".ico", ".gz", ".zip")):
+                continue
+            full = os.path.join(ZF_DIR, f)
+            try:
+                text = io.open(full, encoding="utf-8").read()
+            except (UnicodeDecodeError, OSError):
+                continue
+            hits = text.count("\u2013") + text.count("\u2014")
+            if hits:
+                bad.append(f"{f}({hits})")
+        record(
+            "no file uses an en or em dash",
+            not bad,
+            ", ".join(bad[:6]) if bad else f"{len(tracked)} files clean",
+        )
+
+        # The same for CJK: this repository is written in English, and a stray ideograph in a comment
+        # is either a paste accident or an unrendered placeholder.
+        cjk = []
+        for f in tracked:
+            if not f or f.endswith((".png", ".ico", ".gz", ".zip")):
+                continue
+            try:
+                text = io.open(os.path.join(ZF_DIR, f), encoding="utf-8").read()
+            except (UnicodeDecodeError, OSError):
+                continue
+            if any("\u4e00" <= c <= "\u9fff" or "\u3040" <= c <= "\u30ff" for c in text):
+                cjk.append(f)
+        record("no file carries CJK characters", not cjk, ", ".join(cjk[:6]) or "none")
 
     if want("bughunter"):
         if not os.path.isdir(BUGHUNTER):

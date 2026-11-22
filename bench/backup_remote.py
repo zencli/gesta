@@ -35,7 +35,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def _key(self):
-        # /bucket/key... — the client signs this path exactly.
+        # /bucket/key... : the client signs this path exactly.
         path = urllib.parse.unquote(self.path.split("?", 1)[0])
         parts = path.lstrip("/").split("/", 1)
         return parts[1] if len(parts) > 1 else ""
