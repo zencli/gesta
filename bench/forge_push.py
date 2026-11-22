@@ -19,7 +19,11 @@ import sys
 import tempfile
 import time
 
-ZF = os.environ.get("GESTA_BIN", "/work/gesta/target/release/gesta")
+# The binary is looked up relative to this file, not hardcoded: the gate runs this on a machine where
+# the checkout is somewhere else, and an absolute path from the author's container makes the step fail
+# with "binary not found" in a way that looks like a defect in the code rather than in the benchmark.
+_PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ZF = os.environ.get("GESTA_BIN", os.path.join(_PROJECT, "target", "release", "gesta"))
 
 
 def free_port() -> int:
