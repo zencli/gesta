@@ -2043,6 +2043,19 @@ def main():
             (r[1] or "")[-700:],
         )
 
+        # Import dropped a tree entry with mode 160000, so a repository with a git submodule lost the
+        # submodule and nothing reported it. The round trip has to keep the pointer, not the content:
+        # a gitlink names a commit in a child repository this store has no object for.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gitlink.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a git submodule survives an import and an export as a pointer",
+            r[0] == 0 and "5/5 gitlink checks pass" in r[1],
+            (r[1] or "")[-700:],
+        )
+
     if want("stash-path"):
         # `stash save` resets the whole tree, so a path filter that does not also narrow the reset
         # stashes one file and throws away every other edit - silently, with the work not in the

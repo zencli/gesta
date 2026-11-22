@@ -608,10 +608,13 @@ is a difference from git that a person will notice.
 
 ### 9. What git has that nothing here replaces
 
-- **Submodules** in git's sense. `submodule` reads and writes `.gitmodules` and records a pointer
-  rather than a copy, but the pointer lives in `.gitmodules`, not as a gitlink entry in the tree, so a
-  git client reading the repository does not see the submodule at all. A child of this kind works; a
-  child that is a git repository works through the git binary.
+- **Submodules** in git's sense, partly. `submodule` reads and writes `.gitmodules` and records a
+  pointer rather than a copy. Import now keeps a gitlink (mode 160000) as a subrepository record, and
+  export writes it back as a gitlink, so a repository with a submodule survives a round trip through
+  git. What is still missing: this store's own tree holds blobs by content hash, and a gitlink names a
+  commit in a child repository that has no object here, so `ls` on a commit does not list the path -
+  `sub list` does. A git client reading a repository this tool wrote sees the submodule; a reader of
+  this tool's own tree has to ask `sub`.
 - **A hunk picker.** `stash save --hunk <path>:<n>` takes one hunk by number, which covers the case
   that matters: two unrelated edits in one file. There is no interactive picker and no way to take a
   partial line; a hunk is the finest grain, and splitting an edit that crosses a line is a manual job.

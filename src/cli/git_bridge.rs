@@ -92,7 +92,7 @@ pub fn import(conn: &Connection, git_root: &Path, prefix: Option<&str>) -> ZResu
             Some(p) => {
                 let pc = gitobj::parse_commit(&repo.read_object(p)?.body)?;
                 let mut map = HashMap::new();
-                for (path, git_hash) in flatten(&repo, &pc.tree, "", prefix)? {
+                for (path, (git_hash, _mode)) in flatten(&repo, &pc.tree, "", prefix)? {
                     let body = repo.read_object(&git_hash)?;
                     let ours = store::hash_content(&String::from_utf8_lossy(&body.body));
                     map.insert(path, ours);
@@ -102,6 +102,13 @@ pub fn import(conn: &Connection, git_root: &Path, prefix: Option<&str>) -> ZResu
             None => HashMap::new(),
         };
         let here = flatten(&repo, &commit.tree, "", prefix)?;
+        // A gitlink has no blob, so it is collected apart from `here` and recorded as a
+        // subrepository pointing at the commit the child was at. Without this the path is not in the
+        // tree at all, and an export cannot put it back.
+        let links = gitlinks(&repo, &commit.tree, "")?;
+        for (path, child_commit) in &links {
+            crate::repo::subrepo::record_imported(conn, path, child_commit)?;
+        }
 
         let id = store::new_changeset_id(conn, &commit.message, &name)?;
         let parent_id = match commit.parents.first() {
@@ -138,7 +145,7 @@ pub fn import(conn: &Connection, git_root: &Path, prefix: Option<&str>) -> ZResu
         // The store's own name is written, and the git name is recovered on export by hashing
         // the body again.
         let mut old_now: HashMap<String, String> = HashMap::new();
-        for (path, git_hash) in &here {
+        for (path, (git_hash, _mode)) in &here {
             let body = repo.read_object(git_hash)?;
             // A pointer file names its oid, and the bytes it stands for are not in this pack. The
             // store already holds them when the import runs on the machine that made the export, so
@@ -255,13 +262,17 @@ fn walk_commits(repo: &Repo, head: &str) -> ZResult<Vec<String>> {
     Ok(seen)
 }
 
-/// Every path in a tree, with the blob it points at, depth first.
+/// Every path in a tree, with the blob it points at and the git mode it carried, depth first.
+///
+/// The mode is kept because a submodule is a tree entry with mode 160000 whose hash is a commit in
+/// another repository - there is no blob to read. Dropping it made the path vanish from the import,
+/// so a repository with a submodule lost the submodule and nothing reported it.
 fn flatten(
     repo: &Repo,
     tree: &str,
     prefix: &str,
     filter: Option<&str>,
-) -> ZResult<HashMap<String, String>> {
+) -> ZResult<HashMap<String, (String, String)>> {
     let mut out = HashMap::new();
     let obj = repo.read_object(tree)?;
     for e in gitobj::parse_tree_with(&obj.body, repo.hash)? {
@@ -273,13 +284,37 @@ fn flatten(
         if e.mode == "40000" {
             out.extend(flatten(repo, &e.hash, &path, filter)?);
         } else if e.mode == "160000" {
-            // A submodule pointer is a commit in another repository and has no content here.
+            // A submodule pointer names a commit in ANOTHER repository. Collecting it here made the
+            // import try to read that commit from this one, and fail with "object ... is in neither a
+            // loose object nor a packfile". `gitlinks` collects these instead.
             continue;
         } else if let Some(f) = filter {
             if !path.starts_with(f) {
                 continue;
             }
         } else {
+            out.insert(path, (e.hash, e.mode));
+        }
+    }
+    Ok(out)
+}
+
+/// The submodule pointers in a tree, as path to the commit the gitlink names.
+///
+/// Read separately because a gitlink has no blob: the hash is a commit in the child repository, and
+/// the only thing that can be stored on this side is the pointer itself.
+fn gitlinks(repo: &Repo, tree: &str, prefix: &str) -> ZResult<HashMap<String, String>> {
+    let mut out = HashMap::new();
+    let obj = repo.read_object(tree)?;
+    for e in gitobj::parse_tree_with(&obj.body, repo.hash)? {
+        let path = if prefix.is_empty() {
+            e.name.clone()
+        } else {
+            format!("{}/{}", prefix, e.name)
+        };
+        if e.mode == "40000" {
+            out.extend(gitlinks(repo, &e.hash, &path)?);
+        } else if e.mode == "160000" {
             out.insert(path, e.hash);
         }
     }
@@ -419,6 +454,29 @@ fn write_tree_for(conn: &Connection, repo: &Repo, changeset: &str) -> ZResult<St
             mode: "100644".into(),
             name,
             hash: blob,
+        });
+    }
+
+    // A subrepository is a tree entry with mode 160000 whose hash is a commit in the CHILD repository.
+    // Writing it back is what keeps a submodule a submodule across a round trip; leaving it out gave
+    // an export whose tree simply did not mention the path.
+    //
+    // The entry is written even when the child's commit is not in this repository. That is what git
+    // itself does: a gitlink names a commit the parent does not have, which is why `git submodule
+    // update` has to clone the child before the checkout can succeed. Writing it is the only way the
+    // pointer survives; refusing would mean an export that silently drops submodules.
+    for sub in crate::repo::subrepo::list(conn)? {
+        if sub.pinned.is_empty() {
+            continue;
+        }
+        let (dir, name) = match sub.path.rsplit_once('/') {
+            Some((d, n)) => (d.to_string(), n.to_string()),
+            None => (String::new(), sub.path.clone()),
+        };
+        by_dir.entry(dir).or_default().push(Entry {
+            mode: "160000".into(),
+            name,
+            hash: sub.pinned.clone(),
         });
     }
 

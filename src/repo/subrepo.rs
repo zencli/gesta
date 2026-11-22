@@ -44,6 +44,23 @@ fn init_schema(conn: &Connection) -> ZResult<()> {
     Ok(())
 }
 
+/// Record a subrepository found while importing a git repository.
+///
+/// The remote is unknown at that moment: a gitlink names a commit, not a URL, and the URL lives in
+/// `.gitmodules` which is imported as an ordinary file. Idempotent, because every imported commit
+/// that carries the same gitlink would otherwise fail as a duplicate.
+pub fn record_imported(conn: &Connection, path: &str, commit: &str) -> ZResult<()> {
+    init_schema(conn)?;
+    let p = clean_path(path)?;
+    conn.execute(
+        "INSERT INTO subrepos (path, remote, pinned, created_at)
+         VALUES (?1, '', ?2, ?3)
+         ON CONFLICT(path) DO UPDATE SET pinned = excluded.pinned",
+        params![p, commit, now()],
+    )?;
+    Ok(())
+}
+
 pub fn add(conn: &Connection, path: &str, remote: &str) -> ZResult<Sub> {
     init_schema(conn)?;
     let p = clean_path(path)?;
