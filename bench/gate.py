@@ -2018,6 +2018,19 @@ def main():
             (r[1] or "")[-700:],
         )
 
+        # revert of an add, a pick applied twice, and blame through two renames: each produces a
+        # plausible wrong answer rather than an error, so none of them is caught by a check that only
+        # asserts an exit code.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'history_edge.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "revert, cherry-pick and blame survive a file that came back and a path renamed twice",
+            r[0] == 0 and "6/6 history edge checks pass" in r[1],
+            (r[1] or "")[-700:],
+        )
+
     if want("stash-path"):
         # `stash save` resets the whole tree, so a path filter that does not also narrow the reset
         # stashes one file and throws away every other edit - silently, with the work not in the

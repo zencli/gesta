@@ -53,11 +53,26 @@ def many(root, use_git):
     for i in range(1000): open(f"f{i}.txt","w").write(f"content {i}\n")
     if use_git:
         subprocess.run(["git","add","-A"]); subprocess.run(["git","commit","-qm","x"])
+        # Packed, because comparing against loose objects measures git's unpacked form: 1000 loose
+        # objects cost about 5 MB and say nothing about what a repository costs to keep.
+        subprocess.run(["git","gc","-q","--aggressive","--prune=now"], capture_output=True)
+        store = ".git"
     else:
         o = subprocess.run([ZF,"changeset","create","x","--author","b"], capture_output=True, text=True).stdout
         cs = [w for w in o.split() if w.startswith("cs")][0]
         subprocess.run([ZF,"changeset","commit",cs], capture_output=True)
-    return sum(os.path.getsize(os.path.join(dp,f)) for dp,_,fs in os.walk(".") for f in fs)
+        # Vacuumed, so both sides are measured after their own compaction. The earlier version measured
+        # this tool mid-WAL and git packed, which compares two different states.
+        db = None
+        for dp, _, fs in os.walk(".gesta"):
+            for f in fs:
+                if f.endswith(".db"):
+                    db = os.path.join(dp, f)
+        if db:
+            subprocess.run(["sqlite3", db, "VACUUM;"], capture_output=True)
+        store = ".gesta"
+    # Only the store: the working files exist on both sides and counting them inflated both numbers.
+    return sum(os.path.getsize(os.path.join(dp,f)) for dp,_,fs in os.walk(store) for f in fs)
 
 z2 = many("/tmp/zf_many2", False); os.chdir("/")
 g2 = many("/tmp/git_many2", True); os.chdir("/")

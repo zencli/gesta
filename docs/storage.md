@@ -1,9 +1,15 @@
 # Why packing small objects did not help
 
-A tree of 1000 tiny files costs **14.9x** git in disk on the current build: 856 KB against 103 KB.
-That figure was 6.6x when this document was written, and the later section "Re-measured, and what 11%
-buys" explains where the difference came from and what would and would not close it. Every 6.6x below
-is the number as measured at the time of the experiment being described, not a current claim.
+A tree of 1000 tiny files costs **5.6x** git in disk on the current build: 980 KB against 173 KB, both
+measured after their own compaction - this tool vacuumed, git packed. The ratio was 14.9x in an earlier
+version of this paragraph, and that figure was wrong twice over: the arithmetic did not follow from the
+numbers printed beside it (856 against 103 is 8.3x), and the measurement counted the working tree on
+both sides and compared this tool mid-WAL against a packed git. The bench now counts the store only and
+compacts both first, which is what makes the two numbers comparable at all.
+
+Earlier figures of 6.6x and 7.7x below are the numbers as measured at the time of the experiment being
+described, not current claims, and they carry the same caveat: they were taken before blame became
+ranges and before the measurement was corrected.
 
 The obvious fix is to pack several small bodies into one row, so the row header and the index entry
 are paid once per thousand objects rather than once per object. That fix was built and measured, and
@@ -119,8 +125,8 @@ and no amount of making that row smaller competes with not writing it.
 
 ## Re-measured, and what 11% buys
 
-The 6.6x above was taken before blame became ranges. Measured again on the current build, 1000 files of
-seven bytes costs 856 KB, split across five tables that each hold one row per path:
+The 6.6x above was taken before blame became ranges. Measured again, 1000 files of seven bytes costs
+864 KB, split across five tables that each hold one row per path:
 
 | Table | Bytes | Share |
 |---|---:|---:|
@@ -137,7 +143,7 @@ not the object store at all; it is five rows of about a hundred bytes holding se
 ### The one change that measured worth doing
 
 A hash is stored as 64 characters of hex. As a 32-byte blob it is half the width, and the saving across
-`worktree_cache`, `branch_tree`, `file_versions` and `objects` measured at 94 KB on 856 KB: **11.0%**.
+`worktree_cache`, `branch_tree`, `file_versions` and `objects` measured at 94 KB on 864 KB: **10.9%**.
 
 That is worth doing and has not been done, because every one of those tables is read and written
 through a `String` and the change reaches roughly fifty call sites. An 11% saving does not justify
