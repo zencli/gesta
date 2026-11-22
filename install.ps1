@@ -10,7 +10,7 @@
 $ErrorActionPreference = 'Stop'
 
 $Repo    = 'zencli/gesta'
-$Version = if ($env:GESTA_VERSION) { $env:GESTA_VERSION } else { 'main' }
+$Version = if ($env:GESTA_VERSION) { $env:GESTA_VERSION } else { '' }
 $BinDir  = Join-Path $env:LOCALAPPDATA 'gesta\bin'
 $Target  = Join-Path $BinDir 'gesta.exe'
 
@@ -137,23 +137,49 @@ function Install-Binary($src) {
     Move-Item $tmp $Target -Force
 }
 
+function Get-LatestTag {
+    try {
+        $ProgressPreference = 'SilentlyContinue'
+        $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" `
+             -UseBasicParsing -TimeoutSec 30 -Headers @{ 'User-Agent' = 'gesta-installer' }
+        return $r.tag_name
+    } catch { return $null }
+}
+
 function Try-Prebuilt {
     if ($env:GESTA_FROM -eq 'source') { return $false }
+    if (-not $Version) { $script:Version = Get-LatestTag }
+    if (-not $Version) {
+        Write-Step 'No release found; building from source'
+        return $false
+    }
     $plat = Get-Platform
-    $url  = "https://github.com/$Repo/releases/download/$Version/gesta-$plat.exe"
-    $tmp  = Join-Path $env:TEMP "gesta-$PID.exe"
-    Write-Step "Trying a prebuilt binary for $plat"
+    # The release writes `gesta-<version>-<platform>.zip`, and the tag carries a leading v that the
+    # asset name does not: `v0.11.1` is the tag, `gesta-0.11.1-...` is the file. Both details are what
+    # make the URL resolve; without them every machine got a 404 that read as "no build for you".
+    $bare = $Version -replace '^v', ''
+    $name = "gesta-$bare-$plat.zip"
+    $url  = "https://github.com/$Repo/releases/download/$Version/$name"
+    $tmp  = Join-Path $env:TEMP "gesta-$PID.zip"
+    $dir  = Join-Path $env:TEMP "gesta-$PID-unpack"
+    Write-Step "Trying $name"
     try {
         $old = $ProgressPreference
         $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -TimeoutSec 120
+        Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -TimeoutSec 300
         $ProgressPreference = $old
-        Install-Binary $tmp
+        Expand-Archive -Path $tmp -DestinationPath $dir -Force
+        $exe = Get-ChildItem -Path $dir -Filter 'gesta.exe' -Recurse -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+        if (-not $exe) { throw 'the archive did not contain gesta.exe' }
+        Install-Binary $exe.FullName
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
         return $true
     } catch {
-        Write-Step "No prebuilt binary at $Version for $plat; building from source"
+        Write-Step "No prebuilt archive at $Version for $plat; building from source"
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
         return $false
     }
 }
@@ -162,7 +188,8 @@ function Build-From-Source {
     New-Item -ItemType Directory -Force -Path (Split-Path $BinDir) | Out-Null
     # `--branch main` fails against a remote with no such tracking ref, so the default branch is
     # requested by leaving the flag out and a version by --tag.
-    $ref = if ($Version -eq 'main') { @() } else { @('--tag', $Version) }
+    if (-not $Version) { $script:Version = Get-LatestTag }
+    $ref = if (-not $Version -or $Version -eq 'main') { @() } else { @('--tag', $Version) }
     # --locked first, so a build gets the dependency versions the project was tested with. The
     # output goes to a log as well as the screen, because the reason a build failed scrolls past
     # faster than anyone can read it.

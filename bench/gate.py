@@ -4809,6 +4809,22 @@ def main():
             record(f"{filename.replace('_', ' ').removesuffix('.py')} still holds", ok,
                    (r[1] or "")[-600:])
 
+    if want("installer"):
+        # The installer's prebuilt path was broken for every machine and every release, and it failed in
+        # the way that reads as a fact about the machine: it asked for a filename the release does not
+        # carry, got a 404, and said "no prebuilt binary for this machine". A user without Rust then
+        # concluded the tool did not support them. This checks the two ends of the name still agree.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'installer.py')}",
+            cwd=ZF_DIR,
+            timeout=200,
+        )
+        record(
+            "the installer asks for an asset the release actually carries",
+            r[0] == 0 and "installer checks pass" in r[1],
+            (r[1] or "")[-600:],
+        )
+
     if want("differential"):
         # The only check here that takes the answer away from this tool: a scenario is played with both
         # tools and both results are read back with the git binary. Every other benchmark asks whether

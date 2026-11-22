@@ -29,8 +29,10 @@ Windows, in PowerShell:
 irm https://raw.githubusercontent.com/zencli/gesta/main/install.ps1 | iex
 ```
 
-A machine with no Rust still installs, because a prebuilt binary is tried first. Without one,
-the installer builds from source and says how to get Rust in one command.
+A machine with no Rust still installs, because a prebuilt archive is tried first: the installer asks
+GitHub for the newest release tag, builds the asset name the release actually carries
+(`gesta-<version>-<platform>.tar.gz`), unpacks it and installs the binary. Without a release, it builds
+from source and says how to get Rust in one command.
 
 From source, without the installer:
 
