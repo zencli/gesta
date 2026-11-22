@@ -15,7 +15,8 @@ import subprocess
 import sys
 import tempfile
 
-GESTA = os.environ.get("GESTA", "/work/gesta/target/release/gesta")
+ZF = os.environ.get("ZF_BIN", os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "target", "release", "gesta"))
 results = []
 
 
@@ -27,7 +28,7 @@ def sh(cmd, cwd, check=False):
 
 
 def g(*args, cwd):
-    return sh(f"{GESTA} " + " ".join(args), cwd)
+    return sh(f"{ZF} " + " ".join(args), cwd)
 
 
 def record(name, ok, detail=""):
@@ -36,7 +37,7 @@ def record(name, ok, detail=""):
 
 
 def seed(d, name="a.txt", text="one\ntwo\n"):
-    sh(f"{GESTA} init", d, check=True)
+    sh(f"{ZF} init", d, check=True)
     with open(os.path.join(d, name), "w") as fh:
         fh.write(text)
     c = g("changeset", "create", "seed", "--json", cwd=d)

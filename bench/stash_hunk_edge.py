@@ -11,7 +11,8 @@ import subprocess
 import sys
 import tempfile
 
-GESTA = os.environ.get("GESTA", "/work/gesta/target/release/gesta")
+ZF = os.environ.get("ZF_BIN", os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "target", "release", "gesta"))
 results = []
 
 
@@ -23,7 +24,7 @@ def sh(cmd, cwd, check=False):
 
 
 def gesta(*args, cwd):
-    return sh(f"{GESTA} " + " ".join(args), cwd)
+    return sh(f"{ZF} " + " ".join(args), cwd)
 
 
 def record(name, ok, detail=""):
@@ -32,7 +33,7 @@ def record(name, ok, detail=""):
 
 
 def setup(d):
-    sh(f"{GESTA} init", d, check=True)
+    sh(f"{ZF} init", d, check=True)
     sh("printf 'a\\nb\\nc\\nd\\ne\\nf\\ng\\nh\\ni\\nj\\nk\\nl\\n' > f.txt", d, check=True)
     # create makes a PENDING changeset; commit puts it on the branch. Without the commit the branch
     # is empty and every file reads as new, which makes diff report the whole file as one hunk.
