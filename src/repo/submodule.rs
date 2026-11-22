@@ -371,3 +371,91 @@ pub fn child_head(path: &Path) -> ZResult<Option<String>> {
     }
     Ok(None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_well_formed_file_round_trips_through_parse_and_write() {
+        let text = "[submodule \"vendor/lib\"]\n\tpath = vendor/lib\n\turl = https://example.com/lib.git\n\tcommit = abc123\n";
+        let subs = parse_gitmodules(text).unwrap();
+        let s = subs.get("vendor/lib").expect("the path is the key");
+        assert_eq!(s.url, "https://example.com/lib.git");
+        assert_eq!(s.commit.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn the_key_is_the_path_when_one_is_given_not_the_section_name() {
+        // git allows the section name and the path to differ, and the path is what the tree uses.
+        // Keying by the section name put a submodule under a name no file lookup would ever use.
+        let text = "[submodule \"friendly-name\"]\n\tpath = vendor/actual\n\turl = x\n";
+        let subs = parse_gitmodules(text).unwrap();
+        assert!(
+            subs.contains_key("vendor/actual"),
+            "keys: {:?}",
+            subs.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn two_commit_lines_are_refused_rather_than_resolved_by_order() {
+        let text = "[submodule \"a\"]\n\tpath = a\n\tcommit = one\n\tcommit = two\n";
+        let err = parse_gitmodules(text).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("two `commit` lines"), "got: {msg}");
+        assert!(
+            msg.contains("one") && msg.contains("two"),
+            "both names must appear: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_submodule_without_a_pin_is_accepted() {
+        // A `.gitmodules` written by hand often has no commit line; refusing it would reject files
+        // git itself reads without complaint.
+        let text = "[submodule \"x\"]\n\tpath = x\n\turl = u\n";
+        let subs = parse_gitmodules(text).unwrap();
+        assert_eq!(subs["x"].commit, None);
+    }
+
+    #[test]
+    fn a_missing_pin_matches_anything_but_an_empty_one_does_not() {
+        // No pin means "whatever is checked out". An empty pin is a file that says a pin belongs
+        // there and left it blank, and treating that as a match hides a broken file.
+        assert!(matches_pin(None, "abcdef"));
+        assert!(!matches_pin(Some(""), "abcdef"));
+        assert!(
+            matches_pin(Some("abc"), "abcdef"),
+            "a short id has to match its own commit"
+        );
+        assert!(!matches_pin(Some("zzz"), "abcdef"));
+        // A pin longer than the commit cannot match, and must not panic on the slice.
+        assert!(!matches_pin(Some("abcdef0123"), "abcdef"));
+    }
+
+    #[test]
+    fn a_section_that_is_not_a_submodule_does_not_leak_into_the_next_one() {
+        // `[core]` appears in files people paste together. Without resetting on an unknown section,
+        // its keys land in whichever submodule came before it.
+        let text = "[submodule \"a\"]\n\tpath = a\n\turl = u1\n[core]\n\teditor = vim\n[submodule \"b\"]\n\tpath = b\n\turl = u2\n";
+        let subs = parse_gitmodules(text).unwrap();
+        assert_eq!(subs.len(), 2, "keys: {:?}", subs.keys().collect::<Vec<_>>());
+        assert_eq!(subs["b"].url, "u2");
+        assert!(
+            !subs["b"].url.contains("vim"),
+            "a core key leaked into a submodule"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_section_header_is_not_half_parsed() {
+        let text = "[submodule \"a\"\n\tpath = a\n\turl = u\n";
+        let subs = parse_gitmodules(text).unwrap();
+        assert!(
+            subs.is_empty(),
+            "a malformed header produced an entry: {:?}",
+            subs.keys().collect::<Vec<_>>()
+        );
+    }
+}

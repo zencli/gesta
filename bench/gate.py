@@ -2713,7 +2713,7 @@ def main():
             f"columns: {', '.join(cols)}",
         )
 
-    if want("secrets"):
+    if want("secrets-scan"):
         # A scanner that refuses the project's own test fixtures is a scanner nobody keeps, and one
         # that never refuses anything is decoration. Both halves are asserted, because each is easy
         # to get by breaking the other.
@@ -4748,6 +4748,41 @@ def main():
             print(f"         {s}: {m.group(0) if m else 'no result'}")
         record("every end to end suite passes", not failed, ", ".join(failed))
 
+    # Benches that assert behaviour but were never in the gate. Each one was already passing, which
+    # is why nobody added them, and that is exactly the state in which they rot: a bench that asserts
+    # an old defect goes red the day the defect is fixed, and if nothing runs it, nobody finds out.
+    # object_format spent weeks asserting that a SHA-256 repository is refused, long after it was read
+    # and written correctly.
+    #
+    # The bar for being here is that the file makes assertions, not that it prints numbers: a
+    # measurement cannot fail and cannot protect anything.
+    for step, filename, summary in [
+        ("parity", "parity.py", "checks pass"),
+        ("conflicts", "conflicts.py", "conflict checks pass"),
+        ("three-way", "three_way.py", None),
+        ("sparse", "sparse.py", "sparse checks pass"),
+        ("http-auth", "http_auth.py", "auth checks pass"),
+        ("http-remote", "http_remote.py", "HTTP checks pass"),
+        ("tls", "tls.py", "TLS checks pass"),
+        ("api-changeset", "api_changeset.py", "API checks pass"),
+        ("mcp-json", "mcp_json.py", "MCP and JSON checks pass"),
+        ("object-format", "object_format.py", "object-format checks pass"),
+        ("concurrency", "concurrency.py", "concurrency checks pass"),
+        ("history-size", "history_size.py", "delta checks pass"),
+        ("blame-cases", "blame_cases.py", "ALL BLAME CASES: PASS"),
+    ]:
+        if want(step):
+            r = sh(
+                f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)}",
+                cwd=ZF_DIR,
+                timeout=600,
+            )
+            # three_way compares timings, so it prints a ratio rather than a verdict: the check is
+            # that it ran to completion, not that this tool won every row.
+            ok = r[0] == 0 and (summary is None or summary in r[1])
+            record(f"{filename.replace('_', ' ').removesuffix('.py')} still holds", ok,
+                   (r[1] or "")[-600:])
+
     if want("bughunter"):
         if not os.path.isdir(BUGHUNTER):
             skip("bughunter scenarios", f"{BUGHUNTER} not present, so no scenario ran")
@@ -4850,7 +4885,7 @@ def main():
             (r[1] or "")[-500:],
         )
 
-    if want("worktree"):
+    if want("worktree-linked"):
         # Two branches cannot be checked out in one directory, and the alternative - clone again -
         # duplicates every object. A linked worktree is a second directory whose `.gesta` is a file
         # naming the first one's store, so a commit in either tree is visible in the other.

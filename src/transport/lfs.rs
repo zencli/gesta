@@ -304,4 +304,61 @@ mod tests {
             "no objects key"
         );
     }
+
+    #[test]
+    fn one_missing_object_does_not_hide_the_others() {
+        // The whole point of answering per object: a request naming a hundred oids, one of which is
+        // absent, must still answer for the other ninety-nine. A response that fails whole turns one
+        // missing file into a broken fetch.
+        let results = vec![
+            (
+                BatchObject {
+                    oid: "aa".into(),
+                    size: 1,
+                },
+                Found::Present { size: 1 },
+            ),
+            (
+                BatchObject {
+                    oid: "bb".into(),
+                    size: 2,
+                },
+                Found::Missing,
+            ),
+            (
+                BatchObject {
+                    oid: "cc".into(),
+                    size: 3,
+                },
+                Found::Present { size: 3 },
+            ),
+        ];
+        let out = batch_response(&results, |oid| format!("objects/{oid}"), "later");
+        assert!(out.contains("aa"), "the first object is answered");
+        assert!(
+            out.contains("cc"),
+            "the object after the missing one is answered"
+        );
+        assert!(
+            out.contains("\"error\""),
+            "the missing one carries an error rather than vanishing"
+        );
+        // The hrefs are relative: the handler has no host or scheme, and a client resolves against
+        // the endpoint it called.
+        assert!(
+            !out.contains("http://") && !out.contains("https://"),
+            "hrefs must not invent a host"
+        );
+    }
+
+    #[test]
+    fn an_object_whose_size_is_wrong_in_the_request_is_still_answered_by_oid() {
+        // A client may state a size it guessed. The answer is by oid; refusing the batch because the
+        // size does not match would fail a fetch over a number nobody needs to agree on.
+        let body = br#"{"operation":"download","transfers":["basic"],
+                        "objects":[{"oid":"aa","size":0},{"oid":"bb","size":999999999}]}"#;
+        let (op, objs) = parse_batch(body).expect("sizes are the client's business");
+        assert_eq!(op, "download");
+        assert_eq!(objs.len(), 2);
+    }
 }
