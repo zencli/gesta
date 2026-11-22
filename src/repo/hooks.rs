@@ -57,6 +57,39 @@ pub fn hooks_dir(root: &Path) -> PathBuf {
     repo_dir(root).join("hooks")
 }
 
+/// The git name for a hook point, where the two differ.
+///
+/// Three points share git's name (`pre-commit`, `post-commit`, `pre-push`), one does not exist in git
+/// (`pre-land`, which is the review step), and `pre-changeset` is closest to `pre-commit` but fires
+/// before a snapshot rather than before it lands. Returning None means the point has no git
+/// equivalent and only this tool's own hook directory is consulted.
+pub fn git_name(name: &str) -> Option<&'static str> {
+    match name {
+        "pre-commit" => Some("pre-commit"),
+        "post-commit" => Some("post-commit"),
+        "pre-push" => Some("pre-push"),
+        "pre-changeset" => Some("pre-commit"),
+        "post-checkout" => Some("post-checkout"),
+        _ => None,
+    }
+}
+
+/// A hook program in `.git/hooks`, when the repository sits beside a git checkout.
+///
+/// Not a compatibility layer with arguments rewritten: a git hook expects the same three arguments
+/// git passes (a ref update, a list of paths), and this tool has nothing like them. What it does honour
+/// is that a hook written for git and marked executable runs when the matching point fires, because a
+/// guard an author already wrote should not silently never run.
+pub fn git_hook(root: &Path, name: &str) -> Option<PathBuf> {
+    let git = git_name(name)?;
+    [
+        root.join(".git").join("hooks").join(git),
+        root.join(".git").join(git),
+    ]
+    .into_iter()
+    .find(|c| c.is_file())
+}
+
 pub fn path_of(root: &Path, name: &str) -> PathBuf {
     hooks_dir(root).join(name)
 }
@@ -96,11 +129,22 @@ pub struct HookState {
     pub installed: bool,
     pub recorded: Option<String>,
     pub current: Option<String>,
+    /// The program comes from `.git/hooks` rather than this tool's own directory.
+    ///
+    /// Reported because otherwise `hook list` shows a point as not installed while a guard for it
+    /// runs on every commit. "Not installed" and "installed somewhere else" look identical from the
+    /// outside and mean opposite things.
+    pub from_git: bool,
 }
 
 impl HookState {
     /// Whether the file changed after it was installed.
     pub fn changed(&self) -> bool {
+        // A git hook has no record, because this tool did not install it. Reporting it as changed
+        // would make every git hook look tampered with.
+        if self.from_git {
+            return false;
+        }
         match (&self.recorded, &self.current) {
             (Some(r), Some(c)) => r != c,
             // Installed without a record, which an older repository can be: not "changed", but
@@ -124,26 +168,23 @@ pub fn status(root: &Path) -> ZResult<Vec<HookState>> {
     let mut out = Vec::new();
     for name in HOOKS {
         let path = path_of(root, name);
-        let installed = path.is_file();
-        let current = if installed {
-            std::fs::read(&path)
-                .ok()
-                .map(|b| crate::store::hash_bytes(&b))
-        } else {
-            None
-        };
+        let own = path.is_file();
+        let git = if own { None } else { git_hook(root, name) };
+        let installed = own || git.is_some();
+        let source = if own { Some(path) } else { git };
+        let current = source
+            .as_ref()
+            .and_then(|p| std::fs::read(p).ok())
+            .map(|b| crate::store::hash_bytes(&b));
         out.push(HookState {
             name: name.to_string(),
             installed,
             recorded: recorded.get(*name).cloned(),
             current,
+            from_git: !own && installed,
         });
     }
     Ok(out)
-}
-
-pub fn is_installed(root: &Path, name: &str) -> bool {
-    path_of(root, name).is_file()
 }
 
 /// Run a hook if it exists.
@@ -154,9 +195,17 @@ pub fn is_installed(root: &Path, name: &str) -> bool {
 /// already looking at.
 pub fn run(root: &Path, name: &str, args: &[&str]) -> ZResult<()> {
     let path = path_of(root, name);
-    if !path.is_file() {
-        return Ok(());
-    }
+    // A hook installed here takes precedence. When there is none, a git hook at the matching point
+    // runs: an author who already wrote that guard should not find it silently ignored just because
+    // this tool keeps its hooks in a different directory.
+    let (path, from_git) = if path.is_file() {
+        (path, false)
+    } else {
+        match git_hook(root, name) {
+            Some(p) => (p, true),
+            None => return Ok(()),
+        }
+    };
 
     // Refuse to run a hook that no longer matches what was installed.
     //
@@ -164,13 +213,18 @@ pub fn run(root: &Path, name: &str, args: &[&str]) -> ZResult<()> {
     // protects nothing: the interesting case is the commit that is about to run it. A hook with
     // no recorded hash is allowed, because a repository can predate the record and refusing would
     // break it; the difference is reported by `hook status`, which is where somebody looks.
-    if let Some(state) = status(root)?.into_iter().find(|s| s.name == name) {
-        if state.changed() {
-            return Err(bad(format!(
-                "hook {} changed after it was installed; run `gesta hook status` to see both \
-                 hashes, then reinstall it to accept the new body",
-                name
-            )));
+    //
+    // A git hook has no recorded hash, because this tool did not install it. Its integrity is the
+    // git checkout's business, and hashing it here would refuse every git hook on first sight.
+    if !from_git {
+        if let Some(state) = status(root)?.into_iter().find(|s| s.name == name) {
+            if state.changed() {
+                return Err(bad(format!(
+                    "hook {} changed after it was installed; run `gesta hook status` to see both \
+                     hashes, then reinstall it to accept the new body",
+                    name
+                )));
+            }
         }
     }
 
@@ -232,10 +286,20 @@ pub fn install(root: &Path, name: &str, body: &str) -> ZResult<PathBuf> {
     Ok(path)
 }
 
-pub fn list(root: &Path) -> Vec<(String, bool)> {
+/// The hook points and where each program comes from, for a reader who needs to know what runs.
+pub fn sources(root: &Path) -> Vec<(String, Option<&'static str>)> {
     HOOKS
         .iter()
-        .map(|h| (h.to_string(), is_installed(root, h)))
+        .map(|h| {
+            let source = if path_of(root, h).is_file() {
+                Some("installed")
+            } else if git_hook(root, h).is_some() {
+                Some("git")
+            } else {
+                None
+            };
+            (h.to_string(), source)
+        })
         .collect()
 }
 
@@ -317,12 +381,12 @@ mod tests {
     fn installed_and_removed_are_visible_in_the_list() {
         let d = tmp("list");
         install(&d, "post-commit", "#!/bin/sh\n").unwrap();
-        let found = list(&d);
+        let found = sources(&d);
         assert_eq!(
             found
                 .iter()
                 .find(|(n, _)| n == "post-commit")
-                .map(|(_, i)| *i),
+                .map(|(_, s)| s.is_some()),
             Some(true)
         );
         assert!(remove(&d, "post-commit").unwrap());

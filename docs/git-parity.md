@@ -608,10 +608,6 @@ is a difference from git that a person will notice.
 
 ### 9. What git has that nothing here replaces
 
-- **`.git/hooks` compatibility.** Six hook points run here (`pre-changeset`, `pre-commit`,
-  `post-commit`, `pre-land`, `post-checkout`, `pre-push`), and each one is a program in
-  `.gesta/hooks/`. A hook written for `.git/hooks` is not picked up, and the argument a git hook
-  receives is not the same shape.
 - **Submodules** in git's sense. `submodule` reads and writes `.gitmodules` and records a pointer
   rather than a copy, but the pointer lives in `.gitmodules`, not as a gitlink entry in the tree, so a
   git client reading the repository does not see the submodule at all. A child of this kind works; a
@@ -627,7 +623,10 @@ reader can tell they were considered: `bisect run` drives a whole search from on
 else bad, 125 skip), `worktree` gives a second working tree over one store, `notes` attaches an
 annotation to a changeset without changing it, `stash save --path` sets aside named files without
 disturbing the rest of the tree, and `stash save --hunk` goes one level finer. What is left of that last
-one is the picker itself, which is listed above.
+one is the picker itself, which is listed above. A hook written for `.git/hooks` now runs: this tool's
+own hook at a point takes precedence, and when there is none the git one at the matching point runs,
+with `hook list` naming which is which. The argument shape is still git's, not this tool's, so a git
+hook that reads `$1` gets a ref name it may not recognise.
 
 ## What "100% replacement" would mean, honestly
 

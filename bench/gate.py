@@ -2031,6 +2031,18 @@ def main():
             (r[1] or "")[-700:],
         )
 
+        # A guard an author already wrote in .git/hooks has to run, or a commit goes through
+        # unguarded while `hook list` says the point is absent.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'git_hooks.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a hook written for .git/hooks runs at the matching point",
+            r[0] == 0 and "6/6 git-hook checks pass" in r[1],
+            (r[1] or "")[-700:],
+        )
+
     if want("stash-path"):
         # `stash save` resets the whole tree, so a path filter that does not also narrow the reset
         # stashes one file and throws away every other edit - silently, with the work not in the

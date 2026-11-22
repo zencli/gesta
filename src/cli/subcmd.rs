@@ -196,12 +196,15 @@ pub fn cmd_hook(sub: crate::HookCmd, json: bool) -> ZResult<()> {
     match sub {
         HookCmd::List => {
             let (root, _conn) = open_repo()?;
-            for (name, installed) in crate::repo::hooks::list(&root) {
-                println!(
-                    "{}  {}",
-                    if installed { "installed" } else { "absent   " },
-                    name
-                );
+            for (name, source) in crate::repo::hooks::sources(&root) {
+                let label = match source {
+                    Some("installed") => "installed",
+                    // Named rather than merged with "installed": a guard in .git/hooks was put there
+                    // by git tooling and is not managed by `gesta hook remove`.
+                    Some("git") => "from git ",
+                    _ => "absent   ",
+                };
+                println!("{label}  {name}");
             }
             Ok(())
         }
@@ -266,6 +269,9 @@ pub fn cmd_hook_status(json: bool) -> ZResult<()> {
                         None => crate::support::json::Json::Null,
                     },
                 ),
+                // A point whose program lives in `.git/hooks`. Reported separately so a caller does
+                // not mistake it for one this tool installed and would remove.
+                ("from_git", crate::support::json::Json::Bool(s.from_git)),
             ]));
         }
         emit_object(vec![
