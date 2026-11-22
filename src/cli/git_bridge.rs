@@ -334,9 +334,17 @@ pub fn export(conn: &Connection, git_root: &Path, branch: Option<&str>) -> ZResu
     let root = git_root.to_path_buf();
     std::fs::create_dir_all(root.join(".git").join("objects"))?;
     std::fs::create_dir_all(root.join(".git").join("refs").join("heads"))?;
-    std::fs::write(root.join(".git").join("HEAD"), "ref: refs/heads/main\n")?;
     let repo = Repo::open(&root)?;
-    export_into(conn, &repo, branch)
+    let out = export_into(conn, &repo, branch)?;
+    // HEAD is written after the refs, from the branch that was actually written, and in the git
+    // directory the repository really has. Writing it before the export meant a repository whose
+    // default branch was `trunk` got `refs/heads/main` and cloned empty, and writing it to
+    // `<root>/.git` meant a bare export never got one at all.
+    if let Some(first) = out.branches.first() {
+        let head_path = repo.git_dir.join("HEAD");
+        std::fs::write(&head_path, format!("ref: refs/heads/{}\n", first))?;
+    }
+    Ok(out)
 }
 
 /// The body of `export`, for a repository whose git directory is already decided.
@@ -402,6 +410,19 @@ fn export_into(conn: &Connection, repo: &Repo, branch: Option<&str>) -> ZResult<
         }
         if let Some(node) = mapped.get(&head) {
             repo.write_ref(&format!("refs/heads/{}", b), node)?;
+            // Also point HEAD at the first branch written, when it points at nothing that exists.
+            // `git init --bare` leaves HEAD on `refs/heads/master`; exporting `main` into that
+            // repository leaves a valid ref that no clone follows, so a clone reports an empty
+            // repository while every object is present. The ref is right and the checkout is empty,
+            // which is the hardest kind of wrong to notice.
+            if out.branches.is_empty() {
+                let head_path = repo.git_dir.join("HEAD");
+                let current = std::fs::read_to_string(&head_path).unwrap_or_default();
+                let wanted = format!("refs/heads/{}", b);
+                if !current.trim_end().ends_with(&wanted) {
+                    std::fs::write(&head_path, format!("ref: {}\n", wanted))?;
+                }
+            }
             out.branches.push(b.clone());
         }
     }

@@ -4809,6 +4809,22 @@ def main():
             record(f"{filename.replace('_', ' ').removesuffix('.py')} still holds", ok,
                    (r[1] or "")[-600:])
 
+    if want("differential"):
+        # The only check here that takes the answer away from this tool: a scenario is played with both
+        # tools and both results are read back with the git binary. Every other benchmark asks whether
+        # gesta did what gesta meant to do, which can pass while the answer is wrong, because the intent
+        # and the check are written by the same person.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'differential.py')}",
+            cwd=ZF_DIR,
+            timeout=400,
+        )
+        record(
+            "gesta and git given the same work produce trees git reads as identical",
+            r[0] == 0 and "differential checks pass" in r[1],
+            (r[1] or "")[-600:],
+        )
+
     if want("forge-push"):
         # The forge client is the one thing here that replaced a call to the git binary. The step runs
         # the whole cycle - store, serve, push with the forge client, clone with real git - because a
