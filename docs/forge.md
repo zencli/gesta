@@ -55,11 +55,12 @@ $ git log --oneline
 f01d692 seed
 ```
 
-A real git client cloned what the forge client pushed, and got the file contents back. Eight unit tests
+A real git client cloned what the forge client pushed, and got the file contents back. Nine unit tests
 cover the parts that decide right from wrong: an advertisement is parsed into refs and capabilities, a
 ref the remote does not have answers `None` so the command carries zeroes, an HTML login page is
 reported rather than read as a repository with no branches, the capabilities land on the first command
-only, a rejected ref keeps its reason, and a silent remote is a failure rather than a success.
+only, a rejected ref keeps its reason, a failed unpack is not overturned by an `ok` line that follows
+it, and a silent remote is a failure rather than a success.
 
 Not verified: a push to github.com. That needs a token and a network, and this was developed without
 either. The request shape is the one git uses and the pieces that differ per forge (the URL path, the

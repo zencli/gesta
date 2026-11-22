@@ -24,11 +24,11 @@ reading aid applied afterwards, not a claim about how the change was described a
   the `report-status` that comes back. Pushing to a forge used to export a bare repository to a
   temporary directory and run `git push` in it, which cost a process and a full copy of the tree on
   every push.
-- Eight unit tests for the parts that decide right from wrong: an advertisement parses into refs and
+- Nine unit tests for the parts that decide right from wrong: an advertisement parses into refs and
   capabilities, a ref the remote does not hold answers `None` so the command carries zeroes, an HTML
   login page is reported instead of read as a repository with no branches, the capabilities land on the
-  first command only, a rejected ref keeps the remote's own reason, and a silent remote is a failure
-  rather than a success.
+  first command only, a rejected ref keeps the remote's own reason, a failed unpack is not overturned
+  by an `ok` line that follows it, and a silent remote is a failure rather than a success.
 - `bench/forge_push.py`, and a gate step that runs it: a store is served over HTTP, pushed to with the
   forge client, then cloned with real git and its file contents compared. A push that moves a ref
   without delivering the objects looks successful from every angle except reading the file back.

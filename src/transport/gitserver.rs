@@ -925,12 +925,7 @@ pub fn receive_pack_allowing(
                     out.extend_from_slice(
                         pkt_line(format!("ng {} {}\n", c.name, reason).as_bytes()).as_slice(),
                     );
-                    crate::support::audit::local::push_refused(
-                        root,
-                        &branch,
-                        pusher,
-                        &reason,
-                    );
+                    crate::support::audit::local::push_refused(root, &branch, pusher, &reason);
                     continue;
                 }
             }
