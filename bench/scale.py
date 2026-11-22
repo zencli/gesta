@@ -211,10 +211,19 @@ def main():
             )
             print("The claim is about the write, and it holds: the cost follows the change.")
         else:
+            # This used to print the failure and return 0, which made the printed claim and the exit
+            # code disagree. A caller reading the exit code was told the run passed while the line
+            # above said the flat-cost claim did not hold.
             print(
                 f"Writing one file commit costs {write_grown:.2f}x more in a repository "
                 f"{factor:.0f}x larger, so the flat cost claim does not hold at this size."
             )
+            print()
+            print(
+                f"Reading the tree to find the change costs {scan_grown:.2f}x more, which is the "
+                "scan and not the write."
+            )
+            return 1
         print()
         # The scan is allowed to grow. Saying how much is the honest part: it is the price of
         # answering "what changed", and git pays the same shape of cost in `git status`.

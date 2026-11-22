@@ -14,6 +14,24 @@ Sections before 0.10.0 were written as freeform prose headings. They are present
 the six standard categories, with the original text of every entry unchanged: the grouping is a
 reading aid applied afterwards, not a claim about how the change was described at the time.
 
+## [0.11.2] - 2026-11-22
+
+### Fixed
+
+- The installer's prebuilt path could not succeed on any machine: `install.sh` asked for
+  `gesta-<platform>` where the release carries `gesta-<version>-<platform>.tar.gz`, got a 404, and fell
+  through to building from source. On a machine without Rust that read as "this tool does not support
+  my machine", which was wrong. Five defects, all in `try_prebuilt`: `VERSION` defaulted to `main`, a
+  branch with no release assets; the asset name carried no version; the archive extension was set
+  inside `platform()`, which runs in a command substitution, so the caller saw an unset variable; the
+  downloaded archive was installed as if it were a binary; and the tag's leading `v` was left on the
+  filename, where the release does not have it. `install.ps1` carried the same defect independently,
+  asking for `gesta-<platform>.exe` and never unpacking the zip. Both now ask the API for the newest
+  tag, build the name the release actually writes, unpack it, and install the binary found inside.
+- `bench/installer.py` and a gate step that runs it: six static checks on both scripts, plus a live
+  check that the published release carries the name the installer builds. It skips rather than fails
+  when there is no network, because a runner without egress should not report a defect.
+
 ## [0.11.1] - 2026-11-22
 
 ### Fixed
