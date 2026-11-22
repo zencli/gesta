@@ -14,6 +14,25 @@ Sections before 0.10.0 were written as freeform prose headings. They are present
 the six standard categories, with the original text of every entry unchanged: the grouping is a
 reading aid applied afterwards, not a claim about how the change was described at the time.
 
+## [Unreleased]
+
+### Fixed
+
+- `stash pop` put a hunk back at the top of the file when it was not the first hunk of the diff.
+  `apply_hunk` used the hunk's ordinal as a line index, and the bench only ever took the first of two
+  hunks near the end of a file, which is the one cell of the grid where an ordinal and a line number
+  agree. A hunk in the middle of a file now goes back where it came from, and the span it replaces is
+  cleared rather than inserted beside, which was growing the file by a line on every pop.
+- `worktree remove` deleted a directory holding uncommitted work and exited 0. That work exists only
+  on disk, so removing the directory loses the only copy with nothing to notice it. It is now refused
+  unless `--force` is given, and the refusal names the count and the flag.
+- The registry entry was deleted before the refusal could happen, so a refused removal left a
+  directory that no later command could remove: `--force` answered "no worktree at ..." while the tree
+  was still there. The lookup no longer unregisters.
+- A test fixture keyed its directory by process id, so every test in `worktree` shared one directory
+  and `remove_dir_all` deleted a directory another test was using. The suite failed about one run in
+  three on a test unrelated to what was being changed.
+
 ## [0.10.0] - 2026-11-22
 
 ### Added

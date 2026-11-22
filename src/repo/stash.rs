@@ -97,7 +97,8 @@ pub fn save_hunks(
         path: String,
         kept: String,
         original: String,
-        taken: Vec<(usize, String)>,
+        /// (hunk number, line index the hunk starts at in the file as it is now, the hunk's text)
+        taken: Vec<(usize, usize, String)>,
     }
     let mut plans: Vec<Plan> = Vec::new();
     for (path, nums) in &by_path {
@@ -141,7 +142,10 @@ pub fn save_hunks(
                 .copied()
                 .collect::<Vec<_>>()
                 .join("\n");
-            taken.push((*n, body));
+            // Store where the hunk starts, not just its number. The number is an ordinal among the
+            // hunks of this diff; putting the text back at line `number` was wrong for every hunk
+            // that was not the first, and silently inserted the lines at the top of the file.
+            taken.push((*n, h.new_start, body));
         }
 
         // The file that stays behind: the original with the taken hunks reverted to their old text.
@@ -177,12 +181,13 @@ pub fn save_hunks(
 
     let mut saved = 0usize;
     for plan in &plans {
-        for (n, body) in &plan.taken {
-            // The stash records the hunk's own text, not the file. `apply` writes it back at the
-            // position named here, which is why the number is stored beside the content.
+        for (n, at, body) in &plan.taken {
+            // The name carries `path#number#line`; the number is what the user asked for and the line
+            // is where the text goes back. Keeping them apart is what stops a hunk from landing at
+            // the top of the file when it belongs in the middle.
             tx.execute(
                 "INSERT INTO stash_files(stash_id, path, hash) VALUES(?1, ?2, ?3)",
-                params![stash_id, format!("{}#{}", plan.path, n), body],
+                params![stash_id, format!("{}#{}#{}", plan.path, n, at), body],
             )?;
             saved += 1;
         }
@@ -201,9 +206,9 @@ pub fn save_hunks(
 
 /// Save part of the working tree aside.
 ///
-/// This is the non-interactive form of `git stash --patch`: the caller names the paths it wants set
-/// aside and everything else stays where it is. An interactive picker is the wrong shape for an agent,
-/// which knows which files it is working on and cannot answer a prompt.
+/// The caller names the paths it wants set aside and everything else stays where it is. An interactive
+/// picker is the wrong shape for an agent, which knows which files it is working on and cannot answer
+/// a prompt. For part of one file, `save_hunks` goes one level finer.
 ///
 /// An empty `only` means the whole working set, which is what `save` has always meant, so the two
 /// entries share one implementation rather than one of them drifting.
@@ -412,14 +417,20 @@ pub fn pop(
 
     let mut written = 0usize;
     for (rel, hash) in &stash.files {
-        // A hunk entry is `path#number` and its "hash" is the hunk's own text, not an object id.
-        // Writing it to `root.join(rel)` would create a file literally named `f.txt#1` and leave the
-        // real file untouched, which is what made pop look like it did nothing.
-        if let Some((path, number)) = rel.rsplit_once('#') {
-            if let (Some(body), Ok(n)) = (hash.as_ref(), number.parse::<usize>()) {
-                apply_hunk(root, path, n, body)?;
-                written += 1;
-                continue;
+        // A hunk entry's "hash" is the hunk's own text, not an object id. Writing it to
+        // `root.join(rel)` created a file literally named `f.txt#1` and left the real file untouched,
+        // which is what made pop look like it did nothing.
+        // A hunk entry is stored as `path#number#line`. The line is where the text goes back; the
+        // number is what the caller named. Older entries carry only `path#number`, and for those the
+        // number was used as the position, which is wrong for any hunk but the first - falling back
+        // to it would restore the bug rather than the text, so the line is taken from the entry.
+        if let Some((rest, line)) = rel.rsplit_once('#') {
+            if let Some((path, _num)) = rest.rsplit_once('#') {
+                if let (Some(body), Ok(at)) = (hash.as_ref(), line.parse::<usize>()) {
+                    apply_hunk(root, path, at, body)?;
+                    written += 1;
+                    continue;
+                }
             }
         }
         let target = root.join(rel);
@@ -453,7 +464,7 @@ pub fn pop(
 /// found by looking for where the surrounding context still matches; a file that no longer holds the
 /// context is refused rather than appended to, because a hunk in the wrong place is worse than a
 /// hunk not applied.
-fn apply_hunk(root: &Path, path: &str, number: usize, body: &str) -> ZResult<()> {
+fn apply_hunk(root: &Path, path: &str, at: usize, body: &str) -> ZResult<()> {
     let full = root.join(path);
     let current = match read_file(&full) {
         ReadOutcome::Text(c) => c,
@@ -462,25 +473,29 @@ fn apply_hunk(root: &Path, path: &str, number: usize, body: &str) -> ZResult<()>
             return Err(bad(format!("cannot apply the hunk to {path}: {e}")))
         }
     };
-    // The stash holds the hunk's lines; the file holds what came before it. The lines before the
-    // hunk in the stashed version are gone from the file (that is what taking the hunk did), so the
-    // join is "put these lines back at the end", which is where a hunk at the end of a file belongs
-    // and is wrong for one in the middle. Detect the case rather than guess silently.
     let body_lines: Vec<&str> = body.lines().collect();
     if body_lines.is_empty() {
         return Ok(());
     }
     let mut updated: Vec<String> = current.lines().map(|l| l.to_string()).collect();
-    // Find the first line of the hunk's new content that is NOT already in the file; the hunk starts
-    // there. If every line is already present the hunk was applied twice, which is not an error.
+    // Find the first line of the hunk's new content that is NOT already in the file; if every line is
+    // already present the hunk was applied twice, which is not an error.
     let already = body_lines.iter().all(|l| updated.iter().any(|u| u == l));
     if already {
         return Ok(());
     }
-    // Insert at the position the hunk's number implies, clamped to the file's length. The number is
-    // the ordinal within the diff, and the diff was taken against this file, so an ordinal that is
-    // in range is the right one.
-    let at = number.saturating_sub(1).min(updated.len());
+    // `at` is the line index the hunk started at when it was taken, recorded then because that is the
+    // only moment the number is known. It used to be the hunk's ordinal, which put every hunk that was
+    // not the first at the top of the file - a wrong edit that reported success.
+    //
+    // Taking a hunk reverted its lines to the OLD text, so the file at `at` holds what used to be
+    // there. Restoring means replacing that old span, not inserting beside it: inserting left both
+    // the old line and the new one, which is a file that grew by a line every pop.
+    let at = at.min(updated.len());
+    let span = body_lines.len().min(updated.len() - at);
+    if span > 0 && !body_lines.contains(&updated[at].as_str()) {
+        updated.drain(at..at + span);
+    }
     for (i, line) in body_lines.iter().enumerate() {
         updated.insert(at + i, line.to_string());
     }

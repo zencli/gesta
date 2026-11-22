@@ -253,7 +253,12 @@ mod tests {
     use super::*;
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("gesta-hooks-{}-{}", tag, std::process::id()));
+        // A counter as well as the tag: two test binaries can run at once, and a directory left
+        // behind by a previous run with the same pid is the one the next run deletes mid-test.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d =
+            std::env::temp_dir().join(format!("gesta-hooks-{}-{}-{}", tag, std::process::id(), n));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join(crate::ZF_DIR)).unwrap();
         d

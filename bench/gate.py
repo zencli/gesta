@@ -1979,6 +1979,19 @@ def main():
             (r[1] or "")[-600:],
         )
 
+        # The bench above takes the first hunk of two near the end of the file, which is the easiest
+        # cell of the grid. apply_hunk used the hunk's ORDINAL as a line index, so a hunk that was not
+        # the first went back at the top of the file and reported success.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stash_hunk_edge.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a hunk in the middle of a file goes back where it came from",
+            r[0] == 0 and "13/13 stash-hunk edge checks pass" in r[1],
+            (r[1] or "")[-700:],
+        )
+
     if want("submodule-own"):
         # A submodule pointed at another repository of THIS kind used to fail: init shelled out to
         # `git clone`, and a child with no `.git` is `fatal: repository does not exist`. The negative
@@ -1991,6 +2004,18 @@ def main():
             "a submodule of a repository of this kind clones, pins, and updates",
             r[0] == 0 and "8/8 submodule checks pass" in r[1],
             (r[1] or "")[-600:],
+        )
+
+        # worktree `remove` deleted a directory holding uncommitted work and exited 0, which loses the
+        # only copy. The bench that existed removed a clean tree, so nothing noticed.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worktree_edge.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "removing a worktree refuses to discard uncommitted work silently",
+            r[0] == 0 and "7/7 worktree and submodule edge checks pass" in r[1],
+            (r[1] or "")[-700:],
         )
 
     if want("stash-path"):
@@ -2548,9 +2573,12 @@ def main():
             else "header does not name both",
         )
 
-        # Only one section may claim to be current, and no section may be empty.
+        # Only one section may claim to be current, and no section may be empty. An `Unreleased`
+        # section is allowed to sit above the newest version: that is what the convention is for.
         sections = _re.findall(r"^## (.+)$", body, _re.M)
-        versions = [s for s in sections if _re.match(r"\[?\d+\.\d+\.\d+\]?", s)]
+        versions = [
+            s for s in sections if _re.match(r"\[?\d+\.\d+\.\d+\]?", s)
+        ]
         record(
             "every version section carries a date",
             all(_re.search(r"\d{4}-\d{2}-\d{2}", s) for s in versions) if versions else False,
@@ -2560,6 +2588,18 @@ def main():
             "the newest version section is the current one",
             bool(versions) and versions[0].lstrip("[").startswith(cargo),
             f"newest {versions[0] if versions else 'none'} against {cargo}",
+        )
+        # An Unreleased section may sit above it, holding work that has landed but not been versioned.
+        first_version = next(
+            (i for i, s in enumerate(sections) if _re.match(r"\[?\d+\.\d+\.\d+\]?", s)), None
+        )
+        heads_above = sections[:first_version] if first_version is not None else []
+        record(
+            "nothing but Unreleased sits above the current version",
+            all(
+                s.strip().lstrip("[").lower().startswith("unreleased") for s in heads_above
+            ),
+            f"above: {heads_above}" if heads_above else "nothing above",
         )
         shape = _re.compile(r"^\[\d+\.\d+\.\d+\] - \d{4}-\d{2}-\d{2}$")
         record(

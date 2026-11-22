@@ -48,6 +48,16 @@ fn register(conn: &Connection, path: &Path, branch: &str) -> ZResult<()> {
 }
 
 fn unregister(conn: &Connection, path: &Path) -> ZResult<Option<String>> {
+    let branch = registered_branch(conn, path)?;
+    conn.execute(
+        "DELETE FROM worktrees WHERE path = ?1",
+        rusqlite::params![path.to_string_lossy()],
+    )?;
+    Ok(branch)
+}
+
+/// The branch a registered worktree holds, without removing the registration.
+fn registered_branch(conn: &Connection, path: &Path) -> ZResult<Option<String>> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS worktrees (
             path       TEXT PRIMARY KEY,
@@ -56,18 +66,13 @@ fn unregister(conn: &Connection, path: &Path) -> ZResult<Option<String>> {
         )",
         [],
     )?;
-    let branch: Option<String> = conn
+    Ok(conn
         .query_row(
             "SELECT branch FROM worktrees WHERE path = ?1",
             rusqlite::params![path.to_string_lossy()],
             |r| r.get(0),
         )
-        .ok();
-    conn.execute(
-        "DELETE FROM worktrees WHERE path = ?1",
-        rusqlite::params![path.to_string_lossy()],
-    )?;
-    Ok(branch)
+        .ok())
 }
 
 /// Every registered working tree, with the main one first.
@@ -176,14 +181,36 @@ pub fn add(conn: &Connection, root: &Path, path: &Path, branch: &str) -> ZResult
 }
 
 /// Remove a working tree. Its store, and every object in it, stays where it is.
-pub fn remove(conn: &Connection, path: &Path) -> ZResult<()> {
-    let known_branch = unregister(conn, path)?;
+pub fn remove(conn: &Connection, path: &Path, force: bool) -> ZResult<()> {
+    // Look the tree up without unregistering it. The check below can refuse, and a refusal that has
+    // already deleted the registry entry leaves a directory nobody can remove: `--force` then says
+    // "no worktree at ..." while the tree is still on disk holding the work it was told to discard.
+    let known_branch = registered_branch(conn, path)?;
     if known_branch.is_none() {
         return Err(bad(format!(
             "no worktree at {} (see `gesta worktree list`)",
             path.display()
         )));
     }
+    // Uncommitted work exists only on disk. Removing the directory deletes the only copy, so a tree
+    // that holds any is refused: this used to delete it silently and exit 0, which loses work with no
+    // way to tell it happened.
+    if !force {
+        let branch = known_branch.clone().unwrap_or_default();
+        let d = crate::repo::diff_worktree(conn, path, &branch)?;
+        // The branch marker is written into the tree on purpose, so it is not uncommitted work.
+        let marker = if path.join(ZF_BRANCH).is_file() { 1 } else { 0 };
+        let added = d.added.len().saturating_sub(marker);
+        let dirty = added + d.modified.len() + d.deleted.len();
+        if dirty > 0 {
+            return Err(bad(format!(
+                "{} holds {dirty} uncommitted change(s); commit them, or remove it with --force. \
+                 Files this tool wrote are deleted; files it did not create are left in place",
+                path.display()
+            )));
+        }
+    }
+    let _ = unregister(conn, path)?;
     // The marker goes first: a directory that still holds it still looks like a repository, and
     // every command run inside it afterwards fails in a way that names the wrong problem.
     let marker = path.join(crate::ZF_DIR);
@@ -258,7 +285,13 @@ mod tests {
 
     fn fixture() -> (Connection, PathBuf) {
         let conn = crate::store::tests::mem_db();
-        let root = std::env::temp_dir().join(format!("gesta-wt-{}", std::process::id()));
+        // Unique per test, not per process. Keyed by process id, every test in this module shared one
+        // directory, and the `remove_dir_all` below deleted a directory another test had just created
+        // and was still using. That made the suite fail about one run in three, on a test that had
+        // nothing to do with worktrees being removed.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("gesta-wt-{}-{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(crate::ZF_DIR)).unwrap();
         (conn, root)
@@ -282,8 +315,56 @@ mod tests {
     #[test]
     fn removing_a_tree_that_was_never_added_says_so_rather_than_failing_obscurely() {
         let (conn, root) = fixture();
-        let err = remove(&conn, &root.join("never-there")).unwrap_err();
+        let err = remove(&conn, &root.join("never-there"), false).unwrap_err();
         assert!(format!("{err}").contains("no worktree"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_refused_removal_leaves_the_registration_so_force_can_still_find_it() {
+        // Removing a tree with uncommitted work is refused, and the refusal must not have already
+        // deleted the registry row: otherwise `--force` answers "no worktree at ..." while the
+        // directory is still on disk holding the work it was asked to discard.
+        let (conn, root) = fixture();
+        conn.execute(
+            "INSERT OR IGNORE INTO branches (name, head, created_at) VALUES ('main', NULL, 1)",
+            [],
+        )
+        .unwrap();
+        let target = root.join("wt");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join(ZF_BRANCH), "main\n").unwrap();
+        std::fs::write(target.join("work.txt"), "uncommitted\n").unwrap();
+        // The table is created by the reader, so ask for it before inserting into it.
+        assert!(registered_branch(&conn, &target).unwrap().is_none());
+        conn.execute(
+            "INSERT INTO worktrees (path, branch, created_at) VALUES (?1, 'main', 1)",
+            rusqlite::params![target.to_string_lossy()],
+        )
+        .unwrap();
+
+        let err = remove(&conn, &target, false).unwrap_err();
+        assert!(format!("{err}").contains("uncommitted"), "got: {err}");
+        assert!(
+            registered_branch(&conn, &target).unwrap().is_some(),
+            "the refusal unregistered the tree, so --force could not find it"
+        );
+        assert!(
+            target.join("work.txt").is_file(),
+            "the work must survive a refusal"
+        );
+
+        // And with force it goes through for the files the store wrote. `work.txt` was never in a
+        // changeset, so it is a file this tool did not create and is deliberately left behind.
+        remove(&conn, &target, true).unwrap();
+        assert!(
+            !target.join(ZF_BRANCH).is_file(),
+            "force left its own branch marker behind"
+        );
+        assert!(
+            target.join("work.txt").is_file(),
+            "force deleted a file it did not create, which the message says it will not do"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

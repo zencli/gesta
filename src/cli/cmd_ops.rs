@@ -363,7 +363,7 @@ pub fn cmd_worktree(sub: crate::WorktreeCmd) -> ZResult<()> {
             }
             Ok(())
         }
-        WorktreeCmd::Remove { path } => {
+        WorktreeCmd::Remove { path, force } => {
             let target = std::path::PathBuf::from(&path);
             let target = if target.is_absolute() {
                 target
@@ -378,7 +378,7 @@ pub fn cmd_worktree(sub: crate::WorktreeCmd) -> ZResult<()> {
                         .to_string(),
                 ));
             }
-            crate::repo::worktree::remove(&conn, &target)
+            crate::repo::worktree::remove(&conn, &target, force)
         }
     }
 }

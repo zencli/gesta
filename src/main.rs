@@ -765,9 +765,8 @@ enum StashCmd {
         author: String,
         /// Stash only these paths, leaving everything else in place
         ///
-        /// Repeat the flag to name several. This is the non-interactive form of `git stash --patch`:
-        /// a caller that knows which files it wants to set aside says so, instead of being asked to
-        /// pick hunks from a prompt nothing can answer.
+        /// Repeat the flag to name several. This is the whole-file form: a caller that knows which
+        /// files to set aside says so. To keep part of one file, use `--hunk`.
         #[arg(long = "path")]
         paths: Vec<String>,
         /// Stash one hunk of a file, as `path:number` where the number comes from `gesta diff`
@@ -853,6 +852,12 @@ enum WorktreeCmd {
     Remove {
         /// The working tree to remove
         path: String,
+        /// Remove it even though it holds uncommitted work
+        ///
+        /// Without this, a tree with edits that are not in a changeset is refused: those edits exist
+        /// only on disk, and removing the directory deletes the only copy with no way back.
+        #[arg(long)]
+        force: bool,
     },
 }
 
