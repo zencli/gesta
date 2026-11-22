@@ -14,6 +14,27 @@ Sections before 0.10.0 were written as freeform prose headings. They are present
 the six standard categories, with the original text of every entry unchanged: the grouping is a
 reading aid applied afterwards, not a claim about how the change was described at the time.
 
+## [0.11.1] - 2026-11-22
+
+### Fixed
+
+- `git export` into a bare repository left `HEAD` on `refs/heads/master`. The ref was written
+  correctly, every object was present, `git ls-tree` and `git show` both answered correctly, and
+  `git clone` reported an empty repository. Two causes: HEAD was written before the export knew which
+  branches existed, so it could only guess `main`, and it was written to `<root>/.git/HEAD`, which is
+  right for a working tree and wrong for a bare repository where the git directory is `<root>`. HEAD
+  is now written after the refs, from the branch that was actually written, into the git directory the
+  repository really has.
+- A differential test read both tools, and the missing export check is what found the above. Every
+  benchmark in the tree asked whether gesta did what gesta meant to; `bench/parity.py` was named for
+  parity and called git zero times. `bench/differential.py` plays one scenario twice, once with each
+  tool, and reads both results back with the git binary: same paths, modes, sizes and blob ids, the
+  same bytes through `git show`, a deleted file absent from both, and a clone of each compared file
+  for file.
+- The differential test now also exports a branch not named `main`. `main` is the branch that happens
+  to match the guess `git init --bare` makes, so the original check would have passed before the fix
+  and proved nothing. With the HEAD write reverted, the run is 5/7 and both clone checks fail.
+
 ## [0.11.0] - 2026-11-22
 
 ### Added
