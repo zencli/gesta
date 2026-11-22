@@ -70,6 +70,14 @@ def main():
     global GESTA
     if not os.path.exists(GESTA):
         sys.exit(f"binary not found: {GESTA}")
+    # This bench compares three tools by timing them. A runner without one of them made the whole
+    # step fail with FileNotFoundError, which reads as a defect in this project and is nothing of the
+    # kind: the comparison simply cannot be made there. Skipping is the honest answer, and an exit of
+    # 0 with a printed reason is how every other bench reports "not applicable here".
+    missing = [t for t in ("git", "svn", "svnadmin") if shutil.which(t) is None]
+    if missing:
+        print(f"0/0 (skipped: {', '.join(missing)} not installed, so there is nothing to compare)")
+        return 0
     # Local copy of the binary, so nothing is measured through a bind mount.
     local = "/tmp/gesta_three_way"
     if not os.path.exists(local):
