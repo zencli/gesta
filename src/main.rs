@@ -770,6 +770,12 @@ enum StashCmd {
         /// pick hunks from a prompt nothing can answer.
         #[arg(long = "path")]
         paths: Vec<String>,
+        /// Stash one hunk of a file, as `path:number` where the number comes from `gesta diff`
+        ///
+        /// Repeat the flag to name several, in one file or across files. This is the case `--path`
+        /// cannot express: two unrelated edits in one file, one finished and one an experiment.
+        #[arg(long = "hunk")]
+        hunks: Vec<String>,
     },
     /// List saved stashes, newest first
     List,

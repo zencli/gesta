@@ -14,6 +14,21 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 
 ## Unreleased
 
+### A stash can take one hunk
+
+- `stash save --hunk <path>:<n>`, repeatable, takes one hunk and leaves every other edit in the file.
+  The number is what `gesta diff` prints, and `diff` now prints numbered hunks: `line_diff` reported
+  every change in a file as one block, so two edits a hundred lines apart came out as a single hunk
+  and there was no way to name either of them.
+- The dangerous half is the same as `--path`, one level finer. Taking hunk 1 and then restoring the
+  file from the branch head throws hunk 2 away as well, silently. The file left behind is the original
+  with only the taken hunks reverted, and the bench asserts the remaining edit is byte for byte what
+  it was.
+- `pop` knows the difference now. A hunk entry is stored as `path#number` with the hunk's own text,
+  and pop used to write that into a file named `f.txt#1` while leaving the real file untouched, which
+  made restoring look like it did nothing.
+- `bench/stash_hunk.py`, eight checks, a gate step.
+
 ### A submodule can point at a repository of this kind
 
 - `submodule add`, `init` and `update` each had `git` hardcoded. Pointing them at a child of our own

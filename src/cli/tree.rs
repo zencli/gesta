@@ -275,12 +275,21 @@ pub fn cmd_diff(changeset: Option<&str>, name_only: bool) -> ZResult<()> {
                     None => String::new(),
                 };
                 println!("\n--- {}", rel);
-                let (removed, added) = merge::line_diff(&old_text, &content);
-                for l in &removed {
-                    println!("-{}", l);
-                }
-                for l in &added {
-                    println!("+{}", l);
+                // Hunks, numbered, because a number is what `stash save --hunk` takes. `line_diff`
+                // reports every change in a file as one block, which is right for reading and
+                // useless for selecting: two edits a hundred lines apart came out as one hunk and
+                // there was no way to name either of them.
+                let old_lines: Vec<&str> = old_text.lines().collect();
+                let new_lines: Vec<&str> = content.lines().collect();
+                let hunks = merge::diff_hunks(&old_text, &content);
+                for (i, h) in hunks.iter().enumerate() {
+                    println!("@{}({}) ", i + 1, rel);
+                    for l in old_lines.iter().skip(h.old_start).take(h.old_len) {
+                        println!("-{}", l);
+                    }
+                    for l in new_lines.iter().skip(h.new_start).take(h.new_len) {
+                        println!("+{}", l);
+                    }
                 }
             }
             if !any {

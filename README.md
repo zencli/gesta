@@ -90,7 +90,7 @@ gesta blame src/main.rs
 | `grep <text> [--history] [--regex]` | Find text in the working tree, or in every recorded version |
 | `hook list` | Which hooks are installed |
 | `hook install <name> [--file F]` | Write a hook, reading stdin when no file is given |
-| `stash save [--path P]` | Set the working tree aside, or only the named paths |
+| `stash save [--path P] [--hunk P:N]` | Set the working tree aside, or only the named paths or hunks |
 | `hook remove <name>` | Remove a hook |
 | `hook status [--json]` | Whether each hook still matches what was installed |
 | `tag <name> [--changeset R]`, `tag --list` | Tag a branch, changeset or another tag |

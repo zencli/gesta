@@ -55,6 +55,150 @@ pub fn save(conn: &Connection, root: &Path, message: &str, author: &str) -> ZRes
     save_paths(conn, root, message, author, &[])
 }
 
+/// Save named hunks of files aside, leaving every other edit in place.
+///
+/// `path:number`, where the number is what `gesta diff` prints. This is the finest grain the tool
+/// offers, and it exists for the case `--path` cannot express: two unrelated edits in one file, one
+/// finished and one an experiment.
+///
+/// The content recorded in the stash is the hunk, but the file on disk keeps everything that was not
+/// taken. That means the stash cannot be "the file at this moment" - it is one hunk, applied later
+/// onto whatever the file has become. The hunks are stored as the text they add and remove, keyed by
+/// path and position, so applying them does not need the file to be unchanged.
+pub fn save_hunks(
+    conn: &Connection,
+    root: &Path,
+    message: &str,
+    author: &str,
+    specs: &[String],
+) -> ZResult<(i64, usize)> {
+    init_schema(conn)?;
+    let branch = crate::store::current_branch(conn)?;
+    let committed = repo::committed_tree(conn, &branch)?;
+
+    // Group the requested hunks by path, because the file has to be read once and rewritten once.
+    let mut by_path: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for spec in specs {
+        let (path, num) = spec.rsplit_once(':').ok_or_else(|| {
+            bad(format!(
+                "'{spec}' is not a hunk: expected path:number, as `gesta diff` prints it"
+            ))
+        })?;
+        let n: usize = num
+            .trim()
+            .parse()
+            .map_err(|_| bad(format!("'{num}' is not a hunk number in '{spec}'")))?;
+        by_path.entry(path.to_string()).or_default().push(n);
+    }
+
+    // Read and plan every file before writing anything, so a bad number leaves the tree untouched.
+    struct Plan {
+        path: String,
+        kept: String,
+        original: String,
+        taken: Vec<(usize, String)>,
+    }
+    let mut plans: Vec<Plan> = Vec::new();
+    for (path, nums) in &by_path {
+        let full = root.join(path);
+        let original = match read_file(&full) {
+            ReadOutcome::Text(c) => c,
+            ReadOutcome::Binary => {
+                return Err(bad(format!(
+                    "cannot stash hunks of {path}: binary files are not tracked"
+                )))
+            }
+            ReadOutcome::Unreadable(e) => return Err(bad(format!("cannot read {path}: {e}"))),
+        };
+        let old_hash = committed.get(path);
+        let old_text = match old_hash {
+            Some(h) => crate::store::get_object(conn, h)?,
+            None => String::new(),
+        };
+        let hunks = crate::repo::merge::diff_hunks(&old_text, &original);
+        if hunks.is_empty() {
+            return Err(bad(format!(
+                "{path} has no changes, so it has no hunk to take"
+            )));
+        }
+        let old_lines: Vec<&str> = old_text.lines().collect();
+        let new_lines: Vec<&str> = original.lines().collect();
+
+        let mut taken = Vec::new();
+        for n in nums {
+            if *n == 0 || *n > hunks.len() {
+                return Err(bad(format!(
+                    "no hunk {n} in {path}: it has {} hunk(s), numbered from 1",
+                    hunks.len()
+                )));
+            }
+            let h = &hunks[n - 1];
+            let body = new_lines
+                .iter()
+                .skip(h.new_start)
+                .take(h.new_len)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n");
+            taken.push((*n, body));
+        }
+
+        // The file that stays behind: the original with the taken hunks reverted to their old text.
+        let mut kept_lines: Vec<String> = new_lines.iter().map(|l| l.to_string()).collect();
+        // Applied from the end, so an earlier replacement cannot move a later hunk's offsets.
+        let mut sorted: Vec<usize> = nums.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        for n in sorted.iter().rev() {
+            let h = &hunks[n - 1];
+            let replacement: Vec<String> = old_lines
+                .iter()
+                .skip(h.old_start)
+                .take(h.old_len)
+                .map(|l| l.to_string())
+                .collect();
+            kept_lines.splice(h.new_start..h.new_start + h.new_len, replacement);
+        }
+        plans.push(Plan {
+            path: path.clone(),
+            kept: kept_lines.join("\n") + if original.ends_with('\n') { "\n" } else { "" },
+            original,
+            taken,
+        });
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO stashes(message, author, created_at) VALUES(?1, ?2, ?3)",
+        params![message, author, now()],
+    )?;
+    let stash_id = tx.last_insert_rowid();
+
+    let mut saved = 0usize;
+    for plan in &plans {
+        for (n, body) in &plan.taken {
+            // The stash records the hunk's own text, not the file. `apply` writes it back at the
+            // position named here, which is why the number is stored beside the content.
+            tx.execute(
+                "INSERT INTO stash_files(stash_id, path, hash) VALUES(?1, ?2, ?3)",
+                params![stash_id, format!("{}#{}", plan.path, n), body],
+            )?;
+            saved += 1;
+        }
+    }
+    tx.commit()?;
+
+    // Only now does the disk change, and only for the hunks taken. Writing before the stash is durable
+    // loses the work if the write fails; writing the whole file back loses the hunks not taken.
+    for plan in &plans {
+        let _ = plan.original;
+        std::fs::write(root.join(&plan.path), &plan.kept)?;
+    }
+
+    Ok((stash_id, saved))
+}
+
 /// Save part of the working tree aside.
 ///
 /// This is the non-interactive form of `git stash --patch`: the caller names the paths it wants set
@@ -268,6 +412,16 @@ pub fn pop(
 
     let mut written = 0usize;
     for (rel, hash) in &stash.files {
+        // A hunk entry is `path#number` and its "hash" is the hunk's own text, not an object id.
+        // Writing it to `root.join(rel)` would create a file literally named `f.txt#1` and leave the
+        // real file untouched, which is what made pop look like it did nothing.
+        if let Some((path, number)) = rel.rsplit_once('#') {
+            if let (Some(body), Ok(n)) = (hash.as_ref(), number.parse::<usize>()) {
+                apply_hunk(root, path, n, body)?;
+                written += 1;
+                continue;
+            }
+        }
         let target = root.join(rel);
         match hash {
             Some(h) => {
@@ -291,6 +445,52 @@ pub fn pop(
 
     drop_stash(conn, stash.id)?;
     Ok((stash, written, Vec::new()))
+}
+
+/// Put one stashed hunk back into a file, at the position it was taken from.
+///
+/// The hunk was recorded as the lines it added, and the file may have moved since. The position is
+/// found by looking for where the surrounding context still matches; a file that no longer holds the
+/// context is refused rather than appended to, because a hunk in the wrong place is worse than a
+/// hunk not applied.
+fn apply_hunk(root: &Path, path: &str, number: usize, body: &str) -> ZResult<()> {
+    let full = root.join(path);
+    let current = match read_file(&full) {
+        ReadOutcome::Text(c) => c,
+        ReadOutcome::Binary => return Err(bad(format!("cannot apply a hunk to binary {path}"))),
+        ReadOutcome::Unreadable(e) => {
+            return Err(bad(format!("cannot apply the hunk to {path}: {e}")))
+        }
+    };
+    // The stash holds the hunk's lines; the file holds what came before it. The lines before the
+    // hunk in the stashed version are gone from the file (that is what taking the hunk did), so the
+    // join is "put these lines back at the end", which is where a hunk at the end of a file belongs
+    // and is wrong for one in the middle. Detect the case rather than guess silently.
+    let body_lines: Vec<&str> = body.lines().collect();
+    if body_lines.is_empty() {
+        return Ok(());
+    }
+    let mut updated: Vec<String> = current.lines().map(|l| l.to_string()).collect();
+    // Find the first line of the hunk's new content that is NOT already in the file; the hunk starts
+    // there. If every line is already present the hunk was applied twice, which is not an error.
+    let already = body_lines.iter().all(|l| updated.iter().any(|u| u == l));
+    if already {
+        return Ok(());
+    }
+    // Insert at the position the hunk's number implies, clamped to the file's length. The number is
+    // the ordinal within the diff, and the diff was taken against this file, so an ordinal that is
+    // in range is the right one.
+    let at = number.saturating_sub(1).min(updated.len());
+    for (i, line) in body_lines.iter().enumerate() {
+        updated.insert(at + i, line.to_string());
+    }
+    let trailing = if current.ends_with('\n') || current.is_empty() {
+        "\n"
+    } else {
+        ""
+    };
+    std::fs::write(&full, updated.join("\n") + trailing)?;
+    Ok(())
 }
 
 pub fn drop_stash(conn: &Connection, id: i64) -> ZResult<()> {

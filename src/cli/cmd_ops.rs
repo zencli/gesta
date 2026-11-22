@@ -63,9 +63,14 @@ pub fn cmd_stash(sub: crate::StashCmd, json: bool) -> ZResult<()> {
             message,
             author,
             paths,
+            hunks,
         } => {
             let (root, conn) = open_repo()?;
-            let (id, n) = crate::repo::stash::save_paths(&conn, &root, &message, &author, &paths)?;
+            let (id, n) = if hunks.is_empty() {
+                crate::repo::stash::save_paths(&conn, &root, &message, &author, &paths)?
+            } else {
+                crate::repo::stash::save_hunks(&conn, &root, &message, &author, &hunks)?
+            };
             if n == 0 {
                 println!("nothing to stash: the working tree matches the head");
                 return Ok(());

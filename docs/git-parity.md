@@ -616,18 +616,18 @@ is a difference from git that a person will notice.
   rather than a copy, but the pointer lives in `.gitmodules`, not as a gitlink entry in the tree, so a
   git client reading the repository does not see the submodule at all. A child of this kind works; a
   child that is a git repository works through the git binary.
-- **Hunk-level stashing.** `stash save --path` takes named files, which covers the case that matters
-  when two unrelated edits are in one tree. There is no way to take part of one file; that needs a
-  hunk picker, and the answer here is to split the edit into two files rather than to build one.
+- **A hunk picker.** `stash save --hunk <path>:<n>` takes one hunk by number, which covers the case
+  that matters: two unrelated edits in one file. There is no interactive picker and no way to take a
+  partial line; a hunk is the finest grain, and splitting an edit that crosses a line is a manual job.
 - **The forge ecosystem.** GitHub, GitLab and the rest speak git's protocol. `git push` is the
   bridge, and it is the one place a repository still needs the git binary.
 
 Entries that used to be on this list are done, and are recorded here rather than deleted so the next
 reader can tell they were considered: `bisect run` drives a whole search from one command (exit 0 good,
 else bad, 125 skip), `worktree` gives a second working tree over one store, `notes` attaches an
-annotation to a changeset without changing it, and `stash save --path` sets aside named files without
-disturbing the rest of the tree. What is left of that last one is hunk-level selection, which is a
-different thing and is listed above.
+annotation to a changeset without changing it, `stash save --path` sets aside named files without
+disturbing the rest of the tree, and `stash save --hunk` goes one level finer. What is left of that last
+one is the picker itself, which is listed above.
 
 ## What "100% replacement" would mean, honestly
 

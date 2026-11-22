@@ -1964,6 +1964,21 @@ def main():
             st[1][:200],
         )
 
+    if want("stash-hunk"):
+        # `--path` selects whole files, which covers two unrelated files. It does not cover two
+        # unrelated edits in one file, and that is the case a person hits constantly. The dangerous
+        # half is the same as `--path` one level finer: taking hunk 1 and then restoring the file
+        # from the head throws hunk 2 away as well.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stash_hunk.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a stash can take one hunk and leave the other edit in place",
+            r[0] == 0 and "8/8 stash-hunk checks pass" in r[1],
+            (r[1] or "")[-600:],
+        )
+
     if want("submodule-own"):
         # A submodule pointed at another repository of THIS kind used to fail: init shelled out to
         # `git clone`, and a child with no `.git` is `fatal: repository does not exist`. The negative
