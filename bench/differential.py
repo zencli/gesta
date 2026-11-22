@@ -220,6 +220,37 @@ def main() -> int:
             else:
                 record("both clones succeed", False, c1.stderr + c2.stderr)
 
+            # A bare export whose branch is not `main`. `git init --bare` puts HEAD on
+            # `refs/heads/master`, so a tool that leaves HEAD alone after writing `refs/heads/trunk`
+            # produces a repository that clones empty while every object is present. This branch name
+            # is the one that catches that, and it is why the check exists rather than trusting the
+            # `main` case.
+            #
+            # Verified to catch it: with the HEAD write reverted to the pre-#58 behaviour, this run is
+            # 5/7 and both clone checks fail. A test that passes before the fix proves nothing.
+            bare2 = os.path.join(base, "exported-trunk")
+            run(["git", "init", "-q", "--bare", bare2], base)
+            cb = gesta(["branch", "create", "trunk"], gd)
+            tk = gesta(["branch", "switch", "trunk"], gd) if cb.returncode == 0 else cb
+            if tk.returncode == 0:
+                _write(gd, "trunkonly.txt", b"on trunk\n")
+                cid2, err2 = gesta_commit(gd, "on trunk")
+                if cid2 is None:
+                    record("gesta commits on trunk", False, err2)
+                else:
+                    e2 = gesta(["git", "export", bare2, "--branch", "trunk"], gd)
+                    if e2.returncode != 0:
+                        record("gesta exports a non-main branch", False, e2.stdout + e2.stderr)
+                    else:
+                        cl3 = os.path.join(base, "clone-trunk")
+                        c3 = run(["git", "clone", "-q", bare2, cl3], base)
+                        got = read_tree(cl3) if c3.returncode == 0 else {}
+                        record(
+                            "a bare export of a branch not named main clones to its files",
+                            "trunkonly.txt" in got and got["trunkonly.txt"] == b"on trunk\n",
+                            f"clone rc={c3.returncode} err={c3.stderr} files={sorted(got)}",
+                        )
+
         passed = sum(1 for _, ok, _ in results if ok)
         total = len(results)
         print(f"\n{passed}/{total} differential checks pass")
