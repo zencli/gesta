@@ -1767,6 +1767,44 @@ pub fn restore_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult
     Ok((written, removed))
 }
 
+/// Write the working tree to match a changeset, whichever branch it belongs to.
+///
+/// `restore_worktree` takes a branch name and reads that branch's head. A submodule pin is a
+/// changeset, and asking it to resolve as a branch name gives `no such branch: cs...` - true, and
+/// about the wrong thing. This resolves the id directly.
+pub fn restore_at_changeset(conn: &Connection, root: &Path, changeset: &str) -> ZResult<usize> {
+    let files = crate::store::tree_at(conn, changeset)?;
+    let attrs = crate::support::attributes::Rules::load(root);
+    let mut written = 0usize;
+    for (path, hash) in &files {
+        let content = crate::store::get_object_bytes(conn, hash)?;
+        let plan = crate::support::attributes::plan_for(&attrs, path);
+        let content = plan.checked_out(&content);
+        let target = root.join(path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&target, &content)?;
+        written += 1;
+    }
+    // A path tracked at some point but absent from this tree has to go, or the checkout is a union
+    // of two versions rather than the one asked for.
+    let present: std::collections::HashSet<&String> = files.iter().map(|(p, _)| p).collect();
+    let mut all_stmt = conn.prepare("SELECT DISTINCT path FROM file_versions")?;
+    let all: Vec<String> = all_stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for path in all {
+        if !present.contains(&path) {
+            let target = root.join(&path);
+            if target.is_file() {
+                fs::remove_file(&target)?;
+            }
+        }
+    }
+    Ok(written)
+}
+
 /// One path's change between two revisions: the lines removed and the lines added.
 pub type PathDiff = (String, Vec<String>, Vec<String>);
 

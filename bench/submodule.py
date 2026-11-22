@@ -51,12 +51,21 @@ def main():
 
         added = "added submodule" in sh(f"{ZF} submodule add vendor/child {child}", parent)[1]
 
-        # Pin to the older commit, written the way a person would: the short id from git log.
+        # Pin to the older commit, written the way a person would: replace whatever pin `add`
+        # recorded with the short id from git log. `add` records the child's head, so a plain append
+        # leaves two `commit` lines and the first one wins - which is what this bench did before, and
+        # it read as "init ignored the pin" when the file simply said two things.
         gm = os.path.join(parent, ".gitmodules")
         with open(gm) as fh:
-            text = fh.read()
+            lines = fh.read().splitlines()
+        lines = [ln for ln in lines if not ln.strip().startswith("commit =")]
         with open(gm, "w") as fh:
-            fh.write(text.replace(f"url = {child}", f"url = {child}\n    commit = {v1[:7]}"))
+            out_lines = []
+            for ln in lines:
+                out_lines.append(ln)
+                if ln.strip().startswith(f"url = {child}"):
+                    out_lines.append(f"    commit = {v1[:7]}")
+            fh.write("\n".join(out_lines) + "\n")
 
         init_out = sh(f"{ZF} submodule init", parent)[1]
 

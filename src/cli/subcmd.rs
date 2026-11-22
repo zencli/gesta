@@ -91,17 +91,31 @@ pub fn cmd_submodule(sub: crate::SubmoduleCmd, json: bool) -> ZResult<()> {
             if subs.contains_key(&path) {
                 return Err(bad(format!("submodule {} already exists", path)));
             }
+            // The pin is the child's head at the moment it is added. `commit: None` used to be
+            // hardcoded here, which is why `submodule status` said `unpinned` for every submodule
+            // ever added and why `update` had nothing to return to.
+            let commit = if Path::new(&url).exists() {
+                crate::repo::submodule::child_head(Path::new(&url))?
+            } else {
+                // A URL that is not a local path cannot be read without cloning it, and guessing a
+                // pin would be worse than admitting there is not one yet.
+                None
+            };
             subs.insert(
                 path.clone(),
                 crate::repo::submodule::Submodule {
                     path: path.clone(),
                     url: url.clone(),
                     branch,
-                    commit: None,
+                    commit: commit.clone(),
                 },
             );
             crate::repo::submodule::write_gitmodules(&root, &subs)?;
             println!("added submodule {} -> {}", path, url.clone());
+            match commit {
+                Some(c) => println!("pinned to {}", &c[..c.len().min(14)]),
+                None => println!("no pin yet: the source is not readable from here"),
+            }
             println!("run `gesta submodule init` to clone it");
             Ok(())
         }

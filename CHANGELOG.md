@@ -12,6 +12,24 @@ published, so the version numbers in `Cargo.toml` were the only boundary.
 Each section is the work that landed at that version, newest first. A section grows while its
 version is current and freezes when the number changes, so `0.6.0` is a record and not a plan.
 
+## Unreleased
+
+### A submodule can point at a repository of this kind
+
+- `submodule add`, `init` and `update` each had `git` hardcoded. Pointing them at a child of our own
+  kind gave `fatal: repository ... does not exist` on add and `fatal: not a git repository` on update,
+  which are true statements about the wrong problem: the directory is a perfectly good repository of
+  another kind.
+- A child's store is copied whole with `VACUUM INTO` rather than replayed changeset by changeset. A
+  submodule clone is the child's repository, not a summary of it, and a translation step is somewhere
+  an object or a blame range can go missing.
+- `submodule add` records the child's head as the pin. It used to write `commit: None` unconditionally,
+  which is why `status` said `unpinned` for every submodule ever added and `update` had nothing to
+  return to.
+- `restore_at_changeset` writes a working tree from a changeset id. `restore_worktree` takes a branch
+  name, so a pin resolved as a branch gave `no such branch: cs...`.
+- `bench/submodule_own.py`, eight checks, a gate step.
+
 ## 0.9.0, 2026-11-22
 
 ### A stash can take part of the working tree

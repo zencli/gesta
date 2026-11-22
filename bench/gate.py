@@ -1964,6 +1964,20 @@ def main():
             st[1][:200],
         )
 
+    if want("submodule-own"):
+        # A submodule pointed at another repository of THIS kind used to fail: init shelled out to
+        # `git clone`, and a child with no `.git` is `fatal: repository does not exist`. The negative
+        # check is the one that matters - the parent records a pointer, not a copy of the child.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'submodule_own.py')}",
+            cwd=ZF_DIR,
+        )
+        record(
+            "a submodule of a repository of this kind clones, pins, and updates",
+            r[0] == 0 and "8/8 submodule checks pass" in r[1],
+            (r[1] or "")[-600:],
+        )
+
     if want("stash-path"):
         # `stash save` resets the whole tree, so a path filter that does not also narrow the reset
         # stashes one file and throws away every other edit - silently, with the work not in the

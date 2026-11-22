@@ -612,8 +612,10 @@ is a difference from git that a person will notice.
   `post-commit`, `pre-land`, `post-checkout`, `pre-push`), and each one is a program in
   `.gesta/hooks/`. A hook written for `.git/hooks` is not picked up, and the argument a git hook
   receives is not the same shape.
-- **Submodules** in git's sense. `sub` records a pointer to a child repository, which covers the
-  common case with different semantics.
+- **Submodules** in git's sense. `submodule` reads and writes `.gitmodules` and records a pointer
+  rather than a copy, but the pointer lives in `.gitmodules`, not as a gitlink entry in the tree, so a
+  git client reading the repository does not see the submodule at all. A child of this kind works; a
+  child that is a git repository works through the git binary.
 - **Hunk-level stashing.** `stash save --path` takes named files, which covers the case that matters
   when two unrelated edits are in one tree. There is no way to take part of one file; that needs a
   hunk picker, and the answer here is to split the edit into two files rather than to build one.
