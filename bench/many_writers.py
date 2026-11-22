@@ -181,7 +181,10 @@ def main():
         if cost <= growth * 1.6:
             print("the drain time follows the number of writers, which is what serialised writes cost")
         else:
+            # This was a printed warning with a zero exit, so a caller reading the exit code - which
+            # is what the gate does - was told the run passed while the line above said it did not.
             print(f"the drain time grows faster than the writers ({cost:.2f}x for {growth:.1f}x)")
+            return 1
     return 0
 
 

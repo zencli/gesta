@@ -4809,6 +4809,35 @@ def main():
             record(f"{filename.replace('_', ' ').removesuffix('.py')} still holds", ok,
                    (r[1] or "")[-600:])
 
+    if want("still-flat"):
+        # Two benches that already decided right from wrong and returned 1 on a bad answer, but were
+        # never run by anything. `many_writers` was worse than that: it printed the failure and
+        # returned 0, so the only signal a caller reads said the run passed.
+        #
+        # `long_history` builds a history to time commits against it, and the default 10000 commits
+        # takes over eight minutes. 3000 still spans a tenfold growth twice, which is what the slope
+        # needs, and keeps the step inside a gate run.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'long_history.py')} --max 3000",
+            cwd=ZF_DIR,
+            timeout=500,
+        )
+        record(
+            "the cost of a commit stays flat as the history grows",
+            r[0] == 0 and "flat over this range" in r[1],
+            (r[1] or "")[-500:],
+        )
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'many_writers.py')}",
+            cwd=ZF_DIR,
+            timeout=400,
+        )
+        record(
+            "the drain time follows the number of writers",
+            r[0] == 0 and "follows the number of writers" in r[1],
+            (r[1] or "")[-500:],
+        )
+
     if want("typography"):
         # A long dash is not a character this project uses. It arrives by pasting prose from a
         # document that has them, and once one is in the tree every later paste copies the style.
