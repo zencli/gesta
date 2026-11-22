@@ -1,11 +1,29 @@
 # Why packing small objects did not help
 
-A tree of 1000 tiny files costs **5.6x** git in disk on the current build: 980 KB against 173 KB, both
-measured after their own compaction - this tool vacuumed, git packed. The ratio was 14.9x in an earlier
-version of this paragraph, and that figure was wrong twice over: the arithmetic did not follow from the
+A tree of 1000 tiny files costs git between **4.0x and 8.1x** in disk on the current build, depending
+entirely on how much the files share. All three figures below are measured after each store's own
+compaction: this tool vacuumed, git packed.
+
+| Tree, 1000 files, distinct contents | gesta | git | ratio |
+|---|---|---|---|
+| every file different, nothing shared | 1,142,922 | 284,431 | **4.02x** |
+| every file has the same 200-line prologue | 1,618,058 | 198,843 | **8.14x** |
+| small JSON, same shape, different values | 1,122,442 | 260,183 | **4.31x** |
+
+The shared-prologue case is the worst, and it is worth understanding why rather than treating it as
+noise. git finds the 200 shared lines once and stores a delta for each file against the previous one.
+This tool stores each body whole, so the prologue is paid 1000 times. The gap is therefore not a
+constant to be quoted but a function of how much a tree repeats itself.
+
+Earlier versions of this paragraph said 5.6x, and before that 14.9x. Both were single numbers for a
+single synthetic shape: `tiny_files.py` writes 1000 copies of the same seven-byte body, which git
+deduplicates to almost nothing, so the ratio it printed measured how well each tool collapses one
+repeated blob. That is a real property and it is not the one a repository has. `bench/storage_real.py`
+replaces it with the three shapes above.
+
+The 14.91x figure was also wrong twice over on its own terms: the arithmetic did not follow from the
 numbers printed beside it (856 against 103 is 8.3x), and the measurement counted the working tree on
-both sides and compared this tool mid-WAL against a packed git. The bench now counts the store only and
-compacts both first, which is what makes the two numbers comparable at all.
+both sides and compared this tool mid-WAL against a packed git.
 
 Earlier figures of 6.6x and 7.7x below are the numbers as measured at the time of the experiment being
 described, not current claims, and they carry the same caveat: they were taken before blame became

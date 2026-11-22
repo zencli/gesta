@@ -111,6 +111,12 @@ The timezone is recorded on the changeset now and written back on export. Measur
 97 of 97 commit ids survive an import and export of this project's own history, and `git fsck` accepts
 the result.
 
+That figure is this repository's history, which is 97 commits. It is a real round trip and it is not a
+scale claim: a repository whose commits carry unusual author lines, encoding headers, or merge parents
+from several tools has shapes this history does not contain. The differential benchmark
+(`bench/differential.py`) is the part that checks a tree git did not write, by exporting both tools'
+work and reading each back with git.
+
 The gate asserts this with a source repository written at `+0700`, because a `+0000` source matches
 whether the code is right or wrong, which is how the fault survived a test that read the export back.
 

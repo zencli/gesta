@@ -4930,32 +4930,31 @@ def main():
         )
 
     if want("storage-cost"):
-        # The ratio in docs/storage.md is a claim about this build. A document that drifts from the code
-        # is a document nobody trusts, and this is the cheapest way to keep the two in step.
+        # docs/storage.md claims a range, and this keeps the claim and the build in step. The old step
+        # read tiny_files.py, which writes 1000 copies of the same seven-byte body: git deduplicates
+        # that to almost nothing, so the ratio measured how well each tool collapses one repeated blob
+        # and said nothing about a repository. storage_real.py measures three shapes whose files differ.
         r = sh(
-            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tiny_files.py')}",
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'storage_real.py')}",
             cwd=ZF_DIR,
-            timeout=600,
+            timeout=900,
         )
-        # A ratio that has grown past the recorded figure means the schema changed shape; a ratio that
-        # has fallen means the document is stale. Either is worth failing on, so the check pins the
-        # claim rather than the number.
-        m = re.search(r"tiny: 1000 files.*\n\s+git\s+([\d,]+) bytes\n\s+gesta\s+([\d,]+) bytes", r[1])
-        ok = r[0] == 0 and m is not None
-        ratio = 0.0
-        if m:
-            git_b = int(m.group(1).replace(",", ""))
-            gesta_b = int(m.group(2).replace(",", ""))
-            ratio = gesta_b / git_b if git_b else 0.0
-        # This benchmark measures git after "gc --aggressive --prune=now" and gesta after VACUUM.
-        # The ratio is 14.9x (git stores packs efficiently, gesta keeps a row per path and blame rows).
-        # A separate benchmark (size_compare.py) measures both sides fully compacted and finds 5.6x.
-        # The gate pins 18.0 to catch regressions in either direction; it is not the "true" ratio.
-        ok = ok and ratio < 18.0
+        # Each shape recorded, so the documented range cannot drift from the build in either direction.
+        # The recorded figures: distinct 4.02x, shared 8.14x, json 4.31x. A shape that climbs past the
+        # ceiling means the schema changed shape; one that falls means the document is stale.
+        found = dict(re.findall(r"^(distinct|shared|json)\s+[\d,]+\s+[\d,]+\s+([\d.]+)x", r[1], re.M))
+        ceil = {"distinct": 5.0, "shared": 10.0, "json": 5.5}
+        ok = r[0] == 0 and len(found) == 3
+        detail = []
+        for shape, limit in ceil.items():
+            got = float(found.get(shape, 0) or 0)
+            detail.append(f"{shape} {got:.2f}x (limit {limit:.1f})")
+            if got <= 0 or got > limit:
+                ok = False
         record(
-            "a tree of tiny files stays within the recorded storage ratio",
+            "storage stays within the recorded ratio on all three tree shapes",
             ok,
-            f"{ratio:.2f}x git" if m else (r[1] or "")[-300:],
+            "; ".join(detail) or (r[1] or "")[-400:],
         )
 
     if want("large-attribute"):
