@@ -486,6 +486,11 @@ enum Cmd {
         #[command(subcommand)]
         sub: RemoteCmd,
     },
+    /// Push to a forge (GitHub, GitLab, Gitea) without the git binary
+    Forge {
+        #[command(subcommand)]
+        sub: ForgeCmd,
+    },
     /// Manage stored credentials for remotes
     Secret {
         #[command(subcommand)]
@@ -949,6 +954,30 @@ enum KeyCmd {
 }
 
 #[derive(Subcommand)]
+enum ForgeCmd {
+    /// Push one branch to a forge over the git smart HTTP protocol
+    Push {
+        /// The repository URL, without a trailing slash: https://github.com/owner/repo
+        url: String,
+        /// The branch to push
+        #[arg(default_value = "main")]
+        branch: String,
+        /// The ref name on the remote
+        #[arg(long, default_value = "refs/heads/main")]
+        remote_ref: String,
+        /// A token with write access. Falls back to GESTA_FORGE_TOKEN.
+        #[arg(long)]
+        token: Option<String>,
+        /// The username paired with the token. GitHub and Gitea ignore it; GitLab wants oauth2.
+        #[arg(long, default_value = "x-access-token")]
+        user: String,
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum RemoteCmd {
     Add {
         name: String,
@@ -1376,6 +1405,16 @@ fn run() -> ZResult<()> {
             BranchCmd::Info { name } => cli::cmd_branch_info(&name),
             BranchCmd::Protect { name, unset } => cli::cmd_branch_protect(&name, unset),
             BranchCmd::Conflicts { source, target } => cli::cmd_merge_preview(&source, &target),
+        },
+        Cmd::Forge { sub } => match sub {
+            ForgeCmd::Push {
+                url,
+                branch,
+                remote_ref,
+                token,
+                user,
+                json,
+            } => cli::cmd_forge_push(&url, &branch, &remote_ref, token.as_deref(), &user, json),
         },
         Cmd::Remote { sub } => match sub {
             RemoteCmd::Add {

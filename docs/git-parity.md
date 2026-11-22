@@ -618,8 +618,10 @@ is a difference from git that a person will notice.
 - **A hunk picker.** `stash save --hunk <path>:<n>` takes one hunk by number, which covers the case
   that matters: two unrelated edits in one file. There is no interactive picker and no way to take a
   partial line; a hunk is the finest grain, and splitting an edit that crosses a line is a manual job.
-- **The forge ecosystem.** GitHub, GitLab and the rest speak git's protocol. `git push` is the
-  bridge, and it is the one place a repository still needs the git binary.
+- **A forge fetcher.** `gesta forge push` sets a branch on GitHub, GitLab or Gitea without the git
+  binary: three HTTP requests, the same ones git makes. Verified by pushing to this tool's own server
+  and cloning the result with real git. What is not there is the other direction: bringing a repository
+  down from a forge still uses the remote bundle protocol or `git clone`. See `docs/forge.md`.
 
 Entries that used to be on this list are done, and are recorded here rather than deleted so the next
 reader can tell they were considered: `bisect run` drives a whole search from one command (exit 0 good,
@@ -636,7 +638,6 @@ hook that reads `$1` gets a ref name it may not recognise.
 For one person on one machine, on text and binary files, with a remote over HTTP or object
 storage: nothing above blocks it today, and the daily cycle is measured and working.
 
-For a team: disk at 1.4x on a real tree and 14.9x on a tree of tiny files, no forge of its own, and
-no submodules in the git sense.
-Those three are the real answer to the question, and two of them are schema and format work rather
-than new features.
+For a team: disk at 5.6x on a tree of tiny files and 1.4x on a real tree, and a forge your CI can push
+to but that has no pull-request UI, no issues and no access control of its own.
+Those two are the real answer to the question, and the first is schema work rather than a feature.

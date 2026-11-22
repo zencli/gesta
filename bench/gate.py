@@ -4809,6 +4809,22 @@ def main():
             record(f"{filename.replace('_', ' ').removesuffix('.py')} still holds", ok,
                    (r[1] or "")[-600:])
 
+    if want("forge-push"):
+        # The forge client is the one thing here that replaced a call to the git binary. The step runs
+        # the whole cycle - store, serve, push with the forge client, clone with real git - because a
+        # push that moves a ref without delivering the objects looks successful from every angle except
+        # reading the file back.
+        r = sh(
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'forge_push.py')}",
+            cwd=ZF_DIR,
+            timeout=400,
+        )
+        record(
+            "a push with the forge client is readable by git",
+            r[0] == 0 and "readable by git" in r[1],
+            (r[1] or "")[-500:],
+        )
+
     if want("still-flat"):
         # Two benches that already decided right from wrong and returned 1 on a bad answer, but were
         # never run by anything. `many_writers` was worse than that: it printed the failure and

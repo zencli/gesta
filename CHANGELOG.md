@@ -14,6 +14,36 @@ Sections before 0.10.0 were written as freeform prose headings. They are present
 the six standard categories, with the original text of every entry unchanged: the grouping is a
 reading aid applied afterwards, not a claim about how the change was described at the time.
 
+## [0.11.0] - 2026-11-22
+
+### Added
+
+- `gesta forge push <url> <branch>` sets a branch on GitHub, GitLab or Gitea with no git binary
+  installed. A push is three HTTP requests and this makes all three: read the advertisement from
+  `info/refs?service=git-receive-pack`, post the command list and a pack to `git-receive-pack`, and read
+  the `report-status` that comes back. Pushing to a forge used to export a bare repository to a
+  temporary directory and run `git push` in it, which cost a process and a full copy of the tree on
+  every push.
+- Eight unit tests for the parts that decide right from wrong: an advertisement parses into refs and
+  capabilities, a ref the remote does not hold answers `None` so the command carries zeroes, an HTML
+  login page is reported instead of read as a repository with no branches, the capabilities land on the
+  first command only, a rejected ref keeps the remote's own reason, and a silent remote is a failure
+  rather than a success.
+- `bench/forge_push.py`, and a gate step that runs it: a store is served over HTTP, pushed to with the
+  forge client, then cloned with real git and its file contents compared. A push that moves a ref
+  without delivering the objects looks successful from every angle except reading the file back.
+- `docs/forge.md`, which states what is verified (the local cycle, end to end) and what is not (a push
+  to github.com, which needs a token and a network).
+
+### Changed
+
+- `docs/git-parity.md` no longer lists the forge ecosystem as something nothing here replaces. What is
+  left is the other direction: bringing a repository down from a forge still uses the remote bundle
+  protocol or `git clone`.
+- The same document said disk is 14.9x on a tree of tiny files. That figure comes from a benchmark
+  where git has run `gc --aggressive` and this tool has run `VACUUM`; measured with both sides fully
+  compacted it is 5.6x.
+
 ## [0.10.1] - 2026-11-22
 
 ### Added

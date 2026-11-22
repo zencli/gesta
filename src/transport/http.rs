@@ -1577,12 +1577,24 @@ pub fn request_with_headers(
             u.base_path.clone()
         }
     );
+    // HTTP/1.1 requires Host, and a forge behind nginx answers 400 without one. The existing callers
+    // that sign a request (S3) pass their own Host, so this only adds it when the caller did not, and a
+    // signature stays correct.
+    let caller_sets_host = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("host"));
     // A caller that signs Content-Length has to send the same value, so it is
     // passed in and not added again here. Two of them make nginx answer 400 with
     // no hint that framing was the problem.
     let caller_sets_length = headers
         .iter()
         .any(|(k, _)| k.eq_ignore_ascii_case("content-length"));
+    if !caller_sets_host {
+        let host = if (u.tls && u.port == 443) || (!u.tls && u.port == 80) {
+            u.host.clone()
+        } else {
+            format!("{}:{}", u.host, u.port)
+        };
+        head.push_str(&format!("Host: {}\r\n", host));
+    }
     for (k, v) in headers {
         head.push_str(k);
         head.push_str(": ");
@@ -1633,6 +1645,102 @@ pub fn request_with_headers(
     }
     let (status, body) = parse_response(&raw)?;
     Ok((status, body))
+}
+
+/// A request with HTTP Basic credentials and an explicit content type, which is the shape a forge
+/// expects: git's smart HTTP protocols answer with their own media types and reject a request that
+/// asks for `*/*` with a plain-text error that looks like a repository problem.
+///
+/// `user:password` is base64 encoded here rather than by the caller, because every forge documents the
+/// header differently and every one of them means the same wire format.
+pub fn request_with_auth(
+    method: &str,
+    url: &str,
+    body: Option<&[u8]>,
+    basic: Option<&str>,
+    accept: Option<&str>,
+) -> ZResult<(u16, Vec<u8>)> {
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if let Some(a) = accept {
+        headers.push(("Accept".to_string(), a.to_string()));
+        if body.is_some() {
+            headers.push((
+                "Content-Type".to_string(),
+                a.replace("advertisement", "request"),
+            ));
+        }
+    }
+    if let Some(userpass) = basic {
+        headers.push((
+            "Authorization".to_string(),
+            format!("Basic {}", base64_encode(userpass.as_bytes())),
+        ));
+    }
+    request_with_headers(method, url, &headers, body)
+}
+
+/// Standard base64, which is what a Basic header carries.
+fn base64_encode(input: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Remove side-band framing from a response body if one arrived.
+///
+/// v0 git wraps part of an answer in `\x01`-prefixed pkt-lines. This client does not request side-band,
+/// so a body without any is returned untouched; a body that has it is unwrapped rather than parsed as
+/// if the frames were the content.
+pub fn strip_side_band(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    let mut saw_frame = false;
+    while i + 5 <= raw.len() {
+        let Ok(hex) = std::str::from_utf8(&raw[i..i + 4]) else {
+            return raw.to_vec();
+        };
+        let Ok(len) = usize::from_str_radix(hex, 16) else {
+            return raw.to_vec();
+        };
+        if len < 5 || i + len > raw.len() {
+            return raw.to_vec();
+        }
+        let band = raw[i + 4];
+        // Band 1 is data, 2 is progress, 3 is an error. Anything else means this was not framing.
+        if !(1..=3).contains(&band) {
+            return raw.to_vec();
+        }
+        saw_frame = true;
+        if band == 1 {
+            out.extend_from_slice(&raw[i + 5..i + len]);
+        }
+        i += len;
+    }
+    if saw_frame {
+        out
+    } else {
+        raw.to_vec()
+    }
 }
 
 /// Split an HTTP response into its status code and body.

@@ -139,7 +139,10 @@ pub fn read_pkt_lines(body: &[u8]) -> Vec<String> {
 /// The export holds objects without history, so reachability is computed here from the commit and
 /// tree bodies rather than asked of the store. A `have` that names something absent is skipped: the
 /// client is allowed to name a commit this server does not have.
-fn reachable_from(entries: &[Entry], have: &[String]) -> std::collections::HashSet<String> {
+pub(crate) fn reachable_from(
+    entries: &[Entry],
+    have: &[String],
+) -> std::collections::HashSet<String> {
     use std::collections::{HashMap, HashSet};
 
     let mut by_sha: HashMap<&str, &Entry> = HashMap::with_capacity(entries.len());

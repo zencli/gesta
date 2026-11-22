@@ -2351,3 +2351,73 @@ pub fn cmd_audit(refused: bool, limit: Option<usize>, json_out: bool) -> ZResult
     println!("\n{} event(s)", rows.len());
     Ok(())
 }
+
+/// `forge push`: set a branch on GitHub, GitLab or Gitea without the git binary.
+///
+/// This is the one operation that used to need git installed. Exporting to a bare directory and running
+/// `git push` in it works and costs a process plus a full copy of the tree; this makes the three HTTP
+/// requests a push is made of and sends the pack the server half already knows how to write.
+///
+/// The token comes from `--token` or `GESTA_FORGE_TOKEN`, never from the command line history by
+/// default: a token in an argument is a token in the shell history and in `ps`.
+pub fn cmd_forge_push(
+    url: &str,
+    branch: &str,
+    remote_ref: &str,
+    token: Option<&str>,
+    user: &str,
+    json: bool,
+) -> ZResult<()> {
+    let push_root = crate::repo_root()?;
+    repo::hooks::run(&push_root, "pre-push", &[url, branch])?;
+    let (root, conn) = open_repo()?;
+
+    let tok = token
+        .map(|t| t.to_string())
+        .or_else(|| std::env::var("GESTA_FORGE_TOKEN").ok());
+    if tok.is_none() {
+        return Err(Box::new(crate::support::error::Error::new(
+            crate::support::error::Code::Usage,
+            "no token: pass --token or set GESTA_FORGE_TOKEN. A public repository still needs one to \
+             push, and reading it from the environment keeps it out of the shell history"
+                .to_string(),
+        )));
+    }
+
+    let mut ep = crate::transport::forge::Endpoint::new(url).with_user(user);
+    if let Some(t) = tok {
+        ep = ep.with_token(t);
+    }
+
+    let result = crate::transport::forge::push_branch(&conn, &root, &ep, branch, remote_ref)?;
+
+    if json {
+        // A reason from a remote can carry a quote, a backslash or a newline, and pasting it into a JSON
+        // string is how a caller's parser fails on a message that was meant to explain a failure.
+        let esc = |s: &str| -> String {
+            let mut o = String::with_capacity(s.len());
+            for c in s.chars() {
+                match c {
+                    '"' => o.push_str("\\\""),
+                    '\\' => o.push_str("\\\\"),
+                    '\n' => o.push_str("\\n"),
+                    '\r' => o.push_str("\\r"),
+                    '\t' => o.push_str("\\t"),
+                    c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+                    c => o.push(c),
+                }
+            }
+            o
+        };
+        println!(
+            "{{\"ref\":\"{}\",\"ok\":{},\"message\":\"{}\"}}",
+            esc(&result.name),
+            result.ok,
+            esc(&result.message)
+        );
+    } else {
+        println!("pushed {} to {}", branch, url);
+        println!("  {} now at the commit the remote accepted", remote_ref);
+    }
+    Ok(())
+}

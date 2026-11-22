@@ -1,6 +1,7 @@
 //! The transport tier.
 
 pub mod auth;
+pub mod forge;
 pub mod gitserver;
 pub mod http;
 pub mod keyring;
