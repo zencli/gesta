@@ -179,6 +179,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The notes come from CHANGELOG.md, so this job needs the repository. Before this step existed
+      # the job only downloaded artifacts, and the changelog was not there to read: the publish step
+      # failed with `No such file or directory: 'CHANGELOG.md'` after every target had built.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: CHANGELOG.md
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
