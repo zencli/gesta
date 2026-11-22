@@ -1,20 +1,22 @@
 # Changelog
 
-Every entry here comes from a commit in this repository, and every version boundary is a commit
-that changed the version in `Cargo.toml`. Nothing is dated by plan: a date is when the work landed.
+All notable changes to this project are documented in this file.
 
-A version boundary is a tag from 0.7.0 onward, and the tag is pushed with a GitHub release whose notes
-are this file's section for that version. Before 0.7.0 there are no tags: those versions were never
-published, so the version numbers in `Cargo.toml` were the only boundary.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## How to read this
+Every entry comes from a commit in this repository, and every version boundary is a commit that
+changed the version in `Cargo.toml`. Nothing is dated by plan: a date is when the work landed. From
+0.7.0 onward a version boundary is also a tag, and the release for that tag is built from the section
+below.
 
-Each section is the work that landed at that version, newest first. A section grows while its
-version is current and freezes when the number changes, so `0.6.0` is a record and not a plan.
+Sections before 0.10.0 were written as freeform prose headings. They are presented here grouped under
+the six standard categories, with the original text of every entry unchanged: the grouping is a
+reading aid applied afterwards, not a claim about how the change was described at the time.
 
-## Unreleased
+## [0.10.0] - 2026-11-22
 
-### A stash can take one hunk
+### Added
 
 - `stash save --hunk <path>:<n>`, repeatable, takes one hunk and leaves every other edit in the file.
   The number is what `gesta diff` prints, and `diff` now prints numbered hunks: `line_diff` reported
@@ -28,9 +30,6 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
   and pop used to write that into a file named `f.txt#1` while leaving the real file untouched, which
   made restoring look like it did nothing.
 - `bench/stash_hunk.py`, eight checks, a gate step.
-
-### A submodule can point at a repository of this kind
-
 - `submodule add`, `init` and `update` each had `git` hardcoded. Pointing them at a child of our own
   kind gave `fatal: repository ... does not exist` on add and `fatal: not a git repository` on update,
   which are true statements about the wrong problem: the directory is a perfectly good repository of
@@ -45,9 +44,9 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
   name, so a pin resolved as a branch gave `no such branch: cs...`.
 - `bench/submodule_own.py`, eight checks, a gate step.
 
-## 0.9.0, 2026-11-22
+## [0.9.0] - 2026-11-22
 
-### A stash can take part of the working tree
+### Added
 
 - `stash save --path <p>`, repeatable, sets aside only the named files. This is the non-interactive
   form of `git stash --patch`: a caller that knows which files it is working on says so, instead of
@@ -60,9 +59,6 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
   one implementation rather than one of them drifting.
 - `bench/stash_path.py`, eight checks, a gate step. The check that matters is that an unnamed file
   keeps its edits and an unnamed new file stays on disk.
-
-### A store records which digest its objects use
-
 - `git import` records the format it read, so a SHA-256 repository's names are 64 characters and the
   store can say so. `gesta stats` prints it, with the length spelled out, because a reader comparing
   an id against `git rev-parse` needs to know which length they are looking at.
@@ -74,9 +70,6 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 - Serving a SHA-256 repository over the protocol is therefore still not done, and the reason is now
   specific rather than a note: the names on the wire would have to be git oids, and they are not.
 - `bench/protocol_format.py`, four checks, a gate step.
-
-### Six hook points, and two of them were not connected
-
 - The set is now `pre-changeset`, `pre-commit`, `post-commit`, `pre-land`, `post-checkout`,
   `pre-push`. Three were new; two of those turned up bugs in wiring that already claimed to work.
 - **`pre-land` never ran on `branch merge`.** It was called from `land_branch`, which is the review
@@ -90,9 +83,6 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 - `bench/hooks.py`, ten checks, a gate step. Each installs a real program that appends its own name to
   a file and counts the name before and after the action, because a declared hook that never runs is
   the failure this is for. Two checks assert refusals stop the action rather than warn.
-
-### Notes on a changeset, kept apart from it
-
 - A changeset is immutable and the thing worth saying about it usually arrives afterwards: which ticket
   it closes, who reviewed it, why it was reverted. `notes add <changeset> -m <text>` attaches that text
   beside the changeset rather than inside it, so the changeset keeps its hash and every reference to it
@@ -103,9 +93,6 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
   back hides the typo in the id instead of reporting it.
 - `bench/notes.py`, eight checks, a gate step. The check that matters most asserts the changeset is
   byte for byte what it was before the note was attached.
-
-### Linked worktrees: two branches, one store
-
 - Two branches cannot be checked out in one directory at once, and the alternative - clone the
   repository again - duplicates every object and then has to be kept in step by hand. `worktree add
   <path> <branch>` makes a second working tree whose `.gesta` is a **file** naming the first one's
@@ -122,9 +109,6 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
   file the store never wrote stays, and the directory itself only goes when it is empty.
 - The store is never touched by `remove`. The branch, its changesets and every object remain.
 - `bench/worktree.py`, seven checks, a gate step.
-
-### `bisect run` drives a search from one command
-
 - `gesta bisect run <command>` answers every question by running the command, adopting git's exit
   code convention: 0 is good, any other code is bad, and **125 means skip**. The skip case is the
   one that matters - a changeset whose build does not compile must be dropped from the range without
@@ -135,9 +119,6 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
   changeset first failed, not only the final name.
 - `bench/bisect_run.py`, six checks, a gate step, including the skip case and the assertion that the
   working tree is back at the branch head afterwards.
-
-### A SHA-256 git repository is read and written, not just refused
-
 - The previous entry refused the format by name. That was the honest half of not supporting it, and
   it is now replaced by support: `git import` reads a `--object-format=sha256` repository and
   `git export` writes one, and a round trip reproduces the original commit hash exactly.
@@ -155,8 +136,84 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 - `bench/sha256_repo.py`, nine checks, a gate step. It makes a real repository with real git, imports
   it, exports into a fresh SHA-256 repository, and lets `git fsck` and `git rev-parse` judge the
   result. A SHA-1 round trip runs beside it, because every change here is on a shared path.
+- `gesta serve` answers the git-lfs batch API and the object route, so a tree holding a pointer can
+  be resolved by a client that speaks LFS. Both sit under the same prefix as the repository, so one
+  auth decision covers them.
+- The `href` in a batch response is a path rather than an absolute URL. The request carries no host
+  and no scheme, and inventing one produces a link that is wrong behind a proxy or on a non-default
+  port; a client resolves a relative href against the endpoint it called.
+- A missing object is reported inside a `200` batch response, not as an HTTP error, because one
+  absent oid must not fail the other ninety-nine. An `upload` for an object the store already holds
+  gets no actions block, which is a different answer from missing: a client reading "missing" for an
+  upload retries forever.
+- `gesta git export` writes the three-line pointer instead of the payload when the store kept the
+  object in the sidecar, and `gesta git import` resolves it back. The export path used the text
+  reader, so a binary export failed with the store's own hash as the error message - one check in
+  `bench/lfs.py` exists for that alone.
+- `bench/lfs.py`, ten checks, a gate step. It exports a 5 MB payload to a real git repository, reads
+  the blob back through `git cat-file` to prove it is text, then drives the batch API against a real
+  server and compares what the download link serves against what was committed.
+- `.gitattributes` carries `large` and `small` beside its line-ending rules, and a path marked
+  `large` goes to the sidecar whatever its size. `-large` sends it back. Text needs this as much as
+  a binary does: a 20 MB generated JSON belongs outside the database for the same reason.
+- Before this, the only trigger was the 4 MB threshold, which is a guess about a file the writer
+  already knows the shape of.
+- `backup-remote push|list|pull|prune` uploads an existing store backup to S3-compatible storage.
+  The archive is sealed with ChaCha20-Poly1305 before it leaves the process; the key is
+  HMAC-SHA256 over a random salt, using the primitive `support/secrets.rs` already had.
+- The passphrase comes from the environment and never from the URL or from inside the sealed file,
+  so a bucket that leaks gives away nothing but bytes.
+- Prune keeps a count rather than an age: a schedule that is forgotten still leaves the old files
+  behind, and a schedule that runs leaves ten copies is enough.
+- Name resolution is milliseconds, not seconds. Five pushes inside one second wrote the same key and
+  the bucket held one backup, so prune had nothing to remove and the test found it.
+- A request carrying `Git-Protocol: version=2` is answered with the capability list instead of
+  refs, and its POST is read as `command=ls-refs` or `command=fetch`.
+- `ls-refs` honours `symrefs`, `unborn` and `ref-prefix`, and names HEAD first.
+- A fetch that named haves and did not say `done` gets an `acknowledgments` section; one that
+  said `done` gets `packfile`.
+- `read_pkt_lines` now walks past `0001` and `0002`, the v2 delimiter and response-end.
+- `bench/protocol_v2.py` forces a real client to v2 and clones and fetches.
+- The server advertises `multi_ack_detailed` and answers it: an `ACK <sha> common` per commit
+  the client has, `ACK <sha> ready` for the last one, then a final `ACK <sha>` before the pack.
+  A client that did not negotiate it gets the `NAK` it expects.
+- `bench/multi_ack.py` drives a real clone and two fetches and reads git's own packet trace to
+  confirm all three ACK forms arrived.
+- `gesta key rotate` archives the key in use under a name that names it, then makes a new one.
+  Nothing is re-signed: a signature names the public key it was made with.
+- `gesta key generate` records the key as active, so a repository that never rotates still
+  answers which keys were ours.
+- `gesta key list` shows every key and which one is active.
+- `gesta verify` names a public key this repository has never recorded.
+- `bench/key_rotate.py` checks that an old signature still verifies after a rotation.
+- `audit.log` now holds commits, sign-offs, key rotations and pushes, not only what the server
+  decided about a request. The same lines go to a configured collector.
+- `bench/audit_local.py` does each action over a real socket and reads the line back.
+- `gesta submodule add <path> <url>` writes a `.gitmodules` entry; `init` clones missing ones at
+  their pin and `update` moves them to it. A pin may be the short id from `git log`.
+- `submodule status` reports clean, dirty, behind or missing for each one.
+- The parent's walk skips every submodule checkout. Without that, the child's files were recorded
+  as the parent's and a change in the child looked like a change here.
+- `bench/submodule.py` checks all of it, including that the child's files never reach the parent.
+- `gesta remote token rotate <name>` replaces the secret and keeps the role, path scope, branch scope
+  and name. The old secret is refused from the next request, because the server re-reads the auth file
+  on every request.
+- `token add` accepts the `approve` role.
+- `bench/token_rotate.py` presents both secrets to a running server instead of comparing the file, and
+  the gate runs it.
+- `gesta branch protect <name>` makes a push to that branch need a sign-off, and
+  `gesta changeset approve <id> --by <reviewer>` is the sign-off. Both live in the store, so a clone
+  carries the rule.
+- A new `approve` role may read and sign off and may not write. A reviewer holding a write token is
+  the failure this prevents.
+- An approval from the credential that is pushing does not count.
+- A refused push leaves the branch where it was. The import used to move it before the gate ran, so a
+  rejected push had landed.
+- A server with no tokens refuses a push to a protected branch and says so, because an anonymous
+  pusher cannot be told apart from a reviewer.
+- `bench/branch_protect.py` drives a real git client for six checks; the gate runs it.
 
-### A SHA-256 git repository is refused by name
+### Changed
 
 - `gesta git import` now reads `objectformat` from the repository's config and refuses anything other
   than `sha1`, naming the format and the conversion. Before this, pointing the importer at a SHA-256
@@ -170,8 +227,31 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
   repository is not caught by the guard; `bench/object_format.py` checks that beside the refusal.
 - `bench/object_format.py`, seven checks, a gate step. The fixture is made by real git with
   `--object-format=sha256`, not by writing a config by hand.
+- 1,000 files of seven bytes cost 856 KB, which is 14.9x git's 103 KB. The figure in the docs was
+  6.6x and had been wrong for months, because nobody re-ran it after blame moved from one row per
+  line to ranges.
+- The cost is not the object store - 1,000 identical bodies dedup to one row. It is five tables of
+  one row per path at about a hundred bytes each.
+- Storing hashes as 32-byte blobs instead of 64-character hex measures 11% and is deliberately not
+  done: the value is a `String` through the whole storage layer and the change reaches about fifty
+  call sites, which is not worth 11% on a tree already at 18x its floor.
+- `bench/tiny_files.py`, `bench/hash_size.py`, and a `storage-cost` gate step that fails above 18x.
+- The walk collects paths, then stats them over four threads in contiguous slices. At 100,003
+  files the stat phase went from 78 ms to 24 ms and a whole `status` from 205.6 ms to 183.4 ms,
+  which against `git status` is 3.63x to 3.19x.
+- Below 512 files the walk keeps its serial loop: the thread spawn costs more than the stats.
+- `bench/stat_parallel.rs` is the measurement that chose four threads. Two left the filesystem
+  idle, eight spent more on handoff, and a locked queue measured 31 ms against 24.
+- An object of 4 MB or more is written to `.gesta/objects/<aa>/<rest>` and its row keeps only
+  the name and size. An inline blob that size is copied by every backup, VACUUM and page read.
+- Both readers ask the sidecar first, so nothing above the store knows which shape an object
+  has. `fsck` reports a sidecar object whose file is missing, which is the one inconsistency
+  the change adds.
+- `gesta show` writes bytes rather than text. It went through the text reader, so showing any
+  binary file failed with a message about UTF-8, which the sidecar test found.
+- `bench/sidecar.py` checks the whole path with a 4.5 MB file.
 
-### Blame survives a rename
+### Fixed
 
 - A file renamed with no edit had every line credited to the commit that moved it. Two causes, and
   fixing either alone left it broken: `commit_one` deleted the old path's blame rows because from
@@ -190,29 +270,6 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
   that catches it drives the binary.
 - `bench/blame_rename.py`, six checks, a gate step. It also asserts that a deleted file keeps no
   blame rows, because that is the half a careless fix breaks.
-
-### A large object leaves the tree as a pointer
-
-- `gesta serve` answers the git-lfs batch API and the object route, so a tree holding a pointer can
-  be resolved by a client that speaks LFS. Both sit under the same prefix as the repository, so one
-  auth decision covers them.
-- The `href` in a batch response is a path rather than an absolute URL. The request carries no host
-  and no scheme, and inventing one produces a link that is wrong behind a proxy or on a non-default
-  port; a client resolves a relative href against the endpoint it called.
-- A missing object is reported inside a `200` batch response, not as an HTTP error, because one
-  absent oid must not fail the other ninety-nine. An `upload` for an object the store already holds
-  gets no actions block, which is a different answer from missing: a client reading "missing" for an
-  upload retries forever.
-- `gesta git export` writes the three-line pointer instead of the payload when the store kept the
-  object in the sidecar, and `gesta git import` resolves it back. The export path used the text
-  reader, so a binary export failed with the store's own hash as the error message - one check in
-  `bench/lfs.py` exists for that alone.
-- `bench/lfs.py`, ten checks, a gate step. It exports a 5 MB payload to a real git repository, reads
-  the blob back through `git cat-file` to prove it is text, then drives the batch API against a real
-  server and compares what the download link serves against what was committed.
-
-### A criss-cross merges from both bases, not from one
-
 - `merge_base` returned a single best common ancestor, which is right for an ordinary fork and
   wrong for a criss-cross: two branches that each merged the other, then diverged again. There are
   two bases, neither reaches the other, and picking one silently discards what the other carried.
@@ -223,9 +280,6 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 - The first fixture written for this was not a criss-cross, and the test said so: it returned
   `["a1", "b1"]` where `["m1a", "m1b"]` was expected, and those answers were correct for the graph
   that had been built. Making each merge a parent of both new tips is what turns the shape into one.
-
-### A rename is decided by content before it is scored
-
 - The detector paired deletions with additions by a line-similarity ratio against 0.5 - a heuristic,
   and the wrong tool for the case that matters most: a file renamed with no edit. Equal content
   hashes are the same file with no judgement needed, so the exact pass now runs first and takes the
@@ -235,41 +289,6 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
   two, because git's default is 50% and this case is under it. The test now pins both directions,
   including the one where finding nothing is correct.
 - `bench/renames.py`, five checks, a gate step.
-
-### A repository can say a path is large before it is
-
-- `.gitattributes` carries `large` and `small` beside its line-ending rules, and a path marked
-  `large` goes to the sidecar whatever its size. `-large` sends it back. Text needs this as much as
-  a binary does: a 20 MB generated JSON belongs outside the database for the same reason.
-- Before this, the only trigger was the 4 MB threshold, which is a guess about a file the writer
-  already knows the shape of.
-
-### A backup can leave the machine, sealed
-
-- `backup-remote push|list|pull|prune` uploads an existing store backup to S3-compatible storage.
-  The archive is sealed with ChaCha20-Poly1305 before it leaves the process; the key is
-  HMAC-SHA256 over a random salt, using the primitive `support/secrets.rs` already had.
-- The passphrase comes from the environment and never from the URL or from inside the sealed file,
-  so a bucket that leaks gives away nothing but bytes.
-- Prune keeps a count rather than an age: a schedule that is forgotten still leaves the old files
-  behind, and a schedule that runs leaves ten copies is enough.
-- Name resolution is milliseconds, not seconds. Five pushes inside one second wrote the same key and
-  the bucket held one backup, so prune had nothing to remove and the test found it.
-
-### The tiny-file ratio, measured again and pinned
-
-- 1,000 files of seven bytes cost 856 KB, which is 14.9x git's 103 KB. The figure in the docs was
-  6.6x and had been wrong for months, because nobody re-ran it after blame moved from one row per
-  line to ranges.
-- The cost is not the object store - 1,000 identical bodies dedup to one row. It is five tables of
-  one row per path at about a hundred bytes each.
-- Storing hashes as 32-byte blobs instead of 64-character hex measures 11% and is deliberately not
-  done: the value is a `String` through the whole storage layer and the change reaches about fifty
-  call sites, which is not worth 11% on a tree already at 18x its floor.
-- `bench/tiny_files.py`, `bench/hash_size.py`, and a `storage-cost` gate step that fails above 18x.
-
-### `show --json` answers with an object
-
 - `show --json` printed the file's bytes and called it JSON. A caller piping into a parser got
   the file's contents where an object should be, and had no way to tell.
 - The body is `content` when it is UTF-8, and `content_base64` when it is not, with `binary`
@@ -278,21 +297,6 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
   an option that did nothing rather than an option that failed.
 - `show` without `--json` still writes the bytes untouched, which is what a pipe into a file
   expects, and the check pins that too.
-
-
-### Protocol v2
-
-- A request carrying `Git-Protocol: version=2` is answered with the capability list instead of
-  refs, and its POST is read as `command=ls-refs` or `command=fetch`.
-- `ls-refs` honours `symrefs`, `unborn` and `ref-prefix`, and names HEAD first.
-- A fetch that named haves and did not say `done` gets an `acknowledgments` section; one that
-  said `done` gets `packfile`.
-- `read_pkt_lines` now walks past `0001` and `0002`, the v2 delimiter and response-end.
-- `bench/protocol_v2.py` forces a real client to v2 and clones and fetches.
-
-
-### blame works on imported history, and revisions resolve
-
 - `git import` now builds the blame chain for every path. It wrote `file_versions` and never
   `blame_ranges`, so `blame` answered `never committed` for every file an import brought in
   while `history` found versions for the same path.
@@ -303,7 +307,6 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
 - `history` prints the changeset id in its second column instead of the file version's content
   hash, which looked like a commit and resolved to nothing.
 - `bench/revisions.py` takes each spelling from real output and feeds it to another command.
-
 - `.gitattributes` support for line endings. `text` normalises to LF in the object, `eol=lf` and
   `eol=crlf` decide what the working tree gets, and `-text` or `binary` stores bytes unchanged. Read
   from `.gitattributes` and from `.gesta/attributes`, with the last matching rule winning.
@@ -336,7 +339,6 @@ version is current and freezes when the number changes, so `0.6.0` is a record a
   the new one opens.
 - `gesta serve` speaks the git upload-pack and receive-pack protocols, so `git clone http://host/git/repo` works with a
   plain git client and no gesta binary, and a plain git client can push. Full pack on the way out,
-no delta, no v2, no ref deletion.
 - `git export` writes the timezone the commit was imported with, so every commit keeps its git name
   through an import and export. It wrote `+0000` for everything, which gave every exported commit a
   different id: 0 of 97 survived on this project's history, 97 of 97 after the fix.
@@ -364,84 +366,6 @@ no delta, no v2, no ref deletion.
   a plain `git gc` detaches and returns before it has packed anything.
 - The remaining gap is cross-file compression, measured at 1.50x by joining the objects into one
   stream. Raising the zlib level changes nothing (47.3 MB at level 6, 47.2 at level 9).
-### The tree scan stats in parallel
-
-- The walk collects paths, then stats them over four threads in contiguous slices. At 100,003
-  files the stat phase went from 78 ms to 24 ms and a whole `status` from 205.6 ms to 183.4 ms,
-  which against `git status` is 3.63x to 3.19x.
-- Below 512 files the walk keeps its serial loop: the thread spawn costs more than the stats.
-- `bench/stat_parallel.rs` is the measurement that chose four threads. Two left the filesystem
-  idle, eight spent more on handoff, and a locked queue measured 31 ms against 24.
-
-### multi_ack_detailed
-
-- The server advertises `multi_ack_detailed` and answers it: an `ACK <sha> common` per commit
-  the client has, `ACK <sha> ready` for the last one, then a final `ACK <sha>` before the pack.
-  A client that did not negotiate it gets the `NAK` it expects.
-- `bench/multi_ack.py` drives a real clone and two fetches and reads git's own packet trace to
-  confirm all three ACK forms arrived.
-
-### Large objects live beside the database
-
-- An object of 4 MB or more is written to `.gesta/objects/<aa>/<rest>` and its row keeps only
-  the name and size. An inline blob that size is copied by every backup, VACUUM and page read.
-- Both readers ask the sidecar first, so nothing above the store knows which shape an object
-  has. `fsck` reports a sidecar object whose file is missing, which is the one inconsistency
-  the change adds.
-- `gesta show` writes bytes rather than text. It went through the text reader, so showing any
-  binary file failed with a message about UTF-8, which the sidecar test found.
-- `bench/sidecar.py` checks the whole path with a 4.5 MB file.
-
-### Rotating a signing key
-
-- `gesta key rotate` archives the key in use under a name that names it, then makes a new one.
-  Nothing is re-signed: a signature names the public key it was made with.
-- `gesta key generate` records the key as active, so a repository that never rotates still
-  answers which keys were ours.
-- `gesta key list` shows every key and which one is active.
-- `gesta verify` names a public key this repository has never recorded.
-- `bench/key_rotate.py` checks that an old signature still verifies after a rotation.
-
-### The record holds what the machine did
-
-- `audit.log` now holds commits, sign-offs, key rotations and pushes, not only what the server
-  decided about a request. The same lines go to a configured collector.
-- `bench/audit_local.py` does each action over a real socket and reads the line back.
-
-### Submodules
-
-- `gesta submodule add <path> <url>` writes a `.gitmodules` entry; `init` clones missing ones at
-  their pin and `update` moves them to it. A pin may be the short id from `git log`.
-- `submodule status` reports clean, dirty, behind or missing for each one.
-- The parent's walk skips every submodule checkout. Without that, the child's files were recorded
-  as the parent's and a change in the child looked like a change here.
-- `bench/submodule.py` checks all of it, including that the child's files never reach the parent.
-
-### Rotating a token
-
-- `gesta remote token rotate <name>` replaces the secret and keeps the role, path scope, branch scope
-  and name. The old secret is refused from the next request, because the server re-reads the auth file
-  on every request.
-- `token add` accepts the `approve` role.
-- `bench/token_rotate.py` presents both secrets to a running server instead of comparing the file, and
-  the gate runs it.
-
-### Protected branches
-
-- `gesta branch protect <name>` makes a push to that branch need a sign-off, and
-  `gesta changeset approve <id> --by <reviewer>` is the sign-off. Both live in the store, so a clone
-  carries the rule.
-- A new `approve` role may read and sign off and may not write. A reviewer holding a write token is
-  the failure this prevents.
-- An approval from the credential that is pushing does not count.
-- A refused push leaves the branch where it was. The import used to move it before the gate ran, so a
-  rejected push had landed.
-- A server with no tokens refuses a push to a protected branch and says so, because an anonymous
-  pusher cannot be told apart from a reviewer.
-- `bench/branch_protect.py` drives a real git client for six checks; the gate runs it.
-
-### A fetch sends the change, not the tree
-
 - `git fetch` now honours the client's `have` list: every object those commits reach is left out of
   the pack. On a sixty file tree with one file edited, a full fetch is 7662 bytes and a fetch carrying
   a `have` is 1739.
@@ -450,18 +374,15 @@ no delta, no v2, no ref deletion.
 - `bench/fetch_negotiate.py` measures both requests on the wire against a real server, and compares
   the edit against what `git pack-objects` charges for the same change. The gate runs it.
 
-## 0.8.1, 2026-11-20
+## [0.8.1] - 2026-11-20
 
-### Forwarding the audit record
+### Added
 
 - `gesta serve` posts each audit line to a collector configured in `.gesta/audit-url`, with the bearer
   token in `.gesta/audit-token` so the URL never carries a credential.
 - Delivery is queued and drained on a background thread: a dead collector cannot slow a request, and a
   full queue is counted rather than grown.
 - `bench/audit_e2e.py` runs the real server against a real collector.
-
-### A release with binaries
-
 - The release workflow builds six targets: linux x86_64 in glibc and musl, linux aarch64, macos on Intel
   and Apple silicon, and windows x86_64. Each archive is attached to the release for its tag.
 - Every target runs its own binary before packaging: `--version`, `init`, `status`. A build that
@@ -469,9 +390,9 @@ no delta, no v2, no ref deletion.
   the binary with no compiler error to say so.
 - The publish job reads the asset list back from the API and fails when fewer than six arrived.
 
-## 0.7.0, 2026-11-20
+## [0.7.0] - 2026-11-20
 
-### A branch as a drive, and packs that delta
+### Added
 
 - `gesta mount X:` presents a branch through WinFSP without a checkout. Read-only, because a write to a
   branch that is not checked out is a merge policy and not a filesystem call.
@@ -484,9 +405,9 @@ no delta, no v2, no ref deletion.
 - `status` at 100000 files went from 388 to 274 ms across this release, and the comparison with git is
   now produced by one script that runs both tools rather than assembled from separate runs.
 
-## 0.6.0, 2026-11-18
+## [0.6.0] - 2026-11-18
 
-### A branch as a drive, and packs that delta
+### Added
 
 - `gesta mount X:` presents a branch through WinFSP without a checkout. Read-only, because a write to
   a branch that is not checked out is a merge policy and not a filesystem call.
@@ -496,17 +417,6 @@ no delta, no v2, no ref deletion.
   larger, because git's own pack of this history reaches 34 levels deep.
 - The first build of the project on Windows: the Windows SDK and LLVM were missing, and Smart App
   Control blocked every cargo build script until it was turned off.
-
-### Deleting a branch through the protocol
-
-- A push that deletes a branch deletes it. The empty-pack path answered `ok` for every command
-  without doing anything, so git printed `- [deleted] throwaway` for a branch the server still had.
-- `delete-refs` is advertised, a zero new id is a deletion, `old` is checked before anything is
-  removed, a token scoped to other branches is refused, and the last branch cannot be deleted
-  because a repository with no branch refuses every command that needs one.
-
-### Pricing a task and not just its pass rate
-
 - Every attempt now carries a cost: bytes read, turns, and cost per pass. A pass rate says the work
   can be done and says nothing about what it cost, and the published harness benchmark that held
   the model fixed found cost moving 17.5x across harnesses while quality stayed within 17 points.
@@ -519,13 +429,6 @@ no delta, no v2, no ref deletion.
   has for that answer. Measured: gesta answers all six at 0.92x git's cost per answer.
 - Eight tests require the cost model to separate a quiet tool from a chatty one, and to refuse a
   ratio against zero passes.
-
-### Measuring the work rather than the calls
-
-`bench/harness` hands a job and a shell to a solver and asks whether a day of version control gets
-done: eight tasks over init, commit, branch, land, review, undo, stash, brief and binary objects.
-Each carries a goal, a setup that builds a fresh repository, a reference answer, and checks.
-
 - Every task carries a reference answer, because a check that has never been passed cannot be told
   apart from a broken one.
 - `--selftest` runs each setup with no work done and requires that not every check passes. It found
@@ -540,9 +443,6 @@ Each carries a goal, a setup that builds a fresh repository, a reference answer,
   run stopped by a clock says nothing about the work.
 - Commands run in a scrubbed environment: an allowlist, an explicit list, and a secret-shaped name
   dropped even when listed. Credentials are on neither list.
-
-### Two layers, with intervals
-
 - Every attempt is scored on the deliverable and separately on five obligations: quiet error stream
   on success, a refusal that explains itself, no database path or SQL error reaching the reader, no
   panic, and `--json` a parser can read.
@@ -552,9 +452,6 @@ Each carries a goal, a setup that builds a fresh repository, a reference answer,
   nobody earned.
 - `--selftest` and `--mutate` are gate steps, so a passing score cannot be produced by an instrument
   that sees nothing.
-
-### MCP
-
 - `tools/list` carries `ttlMs` and `cacheScope`. The catalog is 4,426 bytes, about 1,106 estimated
   tokens, and a client following the spec could not cache it, so it was paid on every model call.
 - `server/discover` reports the protocol version, the server identity, and instructions that say
@@ -566,61 +463,19 @@ Each carries a goal, a setup that builds a fresh repository, a reference answer,
   naming the tool that answers it and the arguments it implies, with selection, argument accuracy,
   per-tool precision and recall, and restraint scored apart. A request no tool answers must be
   declined, because a forced fit turns "I cannot" into an action.
-
-### Saying where the rest is
-
 - Every capped list names the command that lists everything: `diff --json` for skipped binaries,
   `review --json` for stale references, `remote inspect --json` for author strings.
 - `grep --max-line` cuts a long line and states its real length. Cutting is opt-in, because a caller
   that receives a shortened line has no other place to fetch the original.
-
-### Tags and blame
-
-- `tag` resolves its target before storing it. `tag v2 main` used to store the string `main`, and
-  the tag existed, appeared in the list, and resolved to nothing.
-- A tag may point at a branch, a changeset, or another tag, with a bounded walk so a cycle is
-  reported rather than hanging. `tag --list` no longer demands a name it does not use.
-- `blame --ignore-rev` names a revision whose lines should be attributed to the change before it,
-  and `.gesta-blame-ignore-revs` at the repository root is read without being asked.
-
-### Saying what could not be seen
-
 - A review that finds no stale reference reports how many files could hide one, and the count of
   places that build a name at run time or forward it through another name. Silence in that case
   made a clean result and a blind result look identical.
-
-### Pushing, and taking it back
-
 - `remote inspect` reports what a push would carry before it carries it: changesets, bytes, and
   every author string, with the ones naming a person counted apart. `--check-identity` makes that a
   refusal.
 - `anonymise` replaces the author on changesets that already exist. A signature covers the author,
   so the rewrite drops it and says how many; a replacement that is itself an address is refused,
   because swapping one identity for another is not anonymising.
-
-### Hooks
-
-- A hook that changed after installation is refused rather than executed, and `hook status` shows
-  both hashes. `pre-land` runs before a branch merges into a shared target, which is when a change
-  stops being private and the last point where a failing suite costs one person instead of
-  everybody.
-
-### Review boundaries
-
-- `review --from <branch>` uses the merge base rather than the other branch's head. Reviewing a
-  feature against a main that had moved one commit used to list every changeset main already had.
-
-### The gate
-
-- Three outcomes with three exit codes: passed, failed, and did not run. A skipped check was
-  recorded as a pass, and a mistyped step name selected nothing and printed the same sentence a full
-  pass prints. `osv` looked for its scanner at a one-off path and reported "did not run" on a
-  machine that had it installed.
-
-### Beyond 0.5.0, not yet listed above
-
-The rest of this version, in the order it landed:
-
 - `grep --history` searches every recorded version, `--regex` and `--word` search by shape.
 - `brief` answers where a session stands in one call, and `brief --fix` does the safe half of what
   it reports.
@@ -643,6 +498,27 @@ The rest of this version, in the order it landed:
 
 ### Fixed
 
+- A push that deletes a branch deletes it. The empty-pack path answered `ok` for every command
+  without doing anything, so git printed `- [deleted] throwaway` for a branch the server still had.
+- `delete-refs` is advertised, a zero new id is a deletion, `old` is checked before anything is
+  removed, a token scoped to other branches is refused, and the last branch cannot be deleted
+  because a repository with no branch refuses every command that needs one.
+- `tag` resolves its target before storing it. `tag v2 main` used to store the string `main`, and
+  the tag existed, appeared in the list, and resolved to nothing.
+- A tag may point at a branch, a changeset, or another tag, with a bounded walk so a cycle is
+  reported rather than hanging. `tag --list` no longer demands a name it does not use.
+- `blame --ignore-rev` names a revision whose lines should be attributed to the change before it,
+  and `.gesta-blame-ignore-revs` at the repository root is read without being asked.
+- A hook that changed after installation is refused rather than executed, and `hook status` shows
+  both hashes. `pre-land` runs before a branch merges into a shared target, which is when a change
+  stops being private and the last point where a failing suite costs one person instead of
+  everybody.
+- `review --from <branch>` uses the merge base rather than the other branch's head. Reviewing a
+  feature against a main that had moved one commit used to list every changeset main already had.
+- Three outcomes with three exit codes: passed, failed, and did not run. A skipped check was
+  recorded as a pass, and a mistyped step name selected nothing and printed the same sentence a full
+  pass prints. `osv` looked for its scanner at a one-off path and reported "did not run" on a
+  machine that had it installed.
 - A delta could not decode a line that was blank.
 - Undo to an empty branch left every file on disk.
 - Two paths differing only by a backslash collided on Unix.
@@ -651,9 +527,9 @@ The rest of this version, in the order it landed:
 - An installer left a partial file behind when a download failed.
 - A `winget` suggestion that changes nothing was replaced with the command that does.
 
-## 0.5.0, 2026-11-17
+## [0.5.0] - 2026-11-17
 
-### Delta compression, sparse checkout, structured conflicts, TLS
+### Added
 
 - Deltas are sent on the wire, so a bundle follows the size of the change rather than the size of
   the history.
@@ -661,14 +537,11 @@ The rest of this version, in the order it landed:
   the comparison so a file in the branch tree that was never written is not read as deleted.
 - `branch conflicts` reports a conflict as data, per region, with both sides and context.
 - TLS, behind a feature so a build without it stays small.
-
-### Remote
-
 - An S3 remote that needs no server, with SigV4 signing.
 - Remote credentials stored sealed, and a delta push no longer erases a bucket.
 - A branch list read from a bucket, and the hosting comparison in `docs/hosting.md`.
 
-### Safety
+### Changed
 
 - `undo` is reversible and keeps the working tree honest.
 - `land` uses a compare-and-swap, and the risk score learns from reverts.
@@ -676,14 +549,13 @@ The rest of this version, in the order it landed:
 - `diff --from` and `diff --to` compare any two revisions.
 - A pending snapshot that no longer matches the disk is reported.
 - A name that is not found reports what does exist.
-
-### Cost
-
 - The committed tree is read from a maintained table instead of rebuilt, so commit cost follows the
   size of the change rather than the size of the repository.
 - The ignore check allocates nothing per pattern.
 
-## 0.4.0, 2026-11-17
+## [0.4.0] - 2026-11-17
+
+### Added
 
 - Access control for the HTTP remote: tokens, and an access log.
 - MCP server over stdio, so an agent can act over the protocol.
@@ -691,16 +563,22 @@ The rest of this version, in the order it landed:
 - A stat cache, and a git comparison.
 - A release gate, which closed two dependency advisories on its first run.
 
-## 0.3.1, 2026-11-17
+## [0.3.1] - 2026-11-17
+
+### Added
 
 - An HTTP remote, so two machines can share a repository without a shared filesystem.
 
-## 0.3.0, 2026-11-17
+## [0.3.0] - 2026-11-17
+
+### Added
 
 - Three-way merge, undo, `fsck`, and bundles.
 - Usable as primary source control for one developer.
 
-## 0.2.0, 2026-11-17
+## [0.2.0] - 2026-11-17
+
+### Added
 
 - First version. Source control for AI agents: changesets, branches, a working tree, and a store.
 - Named ZenForge at this point. Renamed to gesta later in the same day, and the MCP tool prefix

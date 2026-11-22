@@ -2532,13 +2532,25 @@ def main():
         )
         record(
             "the changelog carries a section for the current version",
-            bool(cargo) and f"## {cargo}," in body,
-            f"version {cargo}: " + ("found" if f"## {cargo}," in body else "no section"),
+            bool(cargo) and f"## [{cargo}]" in body,
+            f"version {cargo}: "
+            + ("found" if f"## [{cargo}]" in body else "no section"),
+        )
+
+        # Keep a Changelog's shape, enforced rather than described. The file claimed to follow the
+        # convention for a long time while using freeform headings, and nothing checked the claim.
+        STANDARD = {"Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"}
+        record(
+            "the changelog names the convention and the versioning it follows",
+            "keepachangelog.com" in body and "semver.org" in body,
+            "header names both"
+            if "keepachangelog.com" in body and "semver.org" in body
+            else "header does not name both",
         )
 
         # Only one section may claim to be current, and no section may be empty.
         sections = _re.findall(r"^## (.+)$", body, _re.M)
-        versions = [s for s in sections if _re.match(r"\d+\.\d+\.\d+", s)]
+        versions = [s for s in sections if _re.match(r"\[?\d+\.\d+\.\d+\]?", s)]
         record(
             "every version section carries a date",
             all(_re.search(r"\d{4}-\d{2}-\d{2}", s) for s in versions) if versions else False,
@@ -2546,8 +2558,24 @@ def main():
         )
         record(
             "the newest version section is the current one",
-            bool(versions) and versions[0].startswith(cargo),
+            bool(versions) and versions[0].lstrip("[").startswith(cargo),
             f"newest {versions[0] if versions else 'none'} against {cargo}",
+        )
+        shape = _re.compile(r"^\[\d+\.\d+\.\d+\] - \d{4}-\d{2}-\d{2}$")
+        record(
+            "version headings use the standard bracket and dash form",
+            all(shape.match(s) for s in versions) if versions else False,
+            "; ".join(v for v in versions if not shape.match(v)) or "all conform",
+        )
+
+        # Every subheading has to be one of the six. A freeform heading reads as prose and gives a
+        # reader scanning for "what broke" nowhere to look.
+        heads = _re.findall(r"^### (.+)$", body, _re.M)
+        odd = [h for h in heads if h not in STANDARD]
+        record(
+            "every change is grouped under one of the six standard categories",
+            not odd,
+            f"not standard: {', '.join(odd[:5])}" if odd else f"{len(heads)} headings, all standard",
         )
 
         # A section with no bullet means a version was bumped without saying what happened.

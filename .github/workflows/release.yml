@@ -192,11 +192,20 @@ jobs:
         run: |
           set -e
           TAG="${GITHUB_REF_NAME}"
-          # The release is created by hand before this runs, with the notes from CHANGELOG.md. This
-          # step only attaches binaries, so a release's prose stays where a person wrote it.
+          VERSION="${TAG#v}"
+          # The notes are the changelog's section for this version, extracted here rather than
+          # written by hand. A release whose body is empty while the changelog holds a full section
+          # is a release nobody can read, and the file already claims to be the source.
+          python3 - "$VERSION" > /tmp/notes.md <<'PY'
+          import re, sys
+          version = sys.argv[1]
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.S | re.M)
+          body = (m.group(1).strip() if m else "")
+          print(body if body else f"See CHANGELOG.md for the entries in {version}.")
+          PY
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            echo "no release for $TAG yet; creating one without notes"
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "gesta ${TAG#v}" --notes ""
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "gesta $VERSION" --notes-file /tmp/notes.md
           fi
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0 |
             xargs -0 gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber
