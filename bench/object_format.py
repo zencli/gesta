@@ -56,20 +56,25 @@ def main():
         mine = os.path.join(d, "mine")
         os.makedirs(mine)
         sh(["init"], mine)
+        # SHA-256 repositories are read and written, not refused. This bench used to assert the
+        # refusal, which was the behaviour before that support landed, so it went from 7/7 to 4/7 the
+        # day the tool got better at its job. What matters now is that the import is faithful.
         r = sh(["git", "import", r256], mine)
         out = (r.stdout + r.stderr)
-        checks.append(("a sha256 repository is refused", r.returncode != 0, f"rc={r.returncode}"))
-        # The message legitimately contains the words "missing objects", because it explains what
-        # an import would report. The check is that the refusal is a refusal about the format, not a
-        # report that a file is missing: it has to name SHA-256 and it must not be the shape a broken
-        # store produces.
-        checks.append(("the refusal names SHA-256",
-                       "SHA-256" in out, out.strip()[:160]))
-        checks.append(("the refusal is not a missing-file error",
-                       "no such file" not in out.lower() and "cannot read" not in out.lower(),
-                       out.strip()[:160]))
-        checks.append(("the refusal names the way out",
-                       "--object-format=sha1" in out, out.strip()[:160]))
+        checks.append(("a sha256 repository is imported, not refused",
+                       r.returncode == 0, out.strip()[:200]))
+        checks.append(("the import is not a silent empty one",
+                       "imported 1 commit" in out or "1 path change" in out, out.strip()[:200]))
+        # The imported content has to be the content, read back through this tool's own commands.
+        # An import that stores nothing and reports success is the failure worth catching.
+        shown = sh(["show", "f.txt"], mine)
+        checks.append(("the imported file reads back with its content",
+                       shown.returncode == 0 and "hello" in shown.stdout,
+                       (shown.stdout + shown.stderr).strip()[:200]))
+        # And a store records the digest it was built with, so a later read does not guess.
+        st = sh(["stats"], mine)
+        checks.append(("the imported store records sha256 as its format",
+                       "sha256" in st.stdout.lower(), (st.stdout + st.stderr).strip()[:200]))
 
         # A sha1 repository beside it must still import, or the guard broke the normal path.
         r1 = os.path.join(d, "r1")
