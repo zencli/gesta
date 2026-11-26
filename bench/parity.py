@@ -344,7 +344,7 @@ def main():
         r = sh(f"{GESTA} --json diff --from {base_id} --to {fix_id}", cwd=cp)
         check(
             "diff range has a JSON form",
-            r.returncode == 0 and r.stdout.strip().startswith("[") and '"path"' in r.stdout,
+            r.returncode == 0 and r.stdout.strip().startswith("{") and '"path"' in r.stdout,
             r.stdout[:150] + r.stderr,
         )
         r = sh(f"{GESTA} diff --from nope-nope --to {fix_id}", cwd=cp)
