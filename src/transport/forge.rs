@@ -362,12 +362,20 @@ pub fn push_branch(
     branch: &str,
     remote_ref: &str,
 ) -> ZResult<UpdateResult> {
-    push_refs(
+    let mut out = push_refs(
         conn,
         root,
         endpoint,
         &[(branch.to_string(), remote_ref.to_string())],
-    )
+    )?;
+    // One pair in, one result out. `push_refs` answers per ref so a multi-ref push can report every
+    // one; this caller asked for exactly one.
+    out.pop().ok_or_else(|| {
+        Box::new(Error::new(
+            Code::Remote,
+            "the remote reported nothing for the branch that was pushed".to_string(),
+        )) as Box<dyn std::error::Error>
+    })
 }
 
 /// Move every local branch to a ref of the same name on the remote.
@@ -406,7 +414,7 @@ pub fn push_all(
     if pairs.is_empty() {
         return Ok(Vec::new());
     }
-    push_refs(conn, root, endpoint, &pairs).map(|one| vec![one])
+    push_refs(conn, root, endpoint, &pairs)
 }
 
 /// The push itself: every (local branch, remote ref) pair in one request, one pack.
@@ -415,7 +423,7 @@ fn push_refs(
     root: &std::path::Path,
     endpoint: &Endpoint,
     pairs: &[(String, String)],
-) -> ZResult<UpdateResult> {
+) -> ZResult<Vec<UpdateResult>> {
     let adv = advertise(endpoint)?;
 
     // One export gives both the ref names and every object, which is what a push needs: the ids to set
@@ -457,16 +465,17 @@ fn push_refs(
     }
 
     if updates.is_empty() {
-        // Every requested ref is already where the caller wants it. Reporting the first name keeps the
-        // answer shaped like the others; the message is what a reader needs.
-        return Ok(UpdateResult {
-            name: pairs
-                .first()
-                .map(|(_, r)| r.clone())
-                .unwrap_or_else(|| "refs/heads/main".to_string()),
-            ok: true,
-            message: "already at that id, nothing to send".to_string(),
-        });
+        // Every requested ref is already where the caller wants it. One entry per pair, so the answer
+        // has the same shape as a push that moved something - the caller prints one line per element
+        // and a short list would read as a short push.
+        return Ok(pairs
+            .iter()
+            .map(|(_, r)| UpdateResult {
+                name: r.clone(),
+                ok: true,
+                message: "already at that id, nothing to send".to_string(),
+            })
+            .collect());
     }
 
     let mut have: HashSet<String> = HashSet::new();
@@ -540,17 +549,6 @@ fn push_refs(
     // layers and `strip_side_band` alone sees the chunk header as a bad frame and gives up.
     let plain = crate::transport::http::dechunk(&resp);
     let report = parse_report(&crate::transport::http::strip_side_band(&plain));
-    let want_ref = &updates[0].name;
-    let mine = report
-        .iter()
-        .find(|r| &r.name == want_ref)
-        .or_else(|| report.first())
-        .cloned()
-        .unwrap_or(UpdateResult {
-            name: want_ref.clone(),
-            ok: false,
-            message: "the remote sent no report".to_string(),
-        });
 
     // Every command has to be acknowledged. A push of three refs where one was refused is a failed
     // push, and reporting the first name as if it spoke for all of them is how a partial push reads
@@ -569,21 +567,56 @@ fn push_refs(
             ),
         )));
     }
-    if !mine.ok {
+
+    // One result per command, not one result for the batch. `push_all` sent every branch in this
+    // single request, and the old shape - picking `updates[0]` and returning it - meant a successful
+    // push of five branches was reported as one, so the caller's `--all` and `--json` both named only
+    // the first. A refused ref already errored above; this is the success report, and it has to
+    // account for every ref the request carried.
+    if report.is_empty() {
         return Err(Box::new(Error::new(
             Code::Remote,
-            format!(
-                "the forge rejected {}: {}",
-                want_ref,
-                if mine.message.is_empty() {
-                    "no reason given"
-                } else {
-                    &mine.message
-                }
-            ),
+            "the remote sent no report, so the push cannot be confirmed".to_string(),
         )));
     }
-    Ok(mine)
+    results_for(&updates, &report)
+}
+
+/// One result per update the request carried, in request order.
+///
+/// Split out of `push_refs` so the mapping can be tested without a server: the fault this fixes was
+/// in the mapping, not in the transport. A ref the report skipped is an error rather than a silent
+/// omission, because the request carried it and nothing said it landed.
+pub fn results_for(updates: &[Update], report: &[UpdateResult]) -> ZResult<Vec<UpdateResult>> {
+    let mut out: Vec<UpdateResult> = Vec::with_capacity(updates.len());
+    for u in updates {
+        let r = report
+            .iter()
+            .find(|r| r.name == u.name)
+            .cloned()
+            .ok_or_else(|| {
+                Box::new(Error::new(
+                    Code::Remote,
+                    format!("the remote did not acknowledge {}", u.name),
+                )) as Box<dyn std::error::Error>
+            })?;
+        if !r.ok {
+            return Err(Box::new(Error::new(
+                Code::Remote,
+                format!(
+                    "the forge rejected {}: {}",
+                    r.name,
+                    if r.message.is_empty() {
+                        "no reason given"
+                    } else {
+                        &r.message
+                    }
+                ),
+            )));
+        }
+        out.push(r);
+    }
+    Ok(out)
 }
 
 fn bad(msg: String) -> Box<Error> {
@@ -680,6 +713,74 @@ mod tests {
         // The pack follows the flush, and it is a pack.
         let pack_at = body.windows(4).position(|w| w == b"PACK").expect("a pack");
         assert_eq!(&body[pack_at..pack_at + 4], b"PACK");
+    }
+
+    #[test]
+    fn every_ref_the_request_carried_is_reported_back() {
+        // `push_refs` returned `updates[0]`'s result and `push_all` wrapped it in `vec![one]`, so a push
+        // that moved three branches was reported as one. `--all` and `--json` both named only that one,
+        // which is the partial-push-reads-as-a-success the module doc warns about.
+        let updates = vec![
+            Update {
+                name: "refs/heads/main".into(),
+                old: "a".repeat(40),
+                new: "b".repeat(40),
+            },
+            Update {
+                name: "refs/heads/release".into(),
+                old: "0".repeat(40),
+                new: "c".repeat(40),
+            },
+            Update {
+                name: "refs/heads/side".into(),
+                old: "0".repeat(40),
+                new: "d".repeat(40),
+            },
+        ];
+        let report: Vec<UpdateResult> = updates
+            .iter()
+            .map(|u| UpdateResult {
+                name: u.name.clone(),
+                ok: true,
+                message: String::new(),
+            })
+            .collect();
+
+        let out = results_for(&updates, &report).unwrap();
+        assert_eq!(out.len(), 3, "one result per ref, not one for the batch");
+        assert_eq!(
+            out.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            vec!["refs/heads/main", "refs/heads/release", "refs/heads/side"],
+            "request order, every name present"
+        );
+    }
+
+    #[test]
+    fn a_ref_the_report_skipped_is_an_error_not_a_silent_omission() {
+        // The request carried three refs and the report acknowledged two. Answering with two results
+        // would make the caller print two lines and call it a complete push.
+        let updates = vec![
+            Update {
+                name: "refs/heads/main".into(),
+                old: "a".repeat(40),
+                new: "b".repeat(40),
+            },
+            Update {
+                name: "refs/heads/gone".into(),
+                old: "0".repeat(40),
+                new: "c".repeat(40),
+            },
+        ];
+        let report = vec![UpdateResult {
+            name: "refs/heads/main".into(),
+            ok: true,
+            message: String::new(),
+        }];
+        let err = results_for(&updates, &report).expect_err("an unacknowledged ref is a failure");
+        assert!(
+            format!("{err}").contains("refs/heads/gone"),
+            "the message must name the ref nobody acknowledged, got: {err}"
+        );
     }
 
     #[test]
