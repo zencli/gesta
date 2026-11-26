@@ -332,7 +332,7 @@ pub fn cmd_history(file: &str) -> ZResult<()> {
 pub fn cmd_log_json(limit: usize, envelope: bool) -> ZResult<()> {
     let (_root, conn) = open_repo()?;
     let mut stmt = conn.prepare(
-        "SELECT id, message, author, created_at, status, parent FROM changesets
+        "SELECT id, message, author, created_at, status, parent, session, intent FROM changesets
          ORDER BY created_at DESC, rowid DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(rusqlite::params![limit as i64], |r| {
@@ -345,6 +345,18 @@ pub fn cmd_log_json(limit: usize, envelope: bool) -> ZResult<()> {
             (
                 "parent",
                 r.get::<_, Option<String>>(5)?
+                    .map(Json::str)
+                    .unwrap_or(Json::Null),
+            ),
+            (
+                "session",
+                r.get::<_, Option<String>>(6)?
+                    .map(Json::str)
+                    .unwrap_or(Json::Null),
+            ),
+            (
+                "intent",
+                r.get::<_, Option<String>>(7)?
                     .map(Json::str)
                     .unwrap_or(Json::Null),
             ),
@@ -494,7 +506,7 @@ pub fn cmd_history_json(file: &str) -> YResultAlias {
             Ok(Json::obj(vec![
                 ("path", Json::str(r.get::<_, String>(0)?)),
                 ("version", Json::int(r.get::<_, i64>(1)?)),
-                ("hash", Json::str(r.get::<_, String>(2)?)),
+                ("file_hash", Json::str(r.get::<_, String>(2)?)),
                 ("created_at", Json::int(r.get::<_, i64>(3)?)),
                 ("changeset", Json::str(r.get::<_, String>(4)?)),
                 ("message", Json::str(r.get::<_, String>(5)?)),
