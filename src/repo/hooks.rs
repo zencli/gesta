@@ -74,6 +74,34 @@ pub fn git_name(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether a hook file at this path would actually run.
+///
+/// The module promises that nothing runs "unless a file with the hook name exists and is
+/// executable", so executable is part of the test, not a detail of what happens afterwards. On
+/// Unix a file that exists without an execute bit is a draft or a hook somebody disabled by
+/// clearing the bit; handing it to `Command::new` fails with permission denied and turns a
+/// deliberate "off" into a refusal that blocks every commit, land and push.
+///
+/// Windows has no execute bit: a file runs by its extension, and the hook name already carries
+/// `.cmd`, so existence is the whole test there.
+fn is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::metadata(path) {
+            Ok(m) => m.permissions().mode() & 0o111 != 0,
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 /// A hook program in `.git/hooks`, when the repository sits beside a git checkout.
 ///
 /// Not a compatibility layer with arguments rewritten: a git hook expects the same three arguments
@@ -192,8 +220,15 @@ pub fn status(root: &Path) -> ZResult<Vec<HookState>> {
     let mut out = Vec::new();
     for name in HOOKS {
         let path = path_of(root, name);
-        let own = path.is_file();
-        let git = if own { None } else { git_hook(root, name) };
+        // `installed` here means "would run", the same question `run` asks. A file whose execute bit
+        // was cleared is present but off, and reporting it as installed would put `hook status` at
+        // odds with a commit that silently skipped it.
+        let own = is_executable(&path);
+        let git = if own {
+            None
+        } else {
+            git_hook(root, name).filter(|p| is_executable(p))
+        };
         let installed = own || git.is_some();
         let source = if own { Some(path) } else { git };
         let current = source
@@ -222,12 +257,18 @@ pub fn run(root: &Path, name: &str, args: &[&str]) -> ZResult<()> {
     // A hook installed here takes precedence. When there is none, a git hook at the matching point
     // runs: an author who already wrote that guard should not find it silently ignored just because
     // this tool keeps its hooks in a different directory.
-    let (path, from_git) = if path.is_file() {
+    //
+    // `is_executable`, not `is_file`: a file that exists without the execute bit is a hook somebody
+    // turned off, and running it anyway would block every commit with a permission error instead of
+    // doing nothing. See `is_executable` for why that distinction is the whole point.
+    let (path, from_git) = if is_executable(&path) {
         (path, false)
     } else {
         match git_hook(root, name) {
-            Some(p) => (p, true),
-            None => return Ok(()),
+            // git itself ignores a hook file without the execute bit, so honouring one here would
+            // run something git would not - and block the operation doing it.
+            Some(p) if is_executable(&p) => (p, true),
+            _ => return Ok(()),
         }
     };
 
@@ -332,9 +373,9 @@ pub fn sources(root: &Path) -> Vec<(String, Option<&'static str>)> {
     HOOKS
         .iter()
         .map(|h| {
-            let source = if path_of(root, h).is_file() {
+            let source = if is_executable(&path_of(root, h)) {
                 Some("installed")
-            } else if git_hook(root, h).is_some() {
+            } else if git_hook(root, h).filter(|p| is_executable(p)).is_some() {
                 Some("git")
             } else {
                 None
@@ -370,6 +411,76 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn a_hook_without_the_execute_bit_is_skipped_not_refused() {
+        // The module promises nothing runs "unless a file exists and is executable". A file that
+        // exists without the bit is a hook somebody turned off, and refusing the operation over it
+        // blocks every commit for a guard the author deliberately disabled.
+        let d = tmp("noexec");
+        let path = path_of(&d, "pre-commit");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o644);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+
+        // A body that fails when run proves the difference: skipping is not "it happened to pass".
+        assert!(
+            run(&d, "pre-commit", &[]).is_ok(),
+            "a non-executable hook must be treated as absent, not as a refusal"
+        );
+        // And it is not reported as installed, or `hook status` would disagree with the commit.
+        let sources = sources(&d);
+        assert_eq!(
+            sources
+                .iter()
+                .find(|(n, _)| n == "pre-commit")
+                .map(|(_, s)| *s),
+            Some(None),
+            "a hook that would not run must not be listed as a source"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn making_the_execute_bit_fail_makes_the_hook_run_again() {
+        // The complement of the test above: set the bit and the same body must now run and fail.
+        // Without this, a fix that skipped every hook would pass the skip test.
+        let d = tmp("chan");
+        let path = path_of(&d, "pre-commit");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "#!/bin/sh\nexit 7\n").unwrap();
+        record_installed(&d, "pre-commit", "#!/bin/sh\nexit 7\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o644);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        assert!(
+            run(&d, "pre-commit", &[]).is_ok(),
+            "off while not executable"
+        );
+
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        let e = run(&d, "pre-commit", &[]).unwrap_err().to_string();
+        assert!(
+            e.contains('7'),
+            "with the bit set the hook runs and its code is reported, got {}",
+            e
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_missing_hook_is_not_an_error() {
         let d = tmp("absent");
