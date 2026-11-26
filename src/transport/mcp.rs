@@ -5,7 +5,7 @@
 //! in `tool_definitions` and dispatched in `call_tool`, so adding a tool means
 //! touching both in one place.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::Path;
 
 use rusqlite::Connection;
@@ -190,19 +190,67 @@ fn tool(name: &str, description: &str, schema: Json) -> Json {
     ])
 }
 
+/// The longest line the server will read. A client that never sends a newline would otherwise grow
+/// one line until the process runs out of memory, and a runaway local agent is exactly the caller
+/// this server has.
+const MAX_LINE: usize = 8 * 1024 * 1024;
+
 /// Run the server on stdin/stdout until the client closes the stream.
+///
+/// A malformed line is answered with a parse error and the loop continues. `BufRead::lines` yields
+/// `Err` on a line that is not valid UTF-8, and the earlier `while let Some(Ok(line))` shape ended
+/// the loop on the first such line: the server returned `Ok(())` and vanished, which the client saw
+/// as a dead subprocess with no diagnostic anywhere.
 pub fn serve_stdio(root: &Path) -> ZResult<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    let mut lines = stdin.lock().lines();
+    let mut reader = std::io::BufReader::new(stdin.lock());
+    let mut buf: Vec<u8> = Vec::new();
 
-    while let Some(Ok(line)) = lines.next() {
-        let line = line.trim();
-        if line.is_empty() {
+    loop {
+        buf.clear();
+        // A bounded read, so one endless line cannot take the process with it.
+        let read = match reader
+            .by_ref()
+            .take(MAX_LINE as u64)
+            .read_until(b'\n', &mut buf)
+        {
+            Ok(0) => break,
+            Ok(n) => n,
+            // The stream itself failed. There is nothing left to read, and saying so beats a silent
+            // exit that looks like the client hung up.
+            Err(e) => return Err(crate::bad(format!("reading stdin failed: {}", e))),
+        };
+        if read == buf.len() && buf.last() != Some(&b'\n') && buf.len() >= MAX_LINE {
+            // A line longer than the cap: refuse it and keep the connection, because the client may
+            // recover and the alternative is dying on one bad message.
+            let _ = writeln!(
+                stdout,
+                "{}",
+                error_response(Json::Null, -32700, "parse error: line too long").render()
+            );
+            let _ = stdout.flush();
             continue;
         }
-        let response = handle_line(root, line);
-        if let Some(r) = response {
+        let text = match std::str::from_utf8(&buf) {
+            Ok(t) => t.trim(),
+            Err(_) => {
+                // Invalid UTF-8 is a client bug, not a reason to die. JSON-RPC has one code for "I
+                // could not read this message".
+                let _ = writeln!(
+                    stdout,
+                    "{}",
+                    error_response(Json::Null, -32700, "parse error: line is not valid UTF-8")
+                        .render()
+                );
+                let _ = stdout.flush();
+                continue;
+            }
+        };
+        if text.is_empty() {
+            continue;
+        }
+        if let Some(r) = handle_line(root, text) {
             writeln!(stdout, "{}", r.render())?;
             stdout.flush()?;
         }

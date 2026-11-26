@@ -115,19 +115,46 @@ pub fn with_retry<T>(mut f: impl FnMut() -> ZResult<T>) -> ZResult<T> {
 /// milliseconds of every command, which is the whole reason `bench/long_history.py` read a slope: it
 /// was timing the schema check, not the commit.
 ///
-/// Cached by table name. The cache is per process, which is correct here because a column is only
-/// added by this function and the entry is updated when that happens.
+/// Cached by (database path, table). Keying on the table alone is only safe while one process opens
+/// one database, and that is not a rule anything enforces: the server opens a connection per
+/// request, and a caller that ever opens two repositories would find a column present in the first
+/// suppressing the ALTER in the second, then fail with "no such column" on a query that should work.
 fn columns_cached(conn: &Connection, table: &str) -> ZResult<Vec<String>> {
     use std::cell::RefCell;
     thread_local! {
-        static CACHE: RefCell<std::collections::HashMap<String, Vec<String>>> =
+        // Keyed by (database path, table). The path is cached per connection so the PRAGMA below runs
+        // once per connection rather than once per column check: `ensure_column` runs for every column
+        // on every open, and a query there is exactly the cost this cache exists to remove.
+        static CACHE: RefCell<std::collections::HashMap<(String, String), Vec<String>>> =
+            RefCell::new(std::collections::HashMap::new());
+        static DB_PATH: RefCell<std::collections::HashMap<usize, String>> =
             RefCell::new(std::collections::HashMap::new());
     }
-    if let Some(hit) = CACHE.with(|c| c.borrow().get(table).cloned()) {
+    // The connection's address is a stable identity for its lifetime and does not borrow it. A closed
+    // connection's entry is harmless: a new connection at the same address would read the same path
+    // only if it opened the same file, and a different file gets a different answer from the PRAGMA
+    // the first time the key is missing.
+    let id = conn as *const Connection as usize;
+    let db = match DB_PATH.with(|c| c.borrow().get(&id).cloned()) {
+        Some(p) => p,
+        None => {
+            let p: String = conn
+                .query_row("PRAGMA database_list", [], |r| {
+                    r.get::<_, Option<String>>(2)
+                })
+                .unwrap_or(None)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| ":memory:".to_string());
+            DB_PATH.with(|c| c.borrow_mut().insert(id, p.clone()));
+            p
+        }
+    };
+    let key = (db, table.to_string());
+    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return Ok(hit);
     }
     let cols = table_columns(conn, table)?;
-    CACHE.with(|c| c.borrow_mut().insert(table.to_string(), cols.clone()));
+    CACHE.with(|c| c.borrow_mut().insert(key, cols.clone()));
     Ok(cols)
 }
 

@@ -117,22 +117,35 @@ pub fn detect_renames(conn: &Connection, changeset: &str, threshold: f64) -> ZRe
 
 /// Fraction of lines shared between two texts, 0.0 to 1.0.
 ///
-/// Uses the line counts and the longest common subsequence, so an edit that
-/// keeps most lines scores high and a full rewrite scores near zero.
+/// Dice's coefficient over the line sets: `2 * common / (len_a + len_b)`, where `common` comes from
+/// the diff's own counts. Both sides count, so the score is symmetric and cannot leave the range.
+///
+/// The earlier version counted only removed lines and divided by the sum of both lengths, which
+/// made a one-line file that shares nothing with a hundred-line file score 0.98 as a "rename", and
+/// the same pair the other way round score -0.98 against a documented floor of 0.0.
 pub fn similarity(a: &str, b: &str) -> f64 {
     if a == b {
         return 1.0;
     }
-    if a.is_empty() || b.is_empty() {
-        return 0.0;
-    }
-    let total = a.lines().count() + b.lines().count();
+    let la = a.lines().count();
+    let lb = b.lines().count();
+    let total = la + lb;
     if total == 0 {
         return 1.0;
     }
+    if la == 0 || lb == 0 {
+        return 0.0;
+    }
     let (removed, _added) = crate::repo::merge::line_diff(a, b);
-    let changed = removed.len();
-    1.0 - (2.0 * changed as f64) / total as f64
+    // Every line of one side is either common with the other side or part of a change. `la` counts
+    // what the diff saw as removed plus what it left alone, so the unchanged count is `la - removed`.
+    // The same lines must also be the ones kept on the other side, so this is the LCS length.
+    let common = la.saturating_sub(removed.len());
+    let dice = (2 * common) as f64 / total as f64;
+    // A diff that reports more removals than the file has lines, or an added count that does not fit
+    // the other side, is a mismatch between the diff and the texts. Clamping keeps the documented
+    // range rather than letting a caller see 1.02 or -0.1.
+    dice.clamp(0.0, 1.0)
 }
 
 /// Every path `path` was previously called, following detected renames
