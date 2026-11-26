@@ -2,6 +2,23 @@
 
 use super::*;
 
+/// Whether this database already holds the schema, asking the database rather than guessing.
+///
+/// `COUNT(*)` always returns a row, so a failure here means the database could not answer - a lock,
+/// a corrupt file. That distinction is the whole point: answering "could not read" with 0 sends the
+/// caller to `init_schema`, which writes a fresh schema over a store it never read. Reporting the
+/// error leaves the damaged store alone, which is the only recoverable outcome.
+///
+/// Split out of `cmd_init` so the distinction can be tested without a terminal or a directory.
+fn schema_present(conn: &Connection) -> ZResult<bool> {
+    let has_schema: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='changesets'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(has_schema > 0)
+}
+
 pub fn cmd_init(bare: bool) -> ZResult<()> {
     let root = std::env::current_dir()?;
     let zf = repo_dir(&root);
@@ -11,14 +28,7 @@ pub fn cmd_init(bare: bool) -> ZResult<()> {
         // a repository" then leaves every command failing with "no such table: changesets" and no
         // way to recover except deleting the directory by hand.
         let conn = open_db(&root)?;
-        let has_schema: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='changesets'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        if has_schema > 0 {
+        if schema_present(&conn)? {
             println!("already a repository: {}", zf.display());
             return Ok(());
         }
@@ -197,4 +207,44 @@ pub(crate) fn pending_out_of_date(
         }
     }
     Ok(stale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_store_has_no_schema() {
+        // The genuine "no schema" answer, so a fix that reported `true` everywhere would fail here.
+        // Not `mem_db`: that fixture creates the schema, which is the opposite of what this asks.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        assert!(!schema_present(&conn).unwrap());
+        conn.execute(
+            "CREATE TABLE changesets (id TEXT PRIMARY KEY, message TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        assert!(schema_present(&conn).unwrap());
+    }
+
+    #[test]
+    fn a_store_that_cannot_be_read_is_an_error_not_an_empty_one() {
+        // `unwrap_or(0)` turned every failure into "no schema", and `init_schema` then wrote a fresh
+        // schema over a store it had never read. A file that is not a database is the reachable
+        // stand-in: SQLite opens the handle and refuses the first query, which is exactly what a
+        // corrupt store does.
+        let dir = std::env::temp_dir().join(format!("gesta-cmdinit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("not-a-db");
+        std::fs::write(&db, b"this is not a SQLite file\n").unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+
+        let err = schema_present(&conn);
+        assert!(
+            err.is_err(),
+            "a store that cannot be queried must report the error, not answer false"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -165,13 +165,17 @@ pub fn cmd_branch_protect(name: &str, unset: bool) -> ZResult<()> {
 /// Sign off a changeset.
 pub fn cmd_approve(id: &str, by: &str) -> ZResult<()> {
     let (root, conn) = open_repo()?;
+    // `optional()?` then a targeted not-found, not `map_err(|_| ...)`: the old form turned every
+    // failure - a locked database, a missing column - into "no such changeset", so a caller whose
+    // store could not be read was told their changeset did not exist.
     let branch: String = conn
         .query_row(
             "SELECT COALESCE(branch, 'main') FROM changesets WHERE id = ?1",
             rusqlite::params![id],
             |r| r.get(0),
         )
-        .map_err(|_| bad(format!("no such changeset: {}", id)))?;
+        .optional()?
+        .ok_or_else(|| bad(format!("no such changeset: {}", id)))?;
     crate::support::approval::approve(&conn, id, &branch, by)?;
     // A sign-off is the event a protected branch turns on, so it is exactly as worth a line as a
     // refused request.
