@@ -21,8 +21,18 @@ fn branch_names(conn: &rusqlite::Connection) -> String {
     format!("; known branches: {}", names.join(", "))
 }
 
-pub fn cmd_branch_create(name: &str, from: &str) -> ZResult<()> {
-    let (_root, conn) = open_repo()?;
+/// What creating a branch did, so the text and JSON forms describe the same event.
+pub struct BranchCreated {
+    pub name: String,
+    pub from: String,
+    pub head: Option<String>,
+    /// False when the branch was already there. A create that is already satisfied is not an error,
+    /// which is the same answer the text form gave and the reason this is a field rather than an
+    /// `Err`.
+    pub created: bool,
+}
+
+pub fn branch_create(conn: &Connection, name: &str, from: &str) -> ZResult<BranchCreated> {
     let exists: Option<String> = conn
         .query_row(
             "SELECT name FROM branches WHERE name = ?1",
@@ -31,10 +41,14 @@ pub fn cmd_branch_create(name: &str, from: &str) -> ZResult<()> {
         )
         .optional()?;
     if exists.is_some() {
-        println!("branch {} already exists", name);
-        return Ok(());
+        return Ok(BranchCreated {
+            name: name.to_string(),
+            from: from.to_string(),
+            head: branch_head(conn, name)?,
+            created: false,
+        });
     }
-    let head = branch_head(&conn, from)?;
+    let head = branch_head(conn, from)?;
     conn.execute(
         "INSERT INTO branches(name, head, created_at, from_branch) VALUES(?1, ?2, ?3, ?4)",
         rusqlite::params![name, head, now(), from],
@@ -42,13 +56,28 @@ pub fn cmd_branch_create(name: &str, from: &str) -> ZResult<()> {
     // A new branch points at the same changeset, so it starts with the same
     // committed tree. Without this the branch reads as an empty tree until its
     // first commit, and `status` on it reports every file as new.
-    crate::store::refresh_branch_tree(&conn, name)?;
-    ops::record(&conn, "branch create", Some(name), Some(from))?;
+    crate::store::refresh_branch_tree(conn, name)?;
+    ops::record(conn, "branch create", Some(name), Some(from))?;
+    Ok(BranchCreated {
+        name: name.to_string(),
+        from: from.to_string(),
+        head,
+        created: true,
+    })
+}
+
+pub fn cmd_branch_create(name: &str, from: &str) -> ZResult<()> {
+    let (_root, conn) = open_repo()?;
+    let out = branch_create(&conn, name, from)?;
+    if !out.created {
+        println!("branch {} already exists", out.name);
+        return Ok(());
+    }
     println!(
         "created branch {} from {} at {}",
-        name,
-        from,
-        head.unwrap_or_else(|| "(empty)".into())
+        out.name,
+        out.from,
+        out.head.unwrap_or_else(|| "(empty)".into())
     );
     Ok(())
 }
@@ -78,43 +107,76 @@ pub fn cmd_branch_list() -> ZResult<()> {
     Ok(())
 }
 
-pub fn cmd_branch_switch(name: &str) -> ZResult<()> {
-    let (root, conn) = open_repo()?;
-    let target = branch_head(&conn, name)?;
-    set_state(&conn, "current_branch", name)?;
+/// What switching a branch did.
+pub struct BranchSwitched {
+    pub current: String,
+    pub previous: Option<String>,
+    pub head: Option<String>,
+    pub written: usize,
+    pub removed: usize,
+}
+
+pub fn branch_switch(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    name: &str,
+) -> ZResult<BranchSwitched> {
+    let previous = crate::store::current_branch(conn).ok();
+    let target = branch_head(conn, name)?;
+    set_state(conn, "current_branch", name)?;
     // Switching branches must make the working tree match the new head, or the
     // next status would report every file as modified.
-    let (written, removed) = repo::restore_worktree(&conn, &root, name)?;
-    ops::record(&conn, "branch switch", Some(name), None)?;
+    let (written, removed) = repo::restore_worktree(conn, root, name)?;
+    ops::record(conn, "branch switch", Some(name), None)?;
     // After the tree has moved, so a hook that rebuilds something sees the files it is rebuilding
     // from. A hook that ran before the checkout would read the branch it is leaving.
-    repo::hooks::run(&root, "post-checkout", &["branch", name])?;
-    println!(
-        "switched to branch {} ({} file(s) materialised, {} removed, head {})",
-        name,
+    repo::hooks::run(root, "post-checkout", &["branch", name])?;
+    Ok(BranchSwitched {
+        current: name.to_string(),
+        previous,
+        head: target,
         written,
         removed,
-        target.unwrap_or_else(|| "(empty)".into())
+    })
+}
+
+pub fn cmd_branch_switch(name: &str) -> ZResult<()> {
+    let (root, conn) = open_repo()?;
+    let out = branch_switch(&conn, &root, name)?;
+    println!(
+        "switched to branch {} ({} file(s) materialised, {} removed, head {})",
+        out.current,
+        out.written,
+        out.removed,
+        out.head.unwrap_or_else(|| "(empty)".into())
     );
     Ok(())
 }
 
-pub fn cmd_branch_delete(name: &str) -> ZResult<()> {
-    let (_root, conn) = open_repo()?;
-    let cur = current_branch(&conn)?;
+/// What deleting a branch did. `head` is the changeset it pointed at, so a caller can name what it
+/// removed after the branch is gone.
+pub struct BranchDeleted {
+    pub name: String,
+    pub head: Option<String>,
+    pub deleted: bool,
+}
+
+pub fn branch_delete(conn: &rusqlite::Connection, name: &str) -> ZResult<BranchDeleted> {
+    let cur = current_branch(conn)?;
     if name == cur {
         return Err(bad(format!(
             "cannot delete the branch you are on ({})",
             name
         )));
     }
-    if branch_head(&conn, name).is_err() {
+    if branch_head(conn, name).is_err() {
         return Err(bad(format!(
             "no such branch: {}{}",
             name,
-            branch_names(&conn)
+            branch_names(conn)
         )));
     }
+    let head = branch_head(conn, name)?;
     conn.execute(
         "DELETE FROM branches WHERE name = ?1",
         rusqlite::params![name],
@@ -125,44 +187,63 @@ pub fn cmd_branch_delete(name: &str) -> ZResult<()> {
         "DELETE FROM branch_tree WHERE branch = ?1",
         rusqlite::params![name],
     )?;
-    ops::record(&conn, "branch delete", Some(name), None)?;
-    println!("deleted branch {}", name);
+    ops::record(conn, "branch delete", Some(name), None)?;
+    Ok(BranchDeleted {
+        name: name.to_string(),
+        head,
+        deleted: true,
+    })
+}
+
+pub fn cmd_branch_delete(name: &str) -> ZResult<()> {
+    let (_root, conn) = open_repo()?;
+    let out = branch_delete(&conn, name)?;
+    println!("deleted branch {}", out.name);
     Ok(())
 }
 
-/// Protect a branch, or stop protecting it.
-///
-/// The gate is a row on the branch plus an approval per changeset, and both live in the store, so a
-/// clone carries them. A hook file would be simpler and would also be something an operator has to
-/// install and keep installed.
-pub fn cmd_branch_protect(name: &str, unset: bool) -> ZResult<()> {
-    let (_root, conn) = open_repo()?;
-    if crate::store::branch_head(&conn, name).is_err() {
+/// What protecting a branch did.
+pub struct BranchProtected {
+    pub name: String,
+    pub protected: bool,
+}
+
+pub fn branch_protect(conn: &Connection, name: &str, unset: bool) -> ZResult<BranchProtected> {
+    if crate::store::branch_head(conn, name).is_err() {
         return Err(bad(format!(
             "no such branch: {}{}",
             name,
-            branch_names(&conn)
+            branch_names(conn)
         )));
     }
-    if !crate::support::approval::set_protected(&conn, name, !unset)? {
+    if !crate::support::approval::set_protected(conn, name, !unset)? {
         return Err(bad(format!("no such branch: {}", name)));
     }
+    let protected = !unset;
+    Ok(BranchProtected {
+        name: name.to_string(),
+        protected,
+    })
+}
+
+pub fn cmd_branch_protect(name: &str, unset: bool) -> ZResult<()> {
+    let (_root, conn) = open_repo()?;
+    let out = branch_protect(&conn, name, unset)?;
     if unset {
         println!(
             "{} is no longer protected; a push to it needs no approval",
-            name
+            out.name
         );
     } else {
         println!(
             "{} is protected: a push to it now needs a sign-off from a credential other than the one pushing",
-            name
+            out.name
         );
         println!("sign off a changeset with: gesta changeset approve <id> --by <reviewer>");
     }
     Ok(())
 }
 
-/// Sign off a changeset.
 pub fn cmd_approve(id: &str, by: &str) -> ZResult<()> {
     let (root, conn) = open_repo()?;
     // `optional()?` then a targeted not-found, not `map_err(|_| ...)`: the old form turned every
@@ -301,8 +382,17 @@ pub fn cmd_branch_merge(source: &str, target: &str, author: &str) -> ZResult<()>
     Ok(())
 }
 
-pub fn cmd_branch_info(name: &str) -> ZResult<()> {
-    let (_root, conn) = open_repo()?;
+/// What info on a branch returned.
+pub struct BranchInfo {
+    pub name: String,
+    pub created_at: i64,
+    pub from: Option<String>,
+    pub head: Option<String>,
+    pub changesets: usize,
+    pub protected: bool,
+}
+
+pub fn branch_info(conn: &Connection, name: &str) -> ZResult<BranchInfo> {
     let (head, ts, from): (Option<String>, i64, Option<String>) = conn
         .query_row(
             "SELECT head, created_at, from_branch FROM branches WHERE name = ?1",
@@ -315,24 +405,35 @@ pub fn cmd_branch_info(name: &str) -> ZResult<()> {
                 ))
             },
         )
-        .map_err(|_| bad(format!("no such branch: {}{}", name, branch_names(&conn))))?;
+        .map_err(|_| bad(format!("no such branch: {}{}", name, branch_names(conn))))?;
 
-    println!("branch:      {}", name);
-    println!("created:     {}", fmt_ts(ts));
-    println!("from:        {}", from.unwrap_or_else(|| "-".into()));
+    Ok(BranchInfo {
+        name: name.to_string(),
+        created_at: ts,
+        from,
+        head,
+        changesets: reachable_from(conn, name)?.len(),
+        protected: crate::support::approval::is_protected(conn, name)?,
+    })
+}
+
+pub fn cmd_branch_info(name: &str) -> ZResult<()> {
+    let (_root, conn) = open_repo()?;
+    let out = branch_info(&conn, name)?;
+    println!("branch:      {}", out.name);
+    println!("created:     {}", fmt_ts(out.created_at));
+    println!("from:        {}", out.from.unwrap_or_else(|| "-".into()));
     println!(
         "head:        {}",
-        head.clone().unwrap_or_else(|| "(empty)".into())
+        out.head.clone().unwrap_or_else(|| "(empty)".into())
     );
-    println!("changesets:  {}", reachable_from(&conn, name)?.len());
-    if let (Some(h), Some(other)) = (&head, None::<String>) {
-        let _ = (h, other);
-    }
+    println!("changesets:  {}", out.changesets);
+    println!("protected:   {}", out.protected);
     Ok(())
 }
 
 pub fn cmd_branch_json(sub: crate::BranchCmd) -> YResultAlias {
-    let (_root, conn) = open_repo()?;
+    let (root, conn) = open_repo()?;
     match sub {
         crate::BranchCmd::List => {
             let cur = current_branch(&conn)?;
@@ -357,12 +458,106 @@ pub fn cmd_branch_json(sub: crate::BranchCmd) -> YResultAlias {
             ]));
             Ok(())
         }
-        other => {
-            // JSON mode is for reading state. A write still runs and prints its
-            // normal text, because scripting a mutation was never the point.
-            crate::cli::dispatch_branch_text(other)
+        // Every branch subcommand answers JSON now, including the ones that write. A mutation under
+        // `--json` used to run and print text, so a script that asked for JSON got prose it had to
+        // parse - and the argument for "scripting a mutation was never the point" does not survive
+        // contact with a CI job that creates a branch and reads the result.
+        crate::BranchCmd::Create { name, from } => {
+            let name = need_name(
+                "branch create needs a name",
+                "gesta branch create feature",
+                name,
+            )?;
+            let out = branch_create(&conn, &name, &from)?;
+            emit(Json::obj(vec![
+                ("schema", Json::str("gesta@1")),
+                ("name", Json::str(out.name)),
+                ("from", Json::str(out.from)),
+                ("head", out.head.map(Json::str).unwrap_or(Json::Null)),
+                ("created", Json::Bool(out.created)),
+            ]));
+            Ok(())
         }
+        crate::BranchCmd::Switch { name } => {
+            let name = need_name(
+                "branch switch needs a name; `gesta branch list` names them",
+                "gesta branch switch feature",
+                name,
+            )?;
+            let out = branch_switch(&conn, &root, &name)?;
+            emit(Json::obj(vec![
+                ("schema", Json::str("gesta@1")),
+                ("current", Json::str(out.current)),
+                (
+                    "previous",
+                    out.previous.map(Json::str).unwrap_or(Json::Null),
+                ),
+                ("head", out.head.map(Json::str).unwrap_or(Json::Null)),
+            ]));
+            Ok(())
+        }
+        crate::BranchCmd::Delete { name } => {
+            let name = need_name(
+                "branch delete needs a name; `gesta branch list` names them",
+                "gesta branch delete feature",
+                name,
+            )?;
+            let out = branch_delete(&conn, &name)?;
+            emit(Json::obj(vec![
+                ("schema", Json::str("gesta@1")),
+                ("name", Json::str(out.name)),
+                ("deleted", Json::Bool(out.deleted)),
+                ("head", out.head.map(Json::str).unwrap_or(Json::Null)),
+            ]));
+            Ok(())
+        }
+        crate::BranchCmd::Info { name } => {
+            let name = need_name(
+                "branch info needs a name; `gesta branch list` names them",
+                "gesta branch info main",
+                name,
+            )?;
+            let out = branch_info(&conn, &name)?;
+            emit(Json::obj(vec![
+                ("schema", Json::str("gesta@1")),
+                ("name", Json::str(out.name)),
+                ("created_at", Json::int(out.created_at)),
+                ("from", out.from.map(Json::str).unwrap_or(Json::Null)),
+                ("head", out.head.map(Json::str).unwrap_or(Json::Null)),
+                ("changesets", Json::int(out.changesets as i64)),
+                ("protected", Json::Bool(out.protected)),
+            ]));
+            Ok(())
+        }
+        crate::BranchCmd::Protect { name, unset } => {
+            let out = branch_protect(&conn, &name, unset)?;
+            emit(Json::obj(vec![
+                ("schema", Json::str("gesta@1")),
+                ("name", Json::str(out.name)),
+                ("protected", Json::Bool(out.protected)),
+            ]));
+            Ok(())
+        }
+        crate::BranchCmd::Merge {
+            source,
+            target,
+            author,
+        } => {
+            let source = need_name(
+                "branch merge needs the branch to merge",
+                "gesta branch merge feature --target main",
+                source,
+            )?;
+            cmd_branch_merge_json(&source, &target, &author)?;
+            Ok(())
+        }
+        crate::BranchCmd::Conflicts { source, target } => cmd_merge_preview(&source, &target),
     }
+}
+
+/// A branch name is required, and clap's message for a missing one says only that a token is absent.
+fn need_name(what: &str, example: &str, got: Option<String>) -> ZResult<String> {
+    got.ok_or_else(|| bad(format!("{what}, for example `{example}`")))
 }
 
 // Text-mode dispatch for the subcommands JSON mode does not cover. Keeping it
