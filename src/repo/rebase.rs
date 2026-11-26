@@ -223,7 +223,9 @@ pub fn run(conn: &Connection, root: &Path, author: &str, s: &mut Session) -> ZRe
             // ones they did not. Recording them here rather than re-deriving them there keeps the
             // continuation from interpreting the state it is meant to record.
             s.conflicts = out.conflicts.clone();
-            s.done.extend(done.clone());
+            // `s.done` is maintained by the loop, one push per pick. Extending it with `done` here
+            // recorded every pick from this run a second time, and a second stop after `--continue`
+            // doubled them again. `done` is the return value; `s.done` is the stored record.
             save(conn, s)?;
             return Ok(Progress::Stopped {
                 conflicts: out.conflicts,
@@ -631,6 +633,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn a_stopped_rebase_records_each_pick_once() {
+        // `s.done` was pushed by the loop AND extended with `done` at the stop, so every pick from
+        // the run appeared twice in the stored session; a second stop after `--continue` doubled
+        // them again. `s.done` is the session's own record of what happened, so a wrong list is a
+        // wrong record even when the rebase itself is right.
+        //
+        // Three changesets on the side: the first two replay cleanly, the third conflicts, so the
+        // stop happens with something already in `s.done`.
+        let conn = crate::store::tests::mem_db();
+        // `main` edits line 2, `side1` only appends: replaying side1 is clean. `side3` then edits
+        // line 2, which main already changed, so that pick is the one that stops.
+        setup(&conn, "a\nMAIN\nc\n", "a\nb\nc\nSIDE\n");
+        // Two more changesets on `side`, the first clean and the second conflicting.
+        let put = |id: &str, parent: &str, path: &str, body: &str| {
+            conn.execute(
+                "INSERT INTO changesets(id,message,author,created_at,status,parent,parent2,branch)
+                 VALUES(?1,'x','a',2,'committed',?2,NULL,'side')",
+                params![id, parent],
+            )
+            .unwrap();
+            let h = crate::store::put_object(&conn, body).unwrap();
+            conn.execute(
+                "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+                 VALUES(?1,?2,NULL,?3)",
+                params![id, path, h],
+            )
+            .unwrap();
+            let next: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(version),0)+1 FROM file_versions WHERE path=?1",
+                    params![path],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            conn.execute(
+                "INSERT INTO file_versions(path,version,hash,changeset_id,created_at)
+                 VALUES(?1,?2,?3,?4,2)",
+                params![path, next, h, id],
+            )
+            .unwrap();
+        };
+        // A different file, so this one applies cleanly onto the new base.
+        put("side2", "side1", "g.txt", "clean\n");
+        // The same line main changed, so this one conflicts.
+        put("side3", "side2", "f.txt", "a\nAGAIN\nc\n");
+        conn.execute("UPDATE branches SET head='side3' WHERE name='side'", [])
+            .unwrap();
+
+        let d = tmp("doneonce");
+        std::fs::write(d.join("f.txt"), "a\nb\nc\n").unwrap();
+
+        let p = start(&conn, &d, "side", "main1", "t").unwrap();
+        assert!(
+            matches!(p, Progress::Stopped { .. }),
+            "the third pick must conflict, got {:?}",
+            p
+        );
+
+        let session = load(&conn).unwrap().expect("the stop keeps the session");
+        // Two picks replayed before the stop, so two entries - each of them once.
+        let mut sorted = session.done.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            session.done.len(),
+            sorted.len(),
+            "each pick must be recorded once, got {:?}",
+            session.done
+        );
+        assert_eq!(
+            session.done.len(),
+            2,
+            "two picks replayed cleanly, got {:?}",
+            session.done
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
     #[test]
     fn abort_puts_the_branch_back_where_it_started() {
         // Half a rebase is not a state anyone asked for, so abort goes to the
