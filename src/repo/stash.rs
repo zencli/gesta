@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use rusqlite::params;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::now;
 use crate::repo;
@@ -468,14 +468,16 @@ fn load(conn: &Connection, id: Option<i64>) -> ZResult<Stash> {
                 params![id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
-            .ok(),
+            // `.optional()?`, not `.ok()`: a locked or corrupt database would otherwise read as "no
+            // stash to apply", and the author is told their work is gone when it is not.
+            .optional()?,
         None => conn
             .query_row(
                 "SELECT id, message, created_at FROM stashes ORDER BY id DESC LIMIT 1",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
-            .ok(),
+            .optional()?,
     };
     let (id, message, created_at) = row.ok_or_else(|| bad("no stash to apply".to_string()))?;
 
@@ -755,6 +757,35 @@ mod tests {
     use super::*;
     use crate::repo::tests::commit_files;
     use crate::store::tests::mem_db;
+
+    #[test]
+    fn a_database_error_is_not_read_as_no_stash() {
+        // `load(...).ok()` mapped every failure to `None`, and `None` produces "no stash to apply".
+        // A locked or corrupt database therefore told the author their work was gone.
+        let conn = mem_db();
+        commit_files(&conn, "c1", "one", &[("f", "1\n")]);
+        init_schema(&conn).unwrap();
+        conn.execute("DROP TABLE stashes", []).unwrap();
+        conn.execute(
+            "CREATE TABLE stashes (id INTEGER PRIMARY KEY, message INTEGER NOT NULL, created_at INTEGER NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO stashes (id, message, created_at) VALUES (1, 7, 0)",
+            [],
+        )
+        .unwrap();
+
+        let err = match load(&conn, Some(1)) {
+            Ok(_) => panic!("an unreadable message column is not an empty stash"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err}").to_lowercase().contains("invalid"),
+            "the type error must surface, got: {err}"
+        );
+    }
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("gesta-stash-{}-{}", tag, std::process::id()));

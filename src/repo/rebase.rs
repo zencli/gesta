@@ -18,7 +18,7 @@
 use std::path::Path;
 
 use rusqlite::params;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::{bad, now, repo, ZResult};
 
@@ -111,7 +111,10 @@ pub fn load(conn: &Connection) -> ZResult<Option<Session>> {
                 ))
             },
         )
-        .ok();
+        // `.optional()?`, not `.ok()`: `start` treats "no session" as permission to `INSERT OR
+        // REPLACE` a new session over a live one, so a locked database read as "no rebase" would
+        // silently discard an in-progress rebase.
+        .optional()?;
     Ok(row.map(
         |(branch, onto, pending, current, done, original_head, conflicts)| Session {
             branch,
@@ -475,6 +478,34 @@ pub fn abort(conn: &Connection, root: &Path) -> ZResult<String> {
 mod tests {
     use super::*;
     use crate::repo::tests::commit_files;
+
+    #[test]
+    fn a_database_error_is_reported_not_read_as_no_session() {
+        // `load(conn).ok()` mapped every failure to `None`. `start` reads `None` as "nothing is
+        // running" and inserts a fresh session over a live one, so a locked database would silently
+        // discard a rebase in progress.
+        let conn = crate::store::tests::mem_db();
+        commit_files(&conn, "c1", "one", &[("f", "1\n")]);
+        init_schema(&conn).unwrap();
+        conn.execute("DROP TABLE rebase", []).unwrap();
+        conn.execute(
+            "CREATE TABLE rebase (id INTEGER PRIMARY KEY CHECK (id = 1), branch TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO rebase (id, branch) VALUES (1, 'live')", [])
+            .unwrap();
+
+        // `expect_err` would need `Debug` on `Session`; match instead, which says the same thing.
+        let err = match load(&conn) {
+            Ok(_) => panic!("a rebase row it cannot read is not an empty rebase"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err}").to_lowercase().contains("onto"),
+            "the database error must surface, got: {err}"
+        );
+    }
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("gesta-rebase-{}-{}", tag, std::process::id()));
