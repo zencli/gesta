@@ -642,6 +642,7 @@ pub fn cmd_clone(
     dir: &str,
     token: Option<&str>,
     pin: Option<&str>,
+    branch: Option<&str>,
     depth: Option<usize>,
 ) -> ZResult<()> {
     let target = Path::new(dir);
@@ -651,11 +652,11 @@ pub fn cmd_clone(
     fs::create_dir_all(target)?;
 
     if url.starts_with("s3://") {
-        return clone_s3(url, target, pin, depth);
+        return clone_s3(url, target, branch, depth);
     }
 
     if http::is_http_url(url) {
-        return clone_http(url, target, token, pin, depth);
+        return clone_http(url, target, token, pin, branch, depth);
     }
 
     let remote_path = remote::resolve_remote(url);
@@ -663,7 +664,19 @@ pub fn cmd_clone(
         return Err(bad(format!("no repository at {}", remote_path.display())));
     }
     let remote_conn = open_db(&remote_path)?;
-    let branch = pick_main_branch(&remote_conn)?;
+    // `--branch` names what to check out. Without one, `main` when the remote has it.
+    let branch = match branch {
+        Some(b) => {
+            if branch_head(&remote_conn, b)?.is_none() {
+                return Err(bad(format!(
+                    "the remote has no branch {}; `gesta remote ls` lists what it holds",
+                    b
+                )));
+            }
+            b.to_string()
+        }
+        None => pick_main_branch(&remote_conn)?,
+    };
     let bundle = remote::build_bundle(&remote_conn, &branch, &HashSet::new())?;
     let received = remote::Bundle::decode(&bundle.encode()?)?;
 
@@ -707,18 +720,18 @@ pub fn cmd_clone(
 /// Clone a branch from an S3 compatible bucket into an empty directory.
 ///
 /// A bucket holds one bundle per branch and the name has no wildcard, so a clone
-/// needs a branch. `main` is the default because every repository starts there.
-fn clone_s3(url: &str, target: &Path, pin: Option<&str>, depth: Option<usize>) -> ZResult<()> {
+/// needs a branch. `--branch` names it and `main` is the default, because every
+/// repository starts there. `--pin` is not involved: it is a certificate
+/// fingerprint, and using it as a branch name here made the documented flag do the
+/// opposite of what it says on this path while doing something else on the other two.
+fn clone_s3(url: &str, target: &Path, branch: Option<&str>, depth: Option<usize>) -> ZResult<()> {
     let (cfg, prefix) = crate::transport::s3::S3Config::from_url(url)?;
 
-    // Find the branch by asking for the default first, then falling back to the
-    // object listing would need a second signed request type. Requiring `main` is
-    // honest: it is the branch every repository has.
-    let branch = pin.unwrap_or("main").to_string();
+    let branch = branch.unwrap_or("main").to_string();
     let key = crate::transport::s3::key_for(&prefix, &branch);
     let bytes = cfg.get(&key)?.ok_or_else(|| {
         crate::bad(format!(
-            "no object at s3://{}/{} (a clone needs the branch name, try --pin <branch>)",
+            "no object at s3://{}/{} (a clone needs the branch name, pass --branch <name>)",
             cfg.bucket, key
         ))
     })?;
@@ -741,10 +754,12 @@ fn clone_s3(url: &str, target: &Path, pin: Option<&str>, depth: Option<usize>) -
         bundle.branch.clone()
     };
     set_state(&conn, "current_branch", &branch)?;
+    // An s3:// URL carries no certificate pin: TLS termination is the bucket's, and a fingerprint
+    // stored here would be a value nothing reads.
     conn.execute(
-        "INSERT INTO remotes(name, url, pin) VALUES('origin', ?1, ?2)
-         ON CONFLICT(name) DO UPDATE SET url = excluded.url, pin = excluded.pin",
-        rusqlite::params![url, pin],
+        "INSERT INTO remotes(name, url, pin) VALUES('origin', ?1, NULL)
+         ON CONFLICT(name) DO UPDATE SET url = excluded.url",
+        rusqlite::params![url],
     )?;
 
     // A shallow clone restores from the snapshot the bundle carried, because cutting
@@ -1639,6 +1654,7 @@ fn clone_http(
     target: &Path,
     token: Option<&str>,
     pin: Option<&str>,
+    branch: Option<&str>,
     depth: Option<usize>,
 ) -> ZResult<()> {
     let base = url.trim_end_matches('/');
@@ -1654,7 +1670,29 @@ fn clone_http(
         )));
     }
     let listing = String::from_utf8_lossy(&body).to_string();
-    let branch = pick_main_from_listing(&listing)?;
+    // `--branch` names what to check out; without one, `main` when the server lists it.
+    let branch = match branch {
+        Some(want) => {
+            let known = listing
+                .lines()
+                .any(|l| l.split('\t').next().map(|n| n == want).unwrap_or(false));
+            if !known {
+                return Err(bad(format!(
+                    "{} has no branch {}; it serves: {}",
+                    base,
+                    want,
+                    listing
+                        .lines()
+                        .filter_map(|l| l.split('\t').next())
+                        .filter(|n| !n.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            want.to_string()
+        }
+        None => pick_main_from_listing(&listing)?,
+    };
 
     let (status, body) = http::request_with_pin(
         "GET",

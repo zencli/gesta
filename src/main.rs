@@ -1084,6 +1084,9 @@ enum RemoteCmd {
         /// SHA-256 fingerprint of the server certificate, for a self-signed one.
         #[arg(long)]
         pin: Option<String>,
+        /// Branch to check out, for a remote that holds more than one. Defaults to main
+        #[arg(long)]
+        branch: Option<String>,
         /// Take only the newest N changesets, for a history too long to download whole
         #[arg(long)]
         depth: Option<usize>,
@@ -1740,6 +1743,7 @@ fn run() -> ZResult<()> {
                 dir,
                 token,
                 pin,
+                branch,
                 depth,
             } => {
                 let token = match token {
@@ -1749,7 +1753,14 @@ fn run() -> ZResult<()> {
                     ),
                     None => None,
                 };
-                cli_remote::cmd_clone(&url, &dir, token.as_deref(), pin.as_deref(), depth)
+                cli_remote::cmd_clone(
+                    &url,
+                    &dir,
+                    token.as_deref(),
+                    pin.as_deref(),
+                    branch.as_deref(),
+                    depth,
+                )
             }
         },
         Cmd::Secret { sub } => match sub {
