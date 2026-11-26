@@ -1395,6 +1395,29 @@ fn merge_fetched(
     Ok(!out.applied.is_empty())
 }
 
+/// What the far side already has, given the head it reported.
+///
+/// Only the head comes back over the wire, so the rest is read from the local store: a changeset
+/// this repository knows has the same ancestry wherever it lives, and `ancestors` walks parents in
+/// the one place they are recorded. A head the local store has never seen - a peer ahead of us -
+/// yields just that id, which is the same answer the old code gave for every push.
+///
+/// The head itself is in the set. A bundle excludes every id it is handed, and re-sending the head
+/// is the exact waste this exists to stop.
+fn have_from_remote_head(conn: &Connection, remote_head: Option<&str>) -> ZResult<HashSet<String>> {
+    let mut have: HashSet<String> = HashSet::new();
+    let Some(head) = remote_head else {
+        return Ok(have);
+    };
+    have.insert(head.to_string());
+    // A changeset this store does not have is not an error here: the peer may be ahead, and the
+    // push then sends what it has, which is what a first push to an unfamiliar branch does.
+    for id in ancestors(conn, head).unwrap_or_default() {
+        have.insert(id);
+    }
+    Ok(have)
+}
+
 /// Push over HTTP: ask the server which changesets it has, send only the rest.
 fn push_http(
     conn: &rusqlite::Connection,
@@ -1437,10 +1460,12 @@ fn push_http(
             String::from_utf8_lossy(&body).trim()
         )));
     }
-    // The server tells us its head for this branch; everything reachable from it
-    // is already there, so the bundle only carries the rest.
+    // The server tells us its head for this branch and nothing else: there is no table on the far
+    // side to ask. The head alone is not enough, and using it alone is what #212 was - the bundle
+    // then carries the head's whole ancestry minus the head, so every push re-sent the repository.
+    // A local push reads the peer's database and calls `ancestors` on it; over HTTP the same answer
+    // comes from here, because a head this repository knows has the same ancestry on both sides.
     let listing = String::from_utf8_lossy(&body).to_string();
-    let mut have: HashSet<String> = HashSet::new();
     let remote_head = listing.lines().find_map(|l| {
         let mut p = l.split('\t');
         match (p.next(), p.next()) {
@@ -1448,9 +1473,8 @@ fn push_http(
             _ => None,
         }
     });
-    if let Some(h) = &remote_head {
-        have.insert(h.clone());
-    }
+
+    let have = have_from_remote_head(conn, remote_head.as_deref())?;
 
     let bundle = remote::build_bundle(conn, branch, &have)?;
     let wire = bundle.encode()?;
@@ -3021,6 +3045,78 @@ mod tests {
                 Ok(b) => b.windows(needle.len()).any(|w| w == needle),
                 Err(_) => false,
             })
+    }
+
+    #[test]
+    fn a_push_to_a_peer_that_has_the_history_sends_only_the_new_changesets() {
+        // #212. The server reports one head over HTTP, and the first version of this code put that
+        // single id in `have`. `build_bundle` excludes what it is handed, so the bundle carried the
+        // head's whole ancestry minus the head: a two-commit push to a peer that already had the
+        // repository re-sent all of it. The fix reads the ancestry from the local store, which is
+        // where the parents are, and the assertion is on what the bundle carries rather than on the
+        // set, because the set is only interesting for what it stops.
+        let conn = crate::store::tests::mem_db();
+        crate::repo::tests::commit_files(&conn, "c0", "base", &[("a.txt", "0\n")]);
+        crate::repo::tests::commit_files(&conn, "c1", "one", &[("a.txt", "1\n")]);
+        crate::repo::tests::commit_files(&conn, "c2", "two", &[("a.txt", "2\n")]);
+        crate::repo::tests::commit_files(&conn, "c3", "three", &[("a.txt", "3\n")]);
+
+        // The peer sits at c2. Everything up to and including c2 is already there.
+        let have = have_from_remote_head(&conn, Some("c2")).unwrap();
+        for id in ["c0", "c1", "c2"] {
+            assert!(
+                have.contains(id),
+                "the peer has {id}, so re-sending it is the waste #212 is about"
+            );
+        }
+
+        let bundle = remote::build_bundle(&conn, "main", &have).unwrap();
+        let sent: Vec<&str> = bundle.changesets.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            sent,
+            vec!["c3"],
+            "only the changeset the peer does not have may be sent; a bundle of {:?} is the whole \
+             repository going over the wire again",
+            sent
+        );
+    }
+
+    #[test]
+    fn a_head_this_store_has_never_seen_still_produces_a_bundle() {
+        // The other side of the same change. A peer ahead of us reports a head we do not have, and
+        // `ancestors` then has nothing to walk. That must not become an error: a first push to a
+        // branch somebody else advanced is ordinary, and the answer is to send what we have.
+        let conn = crate::store::tests::mem_db();
+        crate::repo::tests::commit_files(&conn, "c0", "base", &[("a.txt", "0\n")]);
+        crate::repo::tests::commit_files(&conn, "c1", "one", &[("a.txt", "1\n")]);
+
+        let have = have_from_remote_head(&conn, Some("not-ours")).unwrap();
+        assert_eq!(
+            have.len(),
+            1,
+            "an unknown head contributes only itself: {:?}",
+            have
+        );
+        assert!(have.contains("not-ours"));
+
+        let bundle = remote::build_bundle(&conn, "main", &have).unwrap();
+        assert_eq!(
+            bundle.changesets.len(),
+            2,
+            "both local changesets must go, since the peer is known to have neither"
+        );
+    }
+
+    #[test]
+    fn a_branch_the_peer_does_not_have_yet_gets_everything() {
+        // No head reported at all is a first push to a new branch. Nothing is excluded.
+        let conn = crate::store::tests::mem_db();
+        crate::repo::tests::commit_files(&conn, "c0", "base", &[("a.txt", "0\n")]);
+
+        let have = have_from_remote_head(&conn, None).unwrap();
+        assert!(have.is_empty(), "nothing to exclude: {:?}", have);
+        let bundle = remote::build_bundle(&conn, "main", &have).unwrap();
+        assert_eq!(bundle.changesets.len(), 1);
     }
 
     #[test]
