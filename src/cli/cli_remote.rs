@@ -573,6 +573,14 @@ fn pull_s3(conn: &mut Connection, url: &str, branch: &str, author: &str) -> ZRes
     let bundle = remote::Bundle::decode(&bytes)?;
     let n = bundle.changesets.len();
     let applied = remote::apply_bundle(conn, &bundle)?;
+
+    // The same two derived tables a local pull rebuilds, which this path skipped. A bundle carries
+    // history, not this store's index over it: blame ranges are derived from the changesets, and the
+    // branch tree is what `status` and `fsck` read. Without them a file pulled from S3 answered
+    // "never committed" and `fsck` reported the branch tree as stale.
+    let _ = crate::repo::rebuild_all_blame(conn)?;
+    crate::store::refresh_branch_tree(conn, branch)?;
+
     let head = branch_head(conn, branch)?.unwrap_or_else(|| "(none)".to_string());
     println!(
         "pulled {} changesets from s3://{}/{} ({} applied, branch now {})",
@@ -1573,6 +1581,19 @@ fn pull_http(
         merge_fetched(conn, root, remote_name, branch, &remote_head, author)?;
     }
     repo::materialise(conn, root, &current)?;
+
+    // The two derived tables a bundle does not carry, rebuilt the same way the local pull path
+    // rebuilds them. Blame ranges are this store's index over the history, and the branch tree is
+    // what `status` and `fsck` read; skipping them left an HTTP pull answering "never committed" for
+    // every arrived file and reporting the branch tree as stale.
+    let _ = crate::repo::rebuild_all_blame(conn)?;
+    crate::store::refresh_branch_tree(conn, branch)?;
+    // The tracking branch the merge came through, not just the branch that received it. `fsck` reads
+    // every branch, and the bundle's changesets land on `<remote>/<branch>` first - so refreshing only
+    // `branch` left `stale tree for branch origin/main: 0 row(s) stored, 5 in history` after a pull
+    // that had worked. Found by the bench check added with this fix, not by reading the code.
+    crate::store::refresh_branch_tree(conn, &format!("{}/{}", remote_name, branch))?;
+
     ops::record(conn, "pull", Some(&remote_head), Some(remote_name))?;
     println!(
         "pulled {} changeset(s) from {} ({}) into {}",

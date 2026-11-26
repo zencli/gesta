@@ -171,6 +171,22 @@ def main():
         pulled = rc == 0 and os.path.exists(os.path.join(stale, "src/forward.rs"))
         record("pull over http fetches and merges remote work", pulled, out)
 
+        # ... and the two derived tables a bundle does not carry are rebuilt on arrival. Blame is
+        # this store's own index over the history, so without the rebuild every arrived file answers
+        # "never committed" while `fsck` reports the branch tree as stale.
+        rc, out = run("blame", "src/forward.rs", cwd=stale)
+        record(
+            "blame answers for a file that arrived by an http pull",
+            rc == 0 and "never committed" not in out.lower() and "cs" in out.lower(),
+            out,
+        )
+        rc, out = run("fsck", cwd=stale)
+        record(
+            "the branch tree a pull brings in is not stale",
+            rc == 0 and "stale" not in out.lower(),
+            out,
+        )
+
         # --- clone through a real socket in a second process, verifying content ---
         clone2 = os.path.join(ROOT, "clone2")
         rc, out = run("remote", "clone", f"http://127.0.0.1:{port}", clone2, cwd=ROOT)
