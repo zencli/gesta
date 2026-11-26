@@ -140,25 +140,44 @@ pub fn similarity(a: &str, b: &str) -> f64 {
 pub fn rename_history(conn: &Connection, path: &str, max_depth: usize) -> ZResult<Vec<String>> {
     let mut chain = vec![path.to_string()];
     let mut current = path.to_string();
+    // A path cannot be its own ancestor. Without this a rename cycle, which a bad import can
+    // produce, would keep pushing names until max_depth hid the loop.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(current.clone());
 
-    let mut stmt = conn.prepare(
-        "SELECT changeset_id FROM changeset_files WHERE path = ?1
-         ORDER BY rowid DESC LIMIT 40",
-    )?;
-    let changesets: Vec<String> = stmt
-        .query_map(params![current.clone()], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // The changesets are re-read for each new name. The earlier version queried `current` once,
+    // before the loop, so the second hop searched a list that could not contain it: the changeset
+    // that renamed B to C touches A and B, and a list built for C never holds it. Every chain
+    // stopped after one hop, which is not what this function's name promises.
+    while chain.len() <= max_depth {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT changeset_id FROM changeset_files WHERE path = ?1
+             ORDER BY rowid DESC",
+        )?;
+        let changesets: Vec<String> = stmt
+            .query_map(params![current.clone()], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
 
-    for cs in changesets {
-        if chain.len() > max_depth {
-            break;
-        }
-        for r in detect_renames(conn, &cs, 0.5)? {
-            if r.to == current {
-                chain.push(r.from.clone());
-                current = r.from.clone();
+        let mut found = None;
+        for cs in changesets {
+            for r in detect_renames(conn, &cs, 0.5)? {
+                if r.to == current && !seen.contains(&r.from) {
+                    found = Some(r.from);
+                    break;
+                }
+            }
+            if found.is_some() {
                 break;
             }
+        }
+        match found {
+            Some(from) => {
+                seen.insert(from.clone());
+                chain.push(from.clone());
+                current = from;
+            }
+            None => break,
         }
     }
     Ok(chain)
@@ -287,7 +306,13 @@ pub fn revert_changeset(
         // later edits do not overlap: the revert is a three-way merge with
         // `target`'s own parent as the base. Refusing on any later change would
         // make revert useless on an active branch, which is where it is needed.
+        //
+        // The merge result is what gets recorded, not `restore_hash`. Merging only to test for a
+        // conflict and then writing the pre-target content whole discarded every later edit that
+        // did not overlap - a file edited at the top after `target`, reverted for an unrelated
+        // change at the bottom, silently lost the top edit.
         let current = latest_hash(&tx, path, &branch)?;
+        let mut new_version = restore_hash.clone();
         if let (Some(c), Some(n)) = (&current, new) {
             if c != n {
                 let base_text = match restore_hash.as_ref() {
@@ -296,22 +321,28 @@ pub fn revert_changeset(
                 };
                 let our_text = get_object(&tx, c)?;
                 let their_text = get_object(&tx, n)?;
-                if merge3(&base_text, &our_text, &their_text).is_conflict() {
+                // base is what `target` wrote, ours is the file as it stands, theirs is what we
+                // want back. Reverting is exactly the three-way merge of those.
+                let merged = merge3(&their_text, &our_text, &base_text);
+                if merged.is_conflict() {
                     return Err(bad(format!(
                         "cannot revert {}: {} changed in a conflicting way since then",
                         target, path
                     )));
                 }
+                // The merged body is a new object. When the later edits were non-overlapping it
+                // differs from both sides, so it has to be stored before a row can name it.
+                new_version = Some(put_object(&tx, merged.text())?);
             }
         }
 
-        if let Some(h) = &restore_hash {
+        if let Some(h) = &new_version {
             put_object(&tx, &get_object(&tx, h)?)?;
         }
         tx.execute(
             "INSERT INTO changeset_files(changeset_id, path, old_hash, new_hash)
              VALUES(?1, ?2, ?3, ?4)",
-            params![revert_id, path, current, restore_hash],
+            params![revert_id, path, current, new_version],
         )?;
         restored += 1;
     }
