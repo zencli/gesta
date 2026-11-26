@@ -228,6 +228,25 @@ fn remote_token(conn: &rusqlite::Connection, name: &str) -> ZResult<Option<Strin
     Ok(None)
 }
 
+/// The JSON view must carry every author: it is the documented way to see the full list, and a
+/// silently cut list is worse than a long one.
+///
+/// #210: the text limit used to be applied with `authors.truncate(20)` before the `if json`
+/// branch, so `--json` was cut to 20 as well while the text output pointed callers at `--json`
+/// for the full list.
+fn authors_for_json(authors: &[(String, String)]) -> Vec<(String, String)> {
+    authors.to_vec()
+}
+
+/// The text view prints at most 20 entries so a wide bundle stays readable.
+///
+/// Returns the entries that fit rather than mutating in place: a test can assert on what would be
+/// printed without capturing stdout, and the caller keeps its full list for the "and N more" line.
+fn truncate_for_text(authors: Vec<(String, String)>) -> Vec<(String, String)> {
+    const TEXT_LIMIT: usize = 20;
+    authors.into_iter().take(TEXT_LIMIT).collect()
+}
+
 /// Say what a push would carry, without sending anything.
 ///
 /// Pushing is the moment content leaves the machine, and until now the only way to learn what went
@@ -270,7 +289,7 @@ pub fn cmd_inspect(
     let bundle = remote::build_bundle(&conn, branch, known.as_ref().unwrap_or(&empty))?;
     let wire = bundle.encode()?;
 
-    let mut authors: Vec<(String, String)> = bundle
+    let authors: Vec<(String, String)> = bundle
         .changesets
         .iter()
         .map(|c| (c.id.clone(), c.author.clone()))
@@ -288,15 +307,16 @@ pub fn cmd_inspect(
         .max()
         .unwrap_or(0);
     let estimated = known.is_none();
-    authors.truncate(20);
 
     if json {
-        let items = authors
-            .iter()
+        // #210. The JSON list is the documented way to see every author, so it must not be cut.
+        // The 20-entry limit belongs to the text view, where it keeps a wide bundle readable.
+        let items = authors_for_json(&authors)
+            .into_iter()
             .map(|(id, author)| {
                 crate::support::json::Json::obj(vec![
-                    ("changeset", crate::support::json::Json::str(id.clone())),
-                    ("author", crate::support::json::Json::str(author.clone())),
+                    ("changeset", crate::support::json::Json::str(id)),
+                    ("author", crate::support::json::Json::str(author)),
                 ])
             })
             .collect();
@@ -343,13 +363,14 @@ pub fn cmd_inspect(
         if authors.is_empty() {
             println!("  nothing to send");
         }
-        for (id, author) in &authors {
+        let shown = truncate_for_text(authors.clone());
+        for (id, author) in &shown {
             println!("  {}  {}", id, author);
         }
-        if bundle.changesets.len() > authors.len() {
+        if bundle.changesets.len() > shown.len() {
             println!(
-                "  ... and {} more (gesta remote inspect --json lists every author)",
-                bundle.changesets.len() - authors.len()
+                "  ... and {} more changeset(s); `--json` lists every author",
+                bundle.changesets.len() - shown.len()
             );
         }
         if identity.is_empty() {
@@ -3000,5 +3021,41 @@ mod tests {
                 Ok(b) => b.windows(needle.len()).any(|w| w == needle),
                 Err(_) => false,
             })
+    }
+
+    #[test]
+    fn the_json_author_list_is_not_cut_short_the_way_the_text_list_is() {
+        // #210. `authors.truncate(20)` used to run before the `if json` branch, so `--json`
+        // returned the same 20 entries and the text output told the caller to use `--json` for the
+        // full list - advice that did not work, and nothing said the list had been cut. The
+        // truncation is a display concession for the text view only.
+        let authors: Vec<(String, String)> = (0..25)
+            .map(|i| (format!("cs{i}"), format!("dev{i}@example.test")))
+            .collect();
+        let total = authors.len();
+        assert!(
+            total > 20,
+            "the fixture must exceed the limit to prove anything"
+        );
+
+        let for_json = authors_for_json(&authors);
+        assert_eq!(
+            for_json.len(),
+            total,
+            "the JSON list must carry every author, not the first 20"
+        );
+
+        let shown = truncate_for_text(authors.clone());
+        assert_eq!(
+            shown.len(),
+            20,
+            "the text view still prints at most 20 entries"
+        );
+        assert_eq!(
+            authors.len(),
+            total,
+            "truncating for display must not shrink the caller's list, or the \
+             'and N more' line would never print"
+        );
     }
 }
