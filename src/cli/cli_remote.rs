@@ -2292,12 +2292,15 @@ pub fn cmd_deepen(
     };
 
     if dry_run {
+        // The number the caller wants is how many MORE changesets arrive, not the size the clone
+        // will end up at. `target` is local_count + depth, so printing it told a repository holding
+        // 50 that deepening by 10 would take "up to 60 more".
         println!(
             "would take up to {} changeset(s) more for {} ({} held now)",
             if target == usize::MAX {
                 "all".to_string()
             } else {
-                target.to_string()
+                (target - local_count).to_string()
             },
             branch,
             local_count
@@ -2400,13 +2403,17 @@ pub fn cmd_deepen(
     // arrived with, and `fsck` reported it as stale with five paths missing.
     crate::store::refresh_branch_tree(&conn, branch)?;
 
-    let after: i64 = conn.query_row("SELECT COUNT(*) FROM changesets", [], |r| r.get(0))?;
+    // The added figure counts this branch's own ancestors before and after, not the store's total.
+    // `COUNT(*) FROM changesets` counts every branch, so a repository with 200 changesets across
+    // branches deepening one branch by 10 reported 160 added.
+    let head_after = branch_head(&conn, branch)?.ok_or_else(|| bad("no head".to_string()))?;
+    let after = crate::store::ancestors_bfs(&conn, &head_after)?.len();
     let _ = root;
     println!(
         "{} now holds {} changeset(s), {} added{}",
         branch,
         after,
-        after.saturating_sub(before as i64),
+        after.saturating_sub(before),
         if still_shallow {
             ", still shallow"
         } else {

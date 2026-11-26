@@ -766,6 +766,21 @@ pub fn rebuild_all_blame(conn: &Connection) -> ZResult<usize> {
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
+    // Rebuilding nothing is a different outcome from rebuilding the history, and every caller
+    // discards the count. A store that holds changesets but has no `file_versions` rows rebuilds
+    // zero paths and reports success, and the result is exactly the symptom the rebuild exists to
+    // prevent: files answering "never committed". Say it once here rather than at five call sites.
+    if paths.is_empty() {
+        let changesets: i64 =
+            conn.query_row("SELECT COUNT(*) FROM changesets", [], |r| r.get(0))?;
+        if changesets > 0 {
+            eprintln!(
+                "gesta: rebuilt blame for 0 paths, but the store holds {} changeset(s); \
+                 blame will answer \"never committed\" until file_versions is populated",
+                changesets
+            );
+        }
+    }
     for p in &paths {
         rebuild_blame_chain(conn, p)?;
     }

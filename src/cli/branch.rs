@@ -161,7 +161,11 @@ pub struct BranchDeleted {
     pub deleted: bool,
 }
 
-pub fn branch_delete(conn: &rusqlite::Connection, name: &str) -> ZResult<BranchDeleted> {
+pub fn branch_delete(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    name: &str,
+) -> ZResult<BranchDeleted> {
     let cur = current_branch(conn)?;
     if name == cur {
         return Err(bad(format!(
@@ -174,6 +178,21 @@ pub fn branch_delete(conn: &rusqlite::Connection, name: &str) -> ZResult<BranchD
             "no such branch: {}{}",
             name,
             branch_names(conn)
+        )));
+    }
+    // A linked worktree checks this branch out in its own directory. Deleting the branch leaves that
+    // directory holding a marker for a branch that no longer exists, and the next command there reads
+    // a branch that is gone with no warning at the moment the damage is done. Refusing names the path.
+    let holders: Vec<String> = crate::repo::worktree::list(conn, root)?
+        .into_iter()
+        .filter(|w| w.branch == name && w.path != root)
+        .map(|w| w.path.display().to_string())
+        .collect();
+    if !holders.is_empty() {
+        return Err(bad(format!(
+            "cannot delete {}: checked out in {}; remove that worktree first with `gesta worktree remove <path>`",
+            name,
+            holders.join(", ")
         )));
     }
     let head = branch_head(conn, name)?;
@@ -197,7 +216,7 @@ pub fn branch_delete(conn: &rusqlite::Connection, name: &str) -> ZResult<BranchD
 
 pub fn cmd_branch_delete(name: &str) -> ZResult<()> {
     let (_root, conn) = open_repo()?;
-    let out = branch_delete(&conn, name)?;
+    let out = branch_delete(&conn, &_root, name)?;
     println!("deleted branch {}", out.name);
     Ok(())
 }
@@ -502,7 +521,7 @@ pub fn cmd_branch_json(sub: crate::BranchCmd) -> YResultAlias {
                 "gesta branch delete feature",
                 name,
             )?;
-            let out = branch_delete(&conn, &name)?;
+            let out = branch_delete(&conn, &root, &name)?;
             emit(Json::obj(vec![
                 ("schema", Json::str("gesta@1")),
                 ("name", Json::str(out.name)),
