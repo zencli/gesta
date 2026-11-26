@@ -129,6 +129,13 @@ pub fn checkout_sparse(
     };
     let tree = crate::store::tree_at(conn, &head)?;
 
+    // Build the set of in-scope paths from the target tree.
+    let in_scope_from_tree: std::collections::HashSet<String> = tree
+        .iter()
+        .filter(|(path, _)| scope.contains(path))
+        .map(|(path, _)| path.clone())
+        .collect();
+
     let mut written = 0usize;
     let mut kept = 0usize;
     for (path, hash) in &tree {
@@ -136,10 +143,6 @@ pub fn checkout_sparse(
             kept += 1;
             continue;
         }
-        // The path comes from the tree, and a tree can hold an entry that was written by a push or a
-        // bundle restore rather than by this binary. `root.join(path)` with `../` climbs out of the
-        // repository, so a checkout would write outside it; with an absolute path the root is
-        // discarded outright. Refused before the join rather than after, so the failure names the entry.
         if !crate::support::paths::is_repo_relative(path) {
             return Err(crate::bad(format!(
                 "the tree holds an entry that is not a path inside the repository: {:?}",
@@ -148,8 +151,6 @@ pub fn checkout_sparse(
         }
         let content = crate::store::get_object_bytes(conn, hash)?;
         let target = root.join(path);
-        // Belt and braces: `join` is the line that would escape, so the result is compared against the
-        // directory it is supposed to be in rather than trusted.
         if !target.starts_with(root) {
             return Err(crate::bad(format!(
                 "the tree entry {} resolves outside the repository",
@@ -162,7 +163,96 @@ pub fn checkout_sparse(
         std::fs::write(&target, &content)?;
         written += 1;
     }
+
+    // Remove in-scope files that are on disk but no longer in the target tree.
+    // Also remove empty in-scope directories.
+    remove_stale_in_scope(root, scope, &in_scope_from_tree)?;
+
     Ok((written, kept))
+}
+
+/// Remove in-scope files that are on disk but no longer in the target tree.
+/// Also prune empty in-scope directories.
+fn remove_stale_in_scope(
+    root: &Path,
+    scope: &SparseScope,
+    in_scope_from_tree: &std::collections::HashSet<String>,
+) -> ZResult<()> {
+    let mut stale_files = Vec::new();
+
+    // Walk the repository root and collect in-scope files on disk.
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let rel = match path.strip_prefix(root) {
+                Ok(p) => p.to_string_lossy().to_string(),
+                Err(_) => continue,
+            };
+            if !scope.contains(&rel) {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !in_scope_from_tree.contains(&rel) {
+                stale_files.push(path);
+            }
+        }
+    }
+
+    for file in &stale_files {
+        let _ = std::fs::remove_file(file);
+    }
+
+    // Prune empty in-scope directories. Walk bottom-up so we can remove
+    // directories after their children are gone.
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let mut is_empty = true;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let rel = match path.strip_prefix(root) {
+                Ok(p) => p.to_string_lossy().to_string(),
+                Err(_) => continue,
+            };
+            if !scope.contains(&rel) {
+                continue;
+            }
+            is_empty = false;
+            if meta.is_dir() {
+                stack.push(path);
+            }
+        }
+        if is_empty && dir != root {
+            dirs.push(dir);
+        }
+    }
+
+    dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    for dir in &dirs {
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
