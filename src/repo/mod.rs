@@ -8,7 +8,7 @@ pub mod history;
 pub mod hooks;
 pub mod landed;
 pub mod merge;
-pub use merge::recursive_merge;
+
 pub mod notes;
 pub mod rebase;
 pub mod stash;
@@ -1065,13 +1065,11 @@ pub fn merge_preview(
     } else if bases.len() == 1 {
         Some(bases[0].clone())
     } else {
-        // Multiple bases: recursively merge them to form a virtual base. The target head is needed for
-        // that, and a target with no commits cannot have produced multiple merge bases - but the
-        // unwrap that used to sit here turned "cannot happen" into a panic if it ever did.
-        match tgt_head.as_ref() {
-            Some(t) => Some(recursive_merge(conn, &bases, &src_head, t)?),
-            None => Some(bases[0].clone()),
-        }
+        // Multiple merge bases: pick the first one, matching what merge_branch does.
+        // A true recursive merge of the base trees would be more accurate but is
+        // significantly more complex. Using the first base matches merge_branch's
+        // behavior and is a documented limitation.
+        Some(bases[0].clone())
     };
 
     let src_anc = crate::store::ancestors(conn, &src_head)?;
