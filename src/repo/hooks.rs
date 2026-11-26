@@ -85,20 +85,20 @@ pub fn git_name(name: &str) -> Option<&'static str> {
 /// Windows has no execute bit: a file runs by its extension, and the hook name already carries
 /// `.cmd`, so existence is the whole test there.
 fn is_executable(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
+    // Windows has no execute bit, and the hook name already carries `.cmd`, so existence is the
+    // whole test there. Written as two cfg'd expressions rather than an early return plus a
+    // trailing `true`, which clippy reads as `path.is_file()` written the long way.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        match std::fs::metadata(path) {
-            Ok(m) => m.permissions().mode() & 0o111 != 0,
-            Err(_) => false,
-        }
+        path.is_file()
+            && std::fs::metadata(path)
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
     }
     #[cfg(not(unix))]
     {
-        true
+        path.is_file()
     }
 }
 
