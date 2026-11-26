@@ -655,15 +655,7 @@ pub fn cmd_clone(
         return Err(bad(format!("no repository at {}", remote_path.display())));
     }
     let remote_conn = open_db(&remote_path)?;
-    let branch: String = remote_conn
-        .query_row(
-            "SELECT name FROM branches ORDER BY created_at LIMIT 1",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()?
-        .ok_or_else(|| bad("remote has no branches"))?;
-
+    let branch = pick_main_branch(&remote_conn)?;
     let bundle = remote::build_bundle(&remote_conn, &branch, &HashSet::new())?;
     let received = remote::Bundle::decode(&bundle.encode()?)?;
 
@@ -780,6 +772,45 @@ fn clone_s3(url: &str, target: &Path, pin: Option<&str>, depth: Option<usize>) -
         }
     );
     Ok(())
+}
+
+/// Prefer `main` if it exists, otherwise the oldest branch (by created_at).
+fn pick_main_branch(conn: &Connection) -> ZResult<String> {
+    // First try to find main.
+    if let Ok(Some(name)) = conn
+        .query_row("SELECT name FROM branches WHERE name = 'main'", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()
+    {
+        return Ok(name);
+    }
+    // Fall back to oldest branch, which is what the old code did.
+    conn.query_row(
+        "SELECT name FROM branches ORDER BY created_at LIMIT 1",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()?
+    .ok_or_else(|| bad("remote has no branches"))
+}
+
+/// The server returns one `name\\thead` per line, ordered by name.
+/// Prefer `main` if present, otherwise the first line.
+fn pick_main_from_listing(listing: &str) -> ZResult<String> {
+    let mut first: Option<String> = None;
+    for line in listing.lines() {
+        let name = line.split('\t').next().filter(|s| !s.is_empty());
+        if let Some(n) = name {
+            if n == "main" {
+                return Ok(n.to_string());
+            }
+            if first.is_none() {
+                first = Some(n.to_string());
+            }
+        }
+    }
+    first.ok_or_else(|| bad("remote has no branches"))
 }
 
 // fsck / stats / ignore.
@@ -1602,15 +1633,7 @@ fn clone_http(
         )));
     }
     let listing = String::from_utf8_lossy(&body).to_string();
-    let branch = listing
-        .lines()
-        .find_map(|l| {
-            l.split('\t')
-                .next()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-        })
-        .ok_or_else(|| bad(format!("{} has no branches", base)))?;
+    let branch = pick_main_from_listing(&listing)?;
 
     let (status, body) = http::request_with_pin(
         "GET",

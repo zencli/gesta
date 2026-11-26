@@ -516,19 +516,22 @@ pub fn cmd_checkout(file: Option<&str>, changeset: Option<&str>) -> ZResult<()> 
     // `checkout` writes the branch out, so the whole-tree form is what the command means and it
     // cannot lose uncommitted work - the branch already holds every file it writes. A named file
     // stays available for the narrower question.
+    if let Some(cs) = changeset {
+        // An explicit changeset means: restore that changeset's tree, regardless of whether a
+        // file was also given. The old code ignored `changeset` when no file was provided, so
+        // `gesta checkout --changeset cs123` silently restored the branch head instead of cs123.
+        let written = repo::restore_at_changeset(&conn, &root, cs)?;
+        println!("restored {} file(s) from changeset {}", written, cs);
+        return Ok(());
+    }
     let file = file.unwrap_or(".");
     if file == "." {
-        if let Some(cs) = changeset {
-            let written = repo::restore_at_changeset(&conn, &root, cs)?;
-            println!("restored {} file(s) from changeset {}", written, cs);
-        } else {
-            let branch = current_branch(&conn)?;
-            let (written, removed) = repo::restore_worktree(&conn, &root, &branch)?;
-            println!(
-                "restored {} file(s), removed {} stale file(s)",
-                written, removed
-            );
-        }
+        let branch = current_branch(&conn)?;
+        let (written, removed) = repo::restore_worktree(&conn, &root, &branch)?;
+        println!(
+            "restored {} file(s), removed {} stale file(s)",
+            written, removed
+        );
         return Ok(());
     }
     let rel = normalise(file);
