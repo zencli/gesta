@@ -186,21 +186,25 @@ pub enum Progress {
 /// made in parallel, never meet in a three-way merge: they touch different files and both apply.
 /// The tree then holds a reference to a path that is not in it, and every step of the rebase said
 /// it succeeded.
-pub fn dangling_after(
+///
+/// Returns the references found and the files the search could not read. A rebase that succeeded
+/// while leaving one file unchecked is still a success, but the reader has to be told the check was
+/// incomplete rather than shown a clean result that was never fully computed.
+pub fn dangling_after_with_skips(
     conn: &Connection,
     before: Option<&str>,
     after: &str,
-) -> ZResult<Vec<crate::repo::dangling::Dangling>> {
+) -> ZResult<(Vec<crate::repo::dangling::Dangling>, Vec<String>)> {
     let Some(before) = before else {
         // A branch with no head had no tree, so nothing left it. Reporting an empty list rather
         // than every name in the new tree is the difference between "nothing was removed" and
         // "everything appears to have been added".
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     if before == after {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
-    crate::repo::dangling::find(conn, before, after)
+    crate::repo::dangling::find_with_skips(conn, before, after)
 }
 
 /// Replay every pending changeset onto the base.

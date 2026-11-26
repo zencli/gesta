@@ -325,20 +325,42 @@ pub fn cmd_rebase(
     let onto_head = crate::store::resolve_rev(&conn, onto)?;
     let progress = crate::repo::rebase::start(&conn, &root, &target, onto, author)?;
     let after = crate::store::branch_head(&conn, &target)?;
-    let dangling = match &progress {
+    let (dangling, unchecked) = match &progress {
         // Only a finished replay can carry this: a stopped one will report on the run that
         // finishes it, and reporting twice would show the same names again.
-        crate::repo::rebase::Progress::Done(_) => crate::repo::rebase::dangling_after(
+        crate::repo::rebase::Progress::Done(_) => crate::repo::rebase::dangling_after_with_skips(
             &conn,
             onto_head.as_deref(),
             after.as_deref().unwrap_or(""),
         )
         .unwrap_or_default(),
-        _ => Vec::new(),
+        _ => (Vec::new(), Vec::new()),
     };
     report_rebase(progress);
     report_dangling(&dangling);
+    report_unchecked(&unchecked);
     Ok(())
+}
+
+/// Files the dangling check could not read.
+///
+/// Its own message rather than part of the report above: "no references found" and "no references
+/// found in the files I could read" are different answers, and the second one has to say so or the
+/// reader trusts a result that was never fully computed.
+fn report_unchecked(paths: &[String]) {
+    if paths.is_empty() {
+        return;
+    }
+    println!();
+    println!(
+        "{} file(s) could not be read, so the check above did not cover them:",
+        paths.len()
+    );
+    for p in paths {
+        println!("  {}", p);
+    }
+    println!();
+    println!("the store cannot produce these bodies; `gesta fsck` reports the damage.");
 }
 
 /// Names that left the tree while other files still mention them.
