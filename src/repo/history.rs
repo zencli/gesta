@@ -164,18 +164,36 @@ pub fn rename_history(conn: &Connection, path: &str, max_depth: usize) -> ZResul
     Ok(chain)
 }
 
+/// What a revert did, and what it could not finish afterwards.
+///
+/// The distinction is the whole point of this type. Once the transaction commits, the revert has
+/// happened: history holds the changeset and the branch points at it. A later failure - the commit
+/// bookkeeping, or writing the files back to disk - cannot undo that, and reporting it as an error
+/// told the caller the revert failed when it had not, so retrying made a second revert that undid
+/// the first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RevertOutcome {
+    /// The changeset that records the revert. It is committed either way.
+    pub id: String,
+    /// Set when the revert is durable but the working copy could not follow it.
+    pub materialise_error: Option<String>,
+}
+
 /// Undo the effect of `target` by recording a new changeset that restores the
 /// content each of its files had before it.
 ///
 /// This is a revert, not a reset: history is never rewritten, so a revert is
 /// itself revertable and safe on a branch other people have already pulled.
+/// A working-copy failure is reported in the outcome, not as an error: after `tx.commit` the revert
+/// is durable, and the only honest thing to say about a `materialise` failure is "the revert
+/// happened, the files on disk did not follow".
 pub fn revert_changeset(
     conn: &Connection,
     root: &Path,
     target: &str,
     author: &str,
     reason: Option<&str>,
-) -> ZResult<String> {
+) -> ZResult<RevertOutcome> {
     let (status, message, parent): (String, String, Option<String>) = conn
         .query_row(
             "SELECT status, message, parent FROM changesets WHERE id = ?1",
@@ -299,12 +317,33 @@ pub fn revert_changeset(
     }
     tx.commit()?;
 
-    commit_one(conn, &revert_id)?;
+    // From here on the revert is durable: the changeset is committed and the branch points at it.
+    // `commit_one` failing cannot un-happen that, so it is reported alongside the id rather than
+    // replacing it. The old code returned `Err` here, and a caller who retried made a second revert
+    // that undid the first.
+    let mut materialise_error = match commit_one(conn, &revert_id) {
+        Ok(_) => None,
+        Err(e) => Some(format!(
+            "the revert is recorded but its commit bookkeeping failed: {}",
+            e
+        )),
+    };
     // The commit updated the database; the working copy has to follow or the
     // revert looks applied while the old content is still on disk.
-    materialise(conn, root, &branch)?;
+    if let Err(e) = materialise(conn, root, &branch) {
+        materialise_error = Some(match materialise_error {
+            Some(previous) => format!("{}; then writing the files failed: {}", previous, e),
+            None => format!(
+                "the revert is recorded but the files were not written: {}",
+                e
+            ),
+        });
+    }
     let _ = restored;
-    Ok(revert_id)
+    Ok(RevertOutcome {
+        id: revert_id,
+        materialise_error,
+    })
 }
 
 fn first_line(s: &str) -> String {
@@ -676,7 +715,9 @@ y = 3
         commit_one(&conn, "cs2").unwrap();
         fs::write(tmp.join("a.txt"), "B\n").unwrap();
 
-        let rev = revert_changeset(&conn, &tmp, "cs2", "bot", Some("test")).unwrap();
+        let rev = revert_changeset(&conn, &tmp, "cs2", "bot", Some("test"))
+            .unwrap()
+            .id;
         assert_eq!(
             branch_head(&conn, "main").unwrap().as_deref(),
             Some(rev.as_str())
@@ -690,6 +731,82 @@ y = 3
         let _ = fs::remove_dir_all(&tmp);
     }
 
+    #[test]
+    fn a_revert_whose_working_copy_fails_still_reports_the_revert_as_done() {
+        // `tx.commit()` makes the revert durable, then `commit_one` and `materialise` ran outside it.
+        // Returning `Err` from either told the caller the revert had failed when it had not, so a
+        // retry made a second revert that undid the first. The outcome now carries the id either
+        // way, plus whatever the working copy could not do.
+        //
+        // `materialise` is made to fail by putting a directory where a file it must write goes: the
+        // write fails, and nothing about the database changes.
+        let tmp = std::env::temp_dir().join(format!("zf_revert_mat_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let conn = mem_db();
+        let a1 = put_object(&conn, "A\n").unwrap();
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
+             VALUES('cs1','one','a',1,'committed',NULL,'main')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs1','a.txt',NULL,?1)",
+            params![a1],
+        )
+        .unwrap();
+        commit_one(&conn, "cs1").unwrap();
+        fs::write(tmp.join("a.txt"), "A\n").unwrap();
+
+        let b1 = put_object(&conn, "B\n").unwrap();
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
+             VALUES('cs2','two','a',2,'committed','cs1','main')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs2','a.txt',?1,?2)",
+            params![a1, b1],
+        )
+        .unwrap();
+        commit_one(&conn, "cs2").unwrap();
+        fs::write(tmp.join("a.txt"), "B\n").unwrap();
+
+        // A directory where `materialise` wants to write `a.txt`.
+        fs::remove_file(tmp.join("a.txt")).unwrap();
+        fs::create_dir_all(tmp.join("a.txt")).unwrap();
+
+        let outcome = revert_changeset(&conn, &tmp, "cs2", "bot", None)
+            .expect("the revert itself succeeded, so this must not be an error");
+        assert!(
+            outcome.materialise_error.is_some(),
+            "the working-copy failure has to be reported, not swallowed"
+        );
+        // The revert is in the history and the branch points at it.
+        assert_eq!(
+            branch_head(&conn, "main").unwrap().as_deref(),
+            Some(outcome.id.as_str()),
+            "the revert must be durable even though the files were not written"
+        );
+        let stored: String = conn
+            .query_row(
+                "SELECT message FROM changesets WHERE id = ?1",
+                params![outcome.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            stored.starts_with("Revert "),
+            "the changeset records the revert, got: {stored}"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
     #[test]
     fn reverting_a_revert_restores_the_change() {
         let tmp = std::env::temp_dir().join(format!("zf_revert2_{}", std::process::id()));
@@ -715,8 +832,10 @@ y = 3
         .unwrap();
         commit_one(&conn, "cs2").unwrap();
 
-        let r1 = revert_changeset(&conn, &tmp, "cs2", "bot", None).unwrap();
-        let r2 = revert_changeset(&conn, &tmp, &r1, "bot", None).unwrap();
+        let r1 = revert_changeset(&conn, &tmp, "cs2", "bot", None)
+            .unwrap()
+            .id;
+        let r2 = revert_changeset(&conn, &tmp, &r1, "bot", None).unwrap().id;
         assert_eq!(
             branch_head(&conn, "main").unwrap().as_deref(),
             Some(r2.as_str())

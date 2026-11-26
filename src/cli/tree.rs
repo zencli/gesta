@@ -302,12 +302,24 @@ pub fn cmd_diff(changeset: Option<&str>, name_only: bool) -> ZResult<()> {
 
 pub fn cmd_revert(id: &str, reason: Option<&str>, author: &str) -> ZResult<()> {
     let (root, conn) = open_repo()?;
-    let revert_id =
+    let outcome =
         store::with_retry(|| history::revert_changeset(&conn, &root, id, author, reason))?;
+    let revert_id = outcome.id;
     ops::record(&conn, "revert", Some(&revert_id), Some(id))?;
     println!("reverted {} as {}", id, revert_id);
     println!("\nThe revert is a normal changeset: `gesta log` shows both, and");
     println!("reverting the revert restores the change.");
+    // Said after the good news, and without the word "failed": the revert is in the history and the
+    // branch points at it. Only the disk disagrees, and the caller needs to know that before they
+    // trust the working tree they are about to read.
+    if let Some(problem) = outcome.materialise_error {
+        println!();
+        println!("but the working tree did not follow: {}", problem);
+        println!(
+            "the history is correct; `gesta checkout {}` writes the files again.",
+            revert_id
+        );
+    }
     Ok(())
 }
 
