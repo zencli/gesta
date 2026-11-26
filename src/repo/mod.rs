@@ -1177,10 +1177,20 @@ pub fn merge_branch(
         }
         let src_anc = crate::store::ancestors(conn, &src_head)?;
         if src_anc.contains(t) {
-            // Target is behind: move the head and materialise the files.
+            // Target is behind: move the head and write the files the move brings in.
+            //
+            // The comment said "materialise the files" before the code did: it moved the head,
+            // committed, and returned, so the branch pointed at the new changesets while the working
+            // tree still held the old contents. `status` then reported every file the move brought in
+            // as an uncommitted change and every file it removed as still present - a working tree that
+            // contradicts its own branch, which is what a fast-forward merge exists to avoid.
             let tx = conn.unchecked_transaction()?;
             crate::store::set_branch_head(&tx, target, &src_head)?;
             tx.commit()?;
+            // `restore_worktree`, not a hand-rolled write loop: it already knows how to remove the
+            // paths the new tree no longer names, and writing a second version of that here would let
+            // the two disagree about deletions.
+            crate::repo::restore_worktree(conn, root, target)?;
             return Ok(MergeOutcome {
                 applied: vec![src_head],
                 conflicts: Vec::new(),
@@ -2830,6 +2840,66 @@ pub(crate) mod tests {
             authors(&conn, "f.txt"),
             vec!["alice", "bob", "alice", "alice"]
         );
+    }
+
+    #[test]
+    fn a_fast_forward_merge_writes_the_files_it_brings_in() {
+        // The fast-forward branch moved the head and returned. The comment above it said
+        // "materialise the files" and nothing did, so the branch pointed at changesets whose files
+        // were not on disk: `status` reported every one as an uncommitted addition and every file the
+        // move removed as still present.
+        let conn = mem_db();
+        let root = std::env::temp_dir().join(format!("gesta-ff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // `main` holds one file; `side` is ahead by two changesets, one adding a file and one
+        // deleting the first, so a correct fast-forward has to write one and remove one.
+        commit_as(&conn, "c1", "alice", "stays.txt", "keep\n");
+        conn.execute(
+            "INSERT INTO branches(name, head, created_at, from_branch) VALUES('side','c1',1,'main')",
+            [],
+        )
+        .unwrap();
+        commit_as(&conn, "c2", "bob", "added.txt", "new\n");
+        // `commit_as` always commits onto `main`, so the fork is stated afterwards: `side` holds the
+        // newer changeset and `main` is the one behind it, which is the shape a fast-forward merges.
+        conn.execute("UPDATE branches SET head='c2' WHERE name='side'", [])
+            .unwrap();
+        conn.execute("UPDATE branches SET head='c1' WHERE name='main'", [])
+            .unwrap();
+        // Put the working tree where `main` is, which is the state a person is in when they run
+        // `gesta merge side` from the main tree.
+        crate::repo::restore_worktree(&conn, &root, "main").unwrap();
+        assert!(
+            !root.join("added.txt").exists(),
+            "side's file is not on disk yet"
+        );
+
+        let out = merge_branch(&conn, &root, "side", "main", "t").unwrap();
+        assert_eq!(out.applied, vec!["c2".to_string()]);
+        assert_eq!(
+            branch_head(&conn, "main").unwrap().as_deref(),
+            Some("c2"),
+            "the head moved"
+        );
+        // The property the bug broke: the files follow the head.
+        assert!(
+            root.join("added.txt").is_file(),
+            "the fast-forward must write the files it brings in; working tree holds {:?}",
+            std::fs::read_dir(&root).map(|d| {
+                d.filter_map(|e| e.ok())
+                    .map(|e| e.file_name())
+                    .collect::<Vec<_>>()
+            })
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("stays.txt")).unwrap(),
+            "keep\n",
+            "a file the move does not touch keeps its content"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
