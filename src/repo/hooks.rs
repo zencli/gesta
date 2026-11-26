@@ -156,6 +156,11 @@ pub fn record_installed(root: &Path, name: &str, body: &str) -> ZResult<()> {
     let dir = repo_dir(root);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("hooks.installed");
+    // Read, filter, append, write is four steps over one file, so two `hook install` runs racing
+    // lose each other's entry and a crash mid-write leaves a torn file where every hook reads as
+    // unverifiable. The lock file makes the four steps one; the temp-and-rename makes the write
+    // itself all-or-nothing, so even a crash leaves the previous content whole.
+    let _guard = LockFile::acquire(&dir.join("hooks.installed.lock"))?;
     let mut lines: Vec<String> = Vec::new();
     if let Ok(text) = std::fs::read_to_string(&path) {
         for line in text.lines() {
@@ -171,7 +176,81 @@ pub fn record_installed(root: &Path, name: &str, body: &str) -> ZResult<()> {
     }
     lines.push(format!("{}\t{}", name, crate::store::hash_content(body)));
     lines.sort();
-    std::fs::write(&path, lines.join("\n") + "\n")?;
+    replace_atomically(&path, (lines.join("\n") + "\n").as_bytes())?;
+    Ok(())
+}
+
+/// A lock held for as long as the value lives.
+///
+/// `create_new` is the whole mechanism: the kernel decides which of two racers creates the file, so
+/// a check and a claim that used to be two steps become one. The file is removed on drop, including
+/// on the error path, so a failed install does not leave the next one locked out.
+///
+/// A lock file older than the wait is treated as debris from a process that died: without that, one
+/// crash would make every later `hook install` fail forever, which is worse than the race it guards.
+struct LockFile {
+    path: PathBuf,
+}
+
+impl LockFile {
+    fn acquire(path: &Path) -> ZResult<LockFile> {
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut paused = std::time::Duration::from_millis(2);
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(_) => {
+                    return Ok(LockFile {
+                        path: path.to_path_buf(),
+                    })
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if std::time::Instant::now() >= give_up {
+                        // Debris, not a live writer: take the file over and carry on. The rename in
+                        // `replace_atomically` still keeps the content whole, so the worst case is
+                        // two writers serialised by the second's retry.
+                        let _ = std::fs::remove_file(path);
+                        continue;
+                    }
+                    std::thread::sleep(paused);
+                    paused = (paused * 2).min(std::time::Duration::from_millis(100));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+}
+
+impl Drop for LockFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Write `bytes` to `path` so a reader sees the old content or the new one, never a half file.
+///
+/// The temp file is a sibling, which keeps the rename on one filesystem and atomic there; a temp in
+/// the system directory would make it a copy and lose the guarantee. The pid is in the name so two
+/// writers cannot share a temp and interleave into it.
+fn replace_atomically(path: &Path, bytes: &[u8]) -> ZResult<()> {
+    let mut tmp = path.to_path_buf();
+    tmp.set_extension(format!("tmp-{}", std::process::id()));
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        let wrote = f.write_all(bytes).and_then(|_| f.sync_all());
+        if let Err(e) = wrote {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -481,6 +560,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn concurrent_installs_keep_every_entry() {
+        // Read, filter, append, write is four steps over one file. Without a lock, two installs
+        // racing each read the old content and each wrote back only their own entry, so one record
+        // vanished and that hook read as unverifiable forever after.
+        //
+        // Threads rather than processes: the race is in the read-modify-write, not in the process
+        // boundary, and this keeps the test deterministic enough to be worth running.
+        let d = tmp("concurrent");
+        std::fs::create_dir_all(repo_dir(&d)).unwrap();
+
+        let names: Vec<String> = (0..8).map(|i| format!("hook-{}", i)).collect();
+        let handles: Vec<_> = names
+            .iter()
+            .cloned()
+            .map(|n| {
+                let root = d.clone();
+                // `ZResult` is not `Send`, so the thread answers with a bool and the message is
+                // rebuilt here rather than carried across.
+                std::thread::spawn(move || {
+                    record_installed(&root, &n, "#!/bin/sh\nexit 0\n").is_ok()
+                })
+            })
+            .collect();
+        for (i, h) in handles.into_iter().enumerate() {
+            assert!(
+                h.join().unwrap(),
+                "install of {} failed",
+                names.get(i).map(|s| s.as_str()).unwrap_or("?")
+            );
+        }
+
+        let text = std::fs::read_to_string(repo_dir(&d).join("hooks.installed")).unwrap();
+        for n in &names {
+            assert!(
+                text.lines().any(|l| l.starts_with(&format!("{}\t", n))),
+                "the record for {} was lost; file holds:\n{}",
+                n,
+                text
+            );
+        }
+        // The same count as the names, so a line was not duplicated either.
+        assert_eq!(
+            text.lines().filter(|l| !l.trim().is_empty()).count(),
+            names.len(),
+            "one line per hook, got:\n{}",
+            text
+        );
+        // The lock is released, so the next install is not locked out.
+        assert!(
+            !repo_dir(&d).join("hooks.installed.lock").exists(),
+            "the lock file must not outlive the write"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_previous_file_whole() {
+        // The write goes to a sibling temp and is renamed, so a reader sees the old content or the
+        // new one. What a test can observe is the property that removes the gap: a failed write
+        // leaves the file as it was.
+        let d = tmp("torn");
+        std::fs::create_dir_all(repo_dir(&d)).unwrap();
+        record_installed(&d, "pre-commit", "#!/bin/sh\nexit 0\n").unwrap();
+        let path = repo_dir(&d).join("hooks.installed");
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        // A directory where the temp file must go makes the write fail.
+        let mut tmp_path = path.clone();
+        tmp_path.set_extension(format!("tmp-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp_path).unwrap();
+
+        let err = replace_atomically(&path, b"half a file");
+        assert!(err.is_err(), "the write cannot succeed into a directory");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "a failed write must leave the previous content untouched"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
     #[test]
     fn a_missing_hook_is_not_an_error() {
         let d = tmp("absent");
