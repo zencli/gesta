@@ -136,14 +136,51 @@ pub fn cmd_grep(s: Search) -> ZResult<()> {
 /// list of locations instead of parsing a terminal's layout.
 pub fn cmd_grep_json(s: Search) -> ZResult<()> {
     let hits = grep_hits(&s)?;
+    if s.files_with_matches {
+        let mut seen = std::collections::BTreeSet::new();
+        let rows: Vec<crate::support::json::Json> = hits
+            .iter()
+            .filter_map(|h| {
+                if seen.insert(h.path.clone()) {
+                    Some(crate::support::json::Json::str(h.path.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        emit(crate::support::json::Json::obj(vec![
+            (
+                "pattern",
+                crate::support::json::Json::str(s.pattern.clone()),
+            ),
+            ("history", crate::support::json::Json::Bool(s.history)),
+            ("files", crate::support::json::Json::arr(rows)),
+        ]));
+        return Ok(());
+    }
+    // A single minified line can be thousands of characters, and a person reading a terminal and
+    // an agent reading a transcript pay for all of it. Cutting is opt-in, because a caller that
+    // wants the whole line has no other place to get it, and a cut line says how long it was.
+    let mut cut = 0usize;
+    let clip = |text: &str| -> String {
+        if s.max_line == 0 || text.chars().count() <= s.max_line {
+            return text.to_string();
+        }
+        let mut out: String = text.chars().take(s.max_line).collect();
+        out.push_str(&format!(" [{} chars, cut]", text.chars().count()));
+        out
+    };
     let rows: Vec<crate::support::json::Json> = hits
         .iter()
         .map(|h| {
+            if s.max_line > 0 && h.text.chars().count() > s.max_line {
+                cut += 1;
+            }
             crate::support::json::Json::obj(vec![
                 ("path", crate::support::json::Json::str(h.path.clone())),
                 ("line", crate::support::json::Json::int(h.line as i64)),
                 ("rev", crate::support::json::Json::str(h.rev.clone())),
-                ("text", crate::support::json::Json::str(h.text.clone())),
+                ("text", crate::support::json::Json::str(clip(&h.text))),
             ])
         })
         .collect();
@@ -155,6 +192,11 @@ pub fn cmd_grep_json(s: Search) -> ZResult<()> {
         ("history", crate::support::json::Json::Bool(s.history)),
         ("count", crate::support::json::Json::int(hits.len() as i64)),
         ("hits", crate::support::json::Json::arr(rows)),
+        ("cut_lines", crate::support::json::Json::int(cut as i64)),
+        (
+            "max_line",
+            crate::support::json::Json::int(s.max_line as i64),
+        ),
     ]));
     Ok(())
 }
@@ -276,50 +318,63 @@ pub fn cmd_review_json(
             })
             .collect();
 
-        let stale = crate::support::impact::stale_references(&conn, &step.files, &tree)
-            .unwrap_or_default()
+        let stale_res = crate::support::impact::stale_references(&conn, &step.files, &tree);
+        let stale = match stale_res {
+            Ok(v) => v,
+            Err(e) => {
+                // Match text: "impact check skipped: {e}"
+                vec![crate::support::impact::Stale {
+                    name: "error".to_string(),
+                    path: "".to_string(),
+                    line: 0,
+                    text: format!("impact check skipped: {}", e),
+                    removed_from: "".to_string(),
+                }]
+            }
+        };
+        let stale_json = stale
             .into_iter()
             .map(|s| {
-                crate::support::json::Json::obj(vec![
-                    ("name", crate::support::json::Json::str(s.name)),
-                    ("path", crate::support::json::Json::str(s.path)),
-                    ("line", crate::support::json::Json::int(s.line as i64)),
-                    ("text", crate::support::json::Json::str(s.text)),
-                    (
-                        "removed_from",
-                        crate::support::json::Json::str(s.removed_from),
-                    ),
+                Json::obj(vec![
+                    ("name", Json::str(s.name)),
+                    ("path", Json::str(s.path)),
+                    ("line", Json::int(s.line as i64)),
+                    ("text", Json::str(s.text)),
+                    ("removed_from", Json::str(s.removed_from)),
                 ])
             })
             .collect();
 
-        items.push(crate::support::json::Json::obj(vec![
-            (
-                "changeset",
-                crate::support::json::Json::str(step.id.clone()),
-            ),
-            (
-                "message",
-                crate::support::json::Json::str(step.message.clone()),
-            ),
-            (
-                "author",
-                crate::support::json::Json::str(step.author.clone()),
-            ),
-            ("risk", crate::support::json::Json::str(step.risk.band())),
-            ("score", crate::support::json::Json::int(step.risk.score)),
+        let blind = crate::support::impact::blind_spots(&conn, &tree);
+        let blind_json = if blind.any() {
+            Json::obj(vec![
+                ("files_read", Json::int(blind.files_read as i64)),
+                ("computed_keys", Json::int(blind.computed_keys as i64)),
+                ("indirections", Json::int(blind.indirections as i64)),
+            ])
+        } else {
+            Json::Null
+        };
+
+        items.push(Json::obj(vec![
+            ("changeset", Json::str(step.id.clone())),
+            ("message", Json::str(step.message.clone())),
+            ("author", Json::str(step.author.clone())),
+            ("risk", Json::str(step.risk.band())),
+            ("score", Json::int(step.risk.score)),
             (
                 "reasons",
-                crate::support::json::Json::arr(
+                Json::arr(
                     step.risk
                         .reasons
                         .iter()
-                        .map(|r| crate::support::json::Json::str(r.clone()))
+                        .map(|r| Json::str(r.clone()))
                         .collect(),
                 ),
             ),
-            ("files", crate::support::json::Json::arr(files)),
-            ("stale", crate::support::json::Json::arr(stale)),
+            ("files", Json::arr(files)),
+            ("stale", Json::arr(stale_json)),
+            ("blind_spots", blind_json),
         ]));
     }
 
