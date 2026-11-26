@@ -532,10 +532,35 @@ pub fn rebuild_blame_chain(conn: &Connection, path: &str) -> ZResult<()> {
         return Ok(());
     }
 
+    // Clearing and rebuilding are one write. The `DELETE` used to run on its own, so a failure
+    // partway through the rebuild left the path with no blame at all: worse than the stale rows it
+    // had, because `blame` then had nothing to answer with and nothing said so. A savepoint nests
+    // inside a caller's transaction, which `BEGIN` cannot do (#96).
+    conn.execute_batch("SAVEPOINT rebuild_blame_chain")?;
+    let outcome = rebuild_blame_chain_inner(conn, path, &versions);
+    match outcome {
+        Ok(()) => {
+            conn.execute_batch("RELEASE rebuild_blame_chain")?;
+            Ok(())
+        }
+        Err(e) => {
+            // Put the previous blame back exactly as it was: a failed rebuild leaves the old rows.
+            let _ = conn.execute_batch("ROLLBACK TO rebuild_blame_chain");
+            let _ = conn.execute_batch("RELEASE rebuild_blame_chain");
+            Err(e)
+        }
+    }
+}
+
+fn rebuild_blame_chain_inner(
+    conn: &Connection,
+    path: &str,
+    versions: &[(i64, String)],
+) -> ZResult<()> {
     // Clear first: a chain built on top of half-written rows attributes lines to whatever was there.
     conn.execute("DELETE FROM blame_ranges WHERE path = ?1", params![path])?;
 
-    for (_version, hash) in &versions {
+    for (_version, hash) in versions {
         // One step: this version against the rows the previous step wrote. `recompute_blame` reads
         // the newest `file_versions` row, so the chain is walked by asking it at each position and
         // letting it inherit from what is already stored.
