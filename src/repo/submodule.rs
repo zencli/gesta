@@ -317,24 +317,18 @@ pub fn submodule_status(root: &Path) -> ZResult<Vec<SubmoduleStatus>> {
     for sub in subs.values() {
         let dest = root.join(&sub.path);
         let missing = !dest.exists();
+        // Which mechanism answers depends on what the child is, the same way init and update decide.
+        // Asking git about one of our repositories fails with `fatal: not a git repository`, and the
+        // old code ignored that: `rev-parse` produced an empty string, so the child reported no
+        // commit at all. `matches_pin` against an empty commit is always false, which made the CLI
+        // print "behind" for every pin - so `submodule status` looked correct for the wrong reason
+        // and could never report "clean" for a child of this kind.
         let (commit, dirty) = if missing {
             (String::new(), false)
+        } else if is_our_repo(&dest) {
+            our_repo_state(&dest)?
         } else {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&dest)
-                .arg("rev-parse")
-                .arg("HEAD")
-                .output()?;
-            let commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let status = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&dest)
-                .arg("status")
-                .arg("--porcelain")
-                .output()?;
-            let dirty = !status.stdout.is_empty();
-            (commit, dirty)
+            git_repo_state(&dest, &sub.path)?
         };
         out.push(SubmoduleStatus {
             path: sub.path.clone(),
@@ -345,6 +339,55 @@ pub fn submodule_status(root: &Path) -> ZResult<Vec<SubmoduleStatus>> {
         });
     }
     Ok(out)
+}
+
+/// The head and dirtiness of one of our repositories, read from its own store.
+///
+/// Dirty means the working tree differs from the branch head, which is the same question
+/// `git status --porcelain` answers for a git child. `diff_worktree` already computes it, so this
+/// reuses it rather than writing a second definition of "dirty" that could drift.
+fn our_repo_state(dest: &Path) -> ZResult<(String, bool)> {
+    let conn = crate::store::open_db(dest)?;
+    let branch = crate::store::current_branch(&conn).unwrap_or_else(|_| "main".to_string());
+    let head = crate::store::branch_head(&conn, &branch)?.unwrap_or_default();
+    let d = crate::repo::diff_worktree(&conn, dest, &branch)?;
+    let dirty = !d.added.is_empty() || !d.modified.is_empty() || !d.deleted.is_empty();
+    Ok((head, dirty))
+}
+
+/// The head and dirtiness of a git child, with the exit statuses actually checked.
+///
+/// Reading `stdout` without looking at the status turns "git refused" into "the repository is empty
+/// and clean", which is indistinguishable from a real answer.
+fn git_repo_state(dest: &Path, sub_path: &str) -> ZResult<(String, bool)> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dest)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()?;
+    if !out.status.success() {
+        return Err(bad(format!(
+            "cannot read the head of submodule {}: {}",
+            sub_path,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    let commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dest)
+        .arg("status")
+        .arg("--porcelain")
+        .output()?;
+    if !status.status.success() {
+        return Err(bad(format!(
+            "cannot read the status of submodule {}: {}",
+            sub_path,
+            String::from_utf8_lossy(&status.stderr).trim()
+        )));
+    }
+    Ok((commit, !status.stdout.is_empty()))
 }
 
 /// Clone a child repository, whichever kind it is.

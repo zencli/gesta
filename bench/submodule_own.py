@@ -95,7 +95,13 @@ def main():
                        "unpinned" not in status and "missing" not in status, status[:240]))
 
         # A moved child head has to be visible as a difference, or the pin means nothing.
-        repo(child, "child two", "c.txt", "more\n")
+        #
+        # The move has to happen in the checked-out copy under the parent, not in the source the
+        # submodule was cloned from: `init` made `sub/` a repository of its own, and a commit in the
+        # source does not reach it. The check used to commit into the source and pass anyway,
+        # because `submodule status` read an empty commit for a child of this kind and printed
+        # "behind" for every pin regardless of where the child actually was.
+        repo(os.path.join(parent, "sub"), "child two", "c.txt", "more\n")
         status2 = sh(["submodule", "status"], parent).stdout + sh(["submodule", "status"], parent).stderr
         checks.append(("a child that moved is reported as differing",
                        "differ" in status2.lower() or "behind" in status2.lower(),
