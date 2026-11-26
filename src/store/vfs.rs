@@ -257,6 +257,12 @@ impl FileSystemContext for TreeView {
                     format!("{}/{}", parent, name)
                 };
                 let is_dir = self.is_dir(&full);
+                // A file name longer than the directory entry can hold would fail the whole listing,
+                // turning one unusual file into an unreadable directory. Skipping the entry keeps
+                // every other name readable; the name is not representable in this format at all.
+                if name.len() > 255 {
+                    continue;
+                }
                 let mut entry: DirInfo<255> = DirInfo::new();
                 entry.reset();
                 entry.set_name(name.as_str())?;

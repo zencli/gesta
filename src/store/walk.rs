@@ -506,9 +506,6 @@ pub fn scan_files_excluding(
             // 8000 allocations on a large tree for a four word lookup.
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if SKIP_DIRS.contains(&name.as_ref()) {
-                continue;
-            }
             // `file_type()` costs nothing: readdir already reported the type, and this just reads it
             // out of the entry. `metadata()` is a stat per entry, which measured 122 ms over 100,000
             // files against 21.7 ms for readdir alone. An earlier comment here said metadata cost
@@ -521,6 +518,12 @@ pub fn scan_files_excluding(
                 Ok(t) => t,
                 Err(_) => continue,
             };
+            // Only a directory is skipped. The list names directories never descended into, and
+            // checking it before the type test dropped a regular file called `build` or `dist` from
+            // every scan with no warning - a file the user asked to track and never could.
+            if ftype.is_dir() && SKIP_DIRS.contains(&name.as_ref()) {
+                continue;
+            }
             // One allocation: the prefix, a separator and the name. A `PathBuf` was built here before
             // and thrown away for every file the cache could answer for, which is most of them.
             let mut rel = String::with_capacity(prefix.len() + 1 + name.len());

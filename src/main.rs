@@ -393,7 +393,8 @@ enum Cmd {
     RestoreRepo {
         /// The backup file
         file: Option<String>,
-        /// Skip the question. Without it, restoring asks first because it replaces the store
+        /// Required. A restore replaces the store, so it refuses without this and asks nothing:
+        /// read the counts it prints back, then run it again with --yes
         #[arg(long)]
         yes: bool,
     },
