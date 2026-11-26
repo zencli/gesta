@@ -502,6 +502,17 @@ pub fn serve_tls(
     cert: &Path,
     key: &Path,
 ) -> ZResult<()> {
+    // #171: refuse before anything observable happens. The bind used to come first, so a refused
+    // start printed "gesta listening on https://..." for an address it never served and held the
+    // port for as long as the certificate work took. Nothing the caller can see should exist when
+    // the refusal is the answer.
+    if !auth.required {
+        return Err(bad(format!(
+            "refusing to serve TLS on {} without tokens: add entries to .gesta/auth",
+            bind
+        )));
+    }
+
     let cfg = crate::transport::tls::server_config(cert, key)?;
     let listener = TcpListener::bind((bind.as_str(), port))
         .map_err(|e| bad(format!("cannot bind {}:{}: {}", bind, port, e)))?;
@@ -513,14 +524,7 @@ pub fn serve_tls(
         crate::transport::tls::fingerprint_of(cert)?
     );
     println!("repository: {}", root.display());
-    if auth.required {
-        println!("access: {} token(s) configured", auth.token_count());
-    } else {
-        return Err(bad(format!(
-            "refusing to serve TLS on {} without tokens: add entries to .gesta/auth",
-            bind
-        )));
-    }
+    println!("access: {} token(s) configured", auth.token_count());
     println!("press Ctrl-C to stop");
 
     let auth_path = Arc::new(crate::repo_dir(&root).join("auth"));
@@ -2445,6 +2449,52 @@ mod tests {
             "the refusal should say the body exceeds the limit: {:?}",
             err
         );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_tokenless_tls_server_is_refused_before_it_takes_the_port() {
+        // #171: `serve_tls` bound the socket, printed "gesta listening on ...", and only then
+        // refused to run without tokens. A refused start therefore announced a listening address it
+        // never served, and the port was held for the length of the certificate work. The refusal
+        // must come first: nothing is bound, nothing is printed as listening, and the address is
+        // still free when the call returns.
+        let dir = std::env::temp_dir().join(format!("gesta-tls-tokenless-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".gesta")).unwrap();
+        let (cert, key, _fingerprint) =
+            crate::transport::tls::generate_self_signed("localhost", &dir).unwrap();
+
+        // Hold the port for the whole test. If `serve_tls` binds before it checks the tokens, the
+        // error is about the bind; if it checks first, the error is about the tokens. That makes the
+        // two orders distinguishable rather than both failing with the same message.
+        let held = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = held.local_addr().unwrap().port();
+
+        let auth = Auth::from_entries(&[]);
+        assert!(!auth.required, "the fixture was supposed to have no tokens");
+
+        let err = serve_tls(dir.clone(), "0.0.0.0".to_string(), port, auth, &cert, &key)
+            .expect_err("a TLS server with no tokens must be refused")
+            .to_string();
+
+        assert!(
+            err.contains("refusing to serve TLS"),
+            "the refusal did not happen before the bind: {:?}",
+            err
+        );
+        assert!(
+            !err.contains("cannot bind"),
+            "the socket was bound before the tokens were checked: {:?}",
+            err
+        );
+        // The port is still only ours: nothing else took it on the way in or out.
+        assert!(
+            std::net::TcpListener::bind(("0.0.0.0", port)).is_err(),
+            "serve_tls released a port it never owned"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
