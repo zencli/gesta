@@ -2792,6 +2792,49 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_failed_rebuild_blame_chain_leaves_the_previous_blame_intact() {
+        // `rebuild_blame_chain` used to run the DELETE and then the rebuild as separate writes. A
+        // failure partway through the rebuild left the path with no blame at all: worse than the
+        // stale rows it had, because `blame` then had nothing to answer with and nothing said so.
+        //
+        // The failure is forced with a trigger rather than by corrupting a table. Corrupting a
+        // changeset row makes the whole rebuild fail on its first step, so it never proves the part
+        // that matters: that a failure AFTER work has been written still rolls back. `version 3` is
+        // the point where two versions have already been inserted, so the rollback has something to
+        // undo.
+        let conn = mem_db();
+        commit_as(&conn, "c1", "alice", "f.txt", "a\nb\nc\n");
+        commit_as(&conn, "c2", "bob", "f.txt", "a\nB\nc\n");
+        commit_as(&conn, "c3", "carol", "f.txt", "a\nB\nc\nd\n");
+
+        rebuild_blame_chain(&conn, "f.txt").unwrap();
+        let before = authors(&conn, "f.txt");
+        assert_eq!(before, vec!["alice", "bob", "alice", "carol"]);
+
+        // `recompute_blame_at` writes its ranges for one version at a time, so this fires after the
+        // first version's rows are already in the table.
+        conn.execute_batch(
+            "CREATE TRIGGER fail_late BEFORE INSERT ON blame_ranges
+             WHEN NEW.path = 'f.txt' AND NEW.end_line >= 4
+             BEGIN SELECT RAISE(ABORT, 'forced failure for the rollback test'); END",
+        )
+        .unwrap();
+
+        let err = rebuild_blame_chain(&conn, "f.txt")
+            .expect_err("the trigger must make the rebuild fail");
+        assert!(
+            format!("{err}").contains("forced failure"),
+            "the trigger's own error must surface, got: {err}"
+        );
+
+        // The old blame is back exactly as it was, not empty and not half-written.
+        assert_eq!(
+            authors(&conn, "f.txt"),
+            before,
+            "a failed rebuild must roll back to the previous blame"
+        );
+    }
+    #[test]
     fn blame_gives_a_moved_line_back_to_the_author_who_wrote_it() {
         // Matching only forward would hand the moved line to whoever moved it.
         let conn = mem_db();
