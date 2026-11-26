@@ -110,12 +110,65 @@ fn split_regions(
         }
         i += 1; // skip >>>>>>>
 
-        let ours_start = cursor_ours + 1;
-        let ours_end = cursor_ours + our_block.len();
-        let theirs_start = find_block(their_lines, &their_block)
-            .map(|p| p + 1)
-            .unwrap_or(ours_start);
-        let theirs_end = theirs_start + their_block.len().saturating_sub(1);
+        // The blank line the marker format puts before `>>>>>>>` when their side is empty parses as
+        // one empty string. That is the marker's own shape, not a line of theirs, and leaving it in
+        // made an empty side look like a one-line region containing "".
+        if their_block.len() == 1 && their_block[0].is_empty() {
+            their_block.clear();
+        }
+        if our_block.len() == 1 && our_block[0].is_empty() {
+            our_block.clear();
+        }
+
+        // Where our side's region ends is not `cursor + block.len()`: the marker block holds the
+        // lines the merge chose to show, and the unchanged lines inside the changed range are not in
+        // it. The module's own docstring says the numbers are recovered by matching back to the
+        // source, so the next ordinary merged line is looked up in our file and the region ends
+        // where that line begins. Without this a three-line change reported a one-line range and
+        // `context_after` began inside the region.
+        let next_ordinary = lines[i..].iter().find(|l| !is_marker(l));
+        let our_end_idx = match next_ordinary {
+            Some(next) => our_lines
+                .iter()
+                .enumerate()
+                .skip(cursor_ours)
+                .find(|(_, l)| l == next)
+                .map(|(idx, _)| idx)
+                .unwrap_or(our_lines.len()),
+            None => our_lines.len(),
+        };
+
+        // An empty side has no lines, so it has no range. The old code produced
+        // `ours_start = cursor + 1, ours_end = cursor`, an inverted range that a reader has to
+        // notice is backwards, and on their side it fell back to our position, pointing at a line
+        // that belongs to the other version.
+        //
+        // The encoding here is `start = end + 1` on the empty side: the region begins where the
+        // next line would be, and reading it as a half-open range yields nothing. `0` stays reserved
+        // for "before line 1", which the module already documents on `ours_start`.
+        let (ours_start, ours_end) = if our_end_idx > cursor_ours {
+            (cursor_ours + 1, our_end_idx)
+        } else {
+            // Our side deleted the lines too: no range, and the start says where they would be.
+            (cursor_ours + 1, cursor_ours)
+        };
+
+        let (theirs_start, theirs_end) = if their_block.is_empty() {
+            // Their side has nothing here. The position is where our side's region starts, which is
+            // the only anchor available, and the end being one less than the start says "no lines"
+            // rather than "one line here".
+            (ours_start, ours_start.saturating_sub(1))
+        } else {
+            match find_block(their_lines, &their_block) {
+                Some(p) => {
+                    let start = p + 1;
+                    (start, start + their_block.len() - 1)
+                }
+                // The block is not in their file at all. Naming a position there would be a lie, so
+                // the range is empty and `theirs` still carries the lines.
+                None => (0, 0),
+            }
+        };
 
         // Context comes from our side, which is what the working tree holds.
         let before_from = cursor_ours.saturating_sub(CONTEXT_LINES);
@@ -138,10 +191,18 @@ fn split_regions(
             context_after,
         });
 
-        cursor_ours += our_block.len();
+        // The cursor moves to where the region ended, not by the marker block's length: the block
+        // holds only the lines the merge chose to show, and the unchanged lines inside a changed
+        // range are not in it.
+        cursor_ours = our_end_idx.max(cursor_ours);
     }
 
     regions
+}
+
+/// Whether a merged line is one of the conflict markers rather than file content.
+fn is_marker(line: &str) -> bool {
+    line.starts_with("<<<<<<<") || line.starts_with("=======") || line.starts_with(">>>>>>>")
 }
 
 /// First position where `block` appears in `hay`, as a 0-based index.
