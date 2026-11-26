@@ -261,8 +261,22 @@ pub fn cmd_diff(changeset: Option<&str>, name_only: bool) -> ZResult<()> {
             let mut any = false;
             for rel in changed {
                 let full = root.join(&rel);
-                let Some(content) = walk::read_text(&full) else {
-                    continue;
+                // A file that is not text is still a change. Skipping it here - before `any` was set -
+                // made a tree whose only edits were binary print "no changes", while `status` listed
+                // the same files as modified: the two commands disagreed about whether the tree was
+                // clean, and `diff` is the one people trust before a commit.
+                let content = match walk::read_text(&full) {
+                    Some(text) => text,
+                    None => {
+                        any = true;
+                        if name_only {
+                            println!("{}", rel);
+                        } else {
+                            println!("\n--- {}", rel);
+                            println!("binary files differ");
+                        }
+                        continue;
+                    }
                 };
                 let old_hash = store::latest_hash(&conn, &rel, &branch)?;
                 any = true;
