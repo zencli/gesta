@@ -1,8 +1,12 @@
 //! The keys commands.
 
 use super::*;
+use crate::support::error::{code_of, Code};
 
 /// Create a signing key and print the public half.
+///
+/// `not_a_repo` below asks whether a failure means "there is no repository here", which is the only
+/// failure this command tolerates.
 pub fn cmd_key_generate(path: Option<&str>) -> ZResult<()> {
     let path = match path {
         Some(p) => std::path::PathBuf::from(p),
@@ -12,19 +16,40 @@ pub fn cmd_key_generate(path: Option<&str>) -> ZResult<()> {
     // Recorded here as well as on rotation: a repository that never rotates still has to be able to
     // answer "which keys were ours", and a record that starts at the first rotation answers for half
     // the history.
-    if let Ok((root, _)) = open_repo() {
-        crate::transport::keyring::record_active(
-            &root,
-            &key.public_hex(),
-            &key.path,
-            crate::now(),
-        )?;
+    //
+    // Absent from a repository is the one case that is not an error: `key generate` is useful before
+    // `gesta init`. Every other failure has to be reported, because silently skipping the record is
+    // how a key comes to exist and never appear in `key list` - a no-op that looks like success.
+    match open_repo() {
+        Ok((root, _)) => {
+            crate::transport::keyring::record_active(
+                &root,
+                &key.public_hex(),
+                &key.path,
+                crate::now(),
+            )?;
+        }
+        Err(e) if not_a_repo(e.as_ref()) => {
+            // Said out loud rather than left to be discovered: the key works, but nothing lists it,
+            // and the difference matters the moment someone asks which keys are theirs.
+            eprintln!(
+                "note: no repository here, so this key was not recorded in a keyring. \
+                 `gesta key list` will not show it until you run `gesta init` and record it there."
+            );
+        }
+        Err(e) => return Err(e),
     }
     println!("created a signing key: {}", key.path.display());
     println!("public key: {}", key.public_hex());
     println!();
     println!("Give that public key to anyone who should verify your changesets.");
     Ok(())
+}
+
+/// Whether the failure means "there is no repository here", which is the one case this command
+/// tolerates: `key generate` is useful before `gesta init`. Every other failure has to surface.
+fn not_a_repo(e: &(dyn std::error::Error + 'static)) -> bool {
+    matches!(code_of(e), Code::NotARepo)
 }
 
 /// Replace the active signing key, archiving the one in use.
