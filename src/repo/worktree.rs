@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::store;
 use crate::{bad, ZResult};
@@ -72,7 +72,9 @@ fn registered_branch(conn: &Connection, path: &Path) -> ZResult<Option<String>> 
             rusqlite::params![path.to_string_lossy()],
             |r| r.get(0),
         )
-        .ok())
+        // `.optional()?`: an unregistered path and a database that cannot answer are different
+        // answers, and only the first one means "this is not a worktree".
+        .optional()?)
 }
 
 /// Every registered working tree, with the main one first.
@@ -262,13 +264,18 @@ pub fn remove(conn: &Connection, path: &Path, force: bool) -> ZResult<()> {
 /// delete only the files the last commit touched and leave the rest of the checkout behind. The whole
 /// tree comes from `tree_at`, which walks the branch head.
 fn tracked_paths(conn: &Connection, _path: &Path, branch: &str) -> ZResult<Vec<String>> {
+    // `head` is nullable: a branch with no commit yet legitimately has NULL here, which is a
+    // different answer from "no branch row" and from "the database could not answer". Read the column
+    // as `Option<String>` so the first two stay distinguishable, and let `optional` keep the third.
     let head: Option<String> = conn
         .query_row(
             "SELECT head FROM branches WHERE name = ?1",
             rusqlite::params![branch],
-            |r| r.get(0),
+            |r| r.get::<_, Option<String>>(0),
         )
-        .ok()
+        // Same rule as `registered_branch`: a missing branch removes nothing, but a database that
+        // cannot answer must not be read as "this branch has no files".
+        .optional()?
         .flatten();
     let Some(head) = head else {
         return Ok(Vec::new());
@@ -295,6 +302,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(crate::ZF_DIR)).unwrap();
         (conn, root)
+    }
+
+    #[test]
+    fn a_database_error_is_not_read_as_an_unregistered_worktree() {
+        // `registered_branch(conn, path).ok()` turned every failure into `None`, and `None` is the
+        // answer for "this path is not a worktree". A row the reader cannot type, or a locked
+        // database, would make a registered tree look unregistered.
+        let (conn, root) = fixture();
+        // The table shape `registered_branch` asks for, but `branch` holds an integer, so reading it
+        // as `String` fails for a reason that is not "no row".
+        conn.execute(
+            "CREATE TABLE worktrees (path TEXT PRIMARY KEY, branch INTEGER NOT NULL, created_at INTEGER NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO worktrees (path, branch, created_at) VALUES (?1, 1, 0)",
+            rusqlite::params![root.to_string_lossy()],
+        )
+        .unwrap();
+
+        let err = match registered_branch(&conn, &root) {
+            Ok(v) => panic!("an unreadable row must not read as {:?}", v),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err}").to_lowercase().contains("invalid"),
+            "the type error must surface, got: {err}"
+        );
     }
 
     #[test]

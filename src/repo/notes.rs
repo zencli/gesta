@@ -8,7 +8,7 @@
 //! One note per changeset, replaced rather than appended: a list would need ordering and merging that
 //! nobody asked for, and the second note is almost always a correction of the first.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::{bad, now, ZResult};
 
@@ -59,7 +59,10 @@ pub fn show(conn: &Connection, changeset: &str) -> ZResult<Option<(String, Strin
             rusqlite::params![changeset],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )
-        .ok();
+        // `optional`, not `.ok()`: only "no row" means no note. A locked or corrupt database also
+        // makes `query_row` fail, and reporting that as "no note" would tell the author their note
+        // is gone when the database simply could not answer.
+        .optional()?;
     Ok(row)
 }
 
@@ -85,6 +88,28 @@ mod tests {
         assert!(format!("{err}").contains("no changeset"), "got: {err}");
         // Nothing was stored, so a later `show` finds nothing rather than a row nothing can read.
         assert!(show(&conn, "cs000000000000").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_database_error_is_reported_not_read_as_no_note() {
+        // `.ok()` mapped every failure to `None`, so a locked or corrupt database told the author
+        // their note was gone. Only "no row" means no note; anything else has to surface.
+        let conn = crate::store::tests::mem_db();
+        commit_files(&conn, "c1", "one", &[("f", "1\n")]);
+        add(&conn, "c1", "keep me", "alice").unwrap();
+        // A `notes` table without `author` makes the read fail for a reason that is not "no row".
+        conn.execute("DROP TABLE notes", []).unwrap();
+        conn.execute(
+            "CREATE TABLE notes (changeset_id TEXT PRIMARY KEY, body TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+
+        let err = show(&conn, "c1").unwrap_err();
+        assert!(
+            format!("{err}").to_lowercase().contains("author"),
+            "the database error must surface, got: {err}"
+        );
     }
 
     #[test]

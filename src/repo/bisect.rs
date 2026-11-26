@@ -22,7 +22,7 @@
 use std::path::Path;
 
 use rusqlite::params;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::repo;
 use crate::{bad, now, ZResult};
@@ -140,7 +140,9 @@ pub fn load(conn: &Connection) -> ZResult<Option<Session>> {
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
-        .ok();
+        // `.optional()?`, not `.ok()`: `start` replaces the session row, so reading a locked
+        // database as "no bisect" would overwrite a live bisect with a new one.
+        .optional()?;
     Ok(row.map(|(good, bad, cands, current, steps)| Session {
         good,
         bad,
@@ -407,6 +409,34 @@ pub fn finish(conn: &Connection, root: &Path) -> ZResult<usize> {
 mod tests {
     use super::*;
     use crate::repo::tests::commit_files;
+
+    #[test]
+    fn a_database_error_is_not_read_as_no_bisect() {
+        // `load(...).ok()` mapped every failure to `None`, and `start` reads `None` as "nothing is
+        // running", replacing the session row. A locked database would therefore overwrite a live
+        // bisect instead of reporting that it could not read it.
+        let conn = crate::store::tests::mem_db();
+        commit_files(&conn, "c00", "base", &[("f", "0\n")]);
+        init_schema(&conn).unwrap();
+        conn.execute("DROP TABLE bisect", []).unwrap();
+        conn.execute(
+            "CREATE TABLE bisect (id INTEGER PRIMARY KEY CHECK (id = 1), good INTEGER NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO bisect (id, good) VALUES (1, 5)", [])
+            .unwrap();
+
+        let err = match load(&conn) {
+            Ok(_) => panic!("an unreadable good column is not an empty bisect"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err}").to_lowercase().contains("bad")
+                || format!("{err}").to_lowercase().contains("invalid"),
+            "the database error must surface, got: {err}"
+        );
+    }
 
     #[test]
     fn every_candidate_skipped_leaves_nothing_running() {
