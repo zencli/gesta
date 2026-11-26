@@ -1019,17 +1019,42 @@ pub fn put_object_against(conn: &Connection, content: &str, base: Option<&str>) 
                         whole_size
                     };
                     if packed_delta.len() + delta_margin < threshold {
-                        conn.execute(
-                            "INSERT OR IGNORE INTO objects(hash, content, size, compressed, created_at, base_hash)
-                             VALUES(?1, X'', ?2, 0, ?3, ?4)",
-                            params![h, content.len() as i64, now(), base_hash],
-                        )?;
-                        conn.execute(
-                            "INSERT OR REPLACE INTO deltas(hash, base, payload, created_at)
-                             VALUES(?1, ?2, ?3, ?4)",
-                            params![h, base_hash, packed_delta, now()],
-                        )?;
-                        return Ok(h);
+                        // The row and its delta are one write (#116). Two statements outside a
+                        // transaction leave a window where `objects` holds a hash with an empty body
+                        // and no `deltas` row to reconstruct it: every read of that hash then fails
+                        // as "corrupt", and the object it was supposed to be is unreadable forever.
+                        //
+                        // A savepoint rather than a transaction: `put_object_against` is called from
+                        // inside a commit's transaction, and `BEGIN` there is an error rather than a
+                        // nested one. The savepoint nests either way, which is the same reasoning as
+                        // `set_branch_head` (#96).
+                        conn.execute_batch("SAVEPOINT put_delta")?;
+                        let wrote = (|| -> ZResult<()> {
+                            conn.execute(
+                                "INSERT OR IGNORE INTO objects(hash, content, size, compressed, created_at, base_hash)
+                                 VALUES(?1, X'', ?2, 0, ?3, ?4)",
+                                params![h, content.len() as i64, now(), base_hash],
+                            )?;
+                            conn.execute(
+                                "INSERT OR REPLACE INTO deltas(hash, base, payload, created_at)
+                                 VALUES(?1, ?2, ?3, ?4)",
+                                params![h, base_hash, packed_delta, now()],
+                            )?;
+                            Ok(())
+                        })();
+                        match wrote {
+                            Ok(()) => {
+                                conn.execute_batch("RELEASE put_delta")?;
+                                return Ok(h);
+                            }
+                            Err(e) => {
+                                // Neither row stays, so the hash is simply absent and the caller's
+                                // retry is a clean write rather than a read of half an object.
+                                let _ = conn.execute_batch("ROLLBACK TO put_delta");
+                                let _ = conn.execute_batch("RELEASE put_delta");
+                                return Err(e);
+                            }
+                        }
                     }
                 }
             }
@@ -2835,6 +2860,54 @@ pub(crate) mod tests {
     /// literal path. Adding a module here means adding a line, and forgetting to means the new file is
     /// the one that gets the cycle - which is why the test also checks the count against the declarations
     /// in mod.rs.
+
+    #[test]
+    fn a_delta_that_cannot_be_recorded_leaves_no_half_written_object() {
+        // #116: the `objects` row and its `deltas` row were two statements outside a transaction. A
+        // failure between them left the hash present with an empty body and no delta to rebuild it,
+        // so every later read of that hash failed as corrupt and the content was unreachable.
+        //
+        // The trigger refuses the `deltas` insert, which is exactly that failure point.
+        let conn = crate::store::tests::mem_db();
+        // A body long enough that a compressed whole object is far bigger than a one-line delta, so
+        // the delta path is chosen and the margin is met.
+        let base: String = (0..400)
+            .map(|i| format!("line {i} of the base\n"))
+            .collect();
+        put_object(&conn, &base).unwrap();
+
+        conn.execute_batch(
+            "CREATE TRIGGER fail_delta BEFORE INSERT ON deltas
+             BEGIN SELECT RAISE(ABORT, 'forced delta failure'); END",
+        )
+        .unwrap();
+
+        // Close enough to the base that the delta path is taken and the margin is met.
+        let edited = base.replace("line 200 of the base", "line 200 was CHANGED");
+        let err = put_object_against(&conn, &edited, Some(&hash_content(&base)))
+            .expect_err("the trigger must fail the write");
+        assert!(
+            format!("{err}").contains("forced delta failure"),
+            "the trigger's own error must surface, got: {err}"
+        );
+
+        // The hash is either absent, or present and readable. What it must not be is present with
+        // nothing behind it, which is the state the bug created.
+        let h = hash_content(&edited);
+        let row: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM objects WHERE hash = ?1",
+                rusqlite::params![h],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        if row.is_some() {
+            let body = get_object_bytes(&conn, &h)
+                .expect("a recorded hash must be readable, not a bodyless row");
+            assert_eq!(String::from_utf8_lossy(&body), edited);
+        }
+    }
 
     #[test]
     fn hash_file_matches_hash_bytes_on_the_same_content() {
