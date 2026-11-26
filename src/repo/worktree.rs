@@ -169,17 +169,76 @@ pub fn add(conn: &Connection, root: &Path, path: &Path, branch: &str) -> ZResult
     // leaves the tree knowing what it was meant to be.
     set_branch(path, branch)?;
 
-    // The same content the branch holds in the main tree, so the worktree starts usable.
-    let (written, removed) = crate::repo::restore_worktree(conn, path, branch)?;
-    // A new working tree is a checkout too, so the same hook runs. `tail -f`-style rebuilds are the
-    // reason this point exists, and a tree that appears without them starts in a state nobody set up.
-    crate::repo::hooks::run(path, "post-checkout", &["worktree", branch])?;
+    // Registered before the steps that can fail, not after them. `add` used to register last, so a
+    // failing checkout or hook left a directory with a marker and a branch file but no registry row:
+    // `remove` then answered "no worktree at ..." and `add` said the path already existed, leaving
+    // the caller to `rm -rf` a directory this function had created. Registering first means the
+    // failure path can always take the tree back, and it does.
     register(conn, path, branch)?;
+    let built = (|| -> ZResult<(usize, usize)> {
+        // The same content the branch holds in the main tree, so the worktree starts usable.
+        let (written, removed) = crate::repo::restore_worktree(conn, path, branch)?;
+        // A new working tree is a checkout too, so the same hook runs. `tail -f`-style rebuilds are
+        // the reason this point exists, and a tree that appears without them starts in a state
+        // nobody set up.
+        crate::repo::hooks::run(path, "post-checkout", &["worktree", branch])?;
+        Ok((written, removed))
+    })();
+    let (written, removed) = match built {
+        Ok(counts) => counts,
+        Err(e) => {
+            // The registry row and the directory both go: the tree was never usable, so leaving
+            // either behind is what made the next command name the wrong problem.
+            let _ = unregister(conn, path);
+            discard_failed_tree(conn, path, branch);
+            return Err(e);
+        }
+    };
     println!(
         "worktree at {} on branch {branch}: {written} file(s) written, {removed} removed",
         path.display()
     );
     Ok(())
+}
+
+/// Take back a directory `add` created and then failed to fill.
+///
+/// The paths removed are the branch's own tree, because that is exactly what `restore_worktree`
+/// writes and nothing else has had a chance to touch the directory. A file the store never named is
+/// not removed, and a directory still holding one is left in place: deleting something this function
+/// did not write is worse than leaving a directory behind.
+fn discard_failed_tree(conn: &Connection, path: &Path, branch: &str) {
+    // Best effort throughout: the caller is already returning an error about why the add failed,
+    // and a cleanup failure must not replace that message with a lesser one.
+    if let Ok(Some(head)) = crate::store::branch_head(conn, branch) {
+        if let Ok(tree) = crate::store::tree_at(conn, &head) {
+            for (rel, _hash) in tree {
+                let target = path.join(&rel);
+                if target.is_file() || target.is_symlink() {
+                    let _ = std::fs::remove_file(&target);
+                    // Prune the directories the file needed, so the tree directory can go too.
+                    let mut parent = target.parent().map(|p| p.to_path_buf());
+                    while let Some(dir) = parent {
+                        if dir == path || dir.as_os_str().is_empty() {
+                            break;
+                        }
+                        if std::fs::remove_dir(&dir).is_err() {
+                            break;
+                        }
+                        parent = dir.parent().map(|p| p.to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+    let marker = path.join(crate::ZF_DIR);
+    if marker.is_file() {
+        let _ = std::fs::remove_file(&marker);
+    }
+    let _ = std::fs::remove_file(path.join(ZF_BRANCH));
+    // `remove_dir` and not `remove_dir_all`: it refuses a non-empty directory, which is exactly the
+    // case where something else is in there and must survive.
+    let _ = std::fs::remove_dir(path);
 }
 
 /// Remove a working tree. Its store, and every object in it, stays where it is.
@@ -345,6 +404,91 @@ mod tests {
             !target.exists(),
             "a refused add must not leave a directory behind"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failed_add_leaves_nothing_that_the_next_commands_refuse() {
+        // `add` registered last, so a failing checkout left a directory holding a marker and a branch
+        // file but no registry row: `remove` answered "no worktree at ..." and a second `add` said the
+        // path already existed, so the caller had to `rm -rf` a directory this function created.
+        //
+        // The failure is a store that cannot produce one object, which makes `restore_worktree` fail
+        // partway through - after the good file has already been written. That is the interesting
+        // case: a failure before anything was written would leave nothing to clean up.
+        let (conn, root) = fixture();
+        conn.execute(
+            "INSERT OR IGNORE INTO branches (name, head, created_at) VALUES ('wtb', NULL, 1)",
+            [],
+        )
+        .unwrap();
+        let lots = crate::store::put_object(&conn, "first\n").unwrap();
+        let broken = crate::store::put_object(&conn, "second\n").unwrap();
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
+             VALUES('wtc','two files','a',1,'committed',NULL,'wtb')",
+            [],
+        )
+        .unwrap();
+        for (path, hash) in [("a.txt", &lots), ("z.txt", &broken)] {
+            conn.execute(
+                "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+                 VALUES('wtc',?1,NULL,?2)",
+                rusqlite::params![path, hash],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO file_versions(path,version,hash,changeset_id,created_at)
+                 VALUES(?1,1,?2,'wtc',1)",
+                rusqlite::params![path, hash],
+            )
+            .unwrap();
+        }
+        conn.execute("UPDATE branches SET head = 'wtc' WHERE name = 'wtb'", [])
+            .unwrap();
+        // The body of `z.txt` is gone, so the checkout dies on it after writing `a.txt`.
+        conn.execute(
+            "DELETE FROM objects WHERE hash = ?1",
+            rusqlite::params![broken],
+        )
+        .unwrap();
+
+        let target = root.join("wt-failed");
+        let err =
+            add(&conn, &root, &target, "wtb").expect_err("a missing object must fail the add");
+        assert!(
+            format!("{err}").to_lowercase().contains("corrupt")
+                || format!("{err}").to_lowercase().contains("not found"),
+            "the store error must surface, got: {err}"
+        );
+
+        // Nothing stale is left: not the file the checkout wrote, not the directory, not a row.
+        assert!(
+            !target.exists(),
+            "a failed add must not leave the directory behind (it holds {} entries)",
+            std::fs::read_dir(&target).map(|d| d.count()).unwrap_or(0)
+        );
+        assert!(
+            registered_branch(&conn, &target).unwrap().is_none(),
+            "a failed add must not leave a registry row behind"
+        );
+
+        // The same path is usable once the problem is fixed, which is what the caller could not do.
+        crate::store::put_object(&conn, "second\n").unwrap();
+        conn.execute(
+            "UPDATE file_versions SET hash = ?1 WHERE path = 'z.txt'",
+            rusqlite::params![crate::store::hash_content("second\n")],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE changeset_files SET new_hash = ?1 WHERE path = 'z.txt'",
+            rusqlite::params![crate::store::hash_content("second\n")],
+        )
+        .unwrap();
+        add(&conn, &root, &target, "wtb").expect("the same path must be usable after a failed add");
+        assert!(target.join("a.txt").is_file(), "the retry wrote the tree");
+        remove(&conn, &target, true).unwrap();
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
