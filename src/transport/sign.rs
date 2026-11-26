@@ -36,17 +36,33 @@ pub fn default_key_path() -> PathBuf {
 
 /// The exact bytes a signature covers.
 ///
-/// Every field that identifies the change is here, and the separator makes a field that shifts
-/// from one position to another produce a different payload rather than the same one.
+/// Every field is length-prefixed, and the reason is a forgery that the separator alone does not
+/// stop (#162). The earlier payload was `...\nauthor:<author>\nmessage:<message>`, so an author of
+/// `x\nmessage: <forged>` produced the same bytes as the pair `("x", "<forged>")`. A signature made
+/// over one (author, message) verified for the other, which is the one thing a signed payload
+/// exists to prevent. Rejecting `\n` in an author would close that particular spelling, but the
+/// message is free-form by design and could shift the same way, so the encoding has to be
+/// unambiguous on its own rather than rely on every future caller validating every field.
+///
+/// A length prefix is unambiguous for any bytes whatsoever: `author:5:alice` can only be read one
+/// way, whatever the field holds.
 pub fn signed_payload(id: &str, message: &str, author: &str, parent: Option<&str>) -> Vec<u8> {
-    format!(
-        "gesta-changeset-v1\nid:{}\nparent:{}\nauthor:{}\nmessage:{}",
-        id,
-        parent.unwrap_or("-"),
-        author,
-        message
-    )
-    .into_bytes()
+    let mut out = Vec::new();
+    out.extend_from_slice(b"gesta-changeset-v2\n");
+    for (name, value) in [
+        ("id", id),
+        ("parent", parent.unwrap_or("-")),
+        ("author", author),
+        ("message", message),
+    ] {
+        out.extend_from_slice(name.as_bytes());
+        out.push(b':');
+        out.extend_from_slice(value.len().to_string().as_bytes());
+        out.push(b':');
+        out.extend_from_slice(value.as_bytes());
+        out.push(b'\n');
+    }
+    out
 }
 
 /// A key pair on disk: the private seed, hex encoded, three lines of context.
@@ -127,6 +143,33 @@ impl SigningKey {
     }
 }
 
+/// A payload in the pre-#162 encoding, for signatures made before this change.
+///
+/// This format is only unambiguous under one condition, and `legacy_payload` is the only caller:
+/// `id`, `parent` and `author` must contain no newline. With that held, the text up to
+/// `message:` is fixed by those three fields alone and everything after it is the message, so two
+/// different tuples cannot produce the same bytes. The forgery #162 describes needs a newline in
+/// the author to work, which means it cannot be spelled in an accepted legacy payload - so falling
+/// back to v1 does not reopen the hole that dropping v1 was meant to close.
+///
+/// The fallback exists because signatures are stored without a version, and refusing every
+/// signature made before the fix would leave repositories unable to verify their own history.
+fn legacy_payload(id: &str, message: &str, author: &str, parent: Option<&str>) -> Option<Vec<u8>> {
+    let parent = parent.unwrap_or("-");
+    for field in [id, parent, author] {
+        if field.contains('\n') {
+            return None;
+        }
+    }
+    Some(
+        format!(
+            "gesta-changeset-v1\nid:{}\nparent:{}\nauthor:{}\nmessage:{}",
+            id, parent, author, message
+        )
+        .into_bytes(),
+    )
+}
+
 /// Check a signature against a public key.
 pub fn verify(
     public_hex: &str,
@@ -140,15 +183,25 @@ pub fn verify(
         hex::decode(public_hex.trim()).map_err(|_| bad("the public key is not valid hex"))?;
     let signature =
         hex::decode(signature_hex.trim()).map_err(|_| bad("the signature is not valid hex"))?;
-    let payload = signed_payload(id, message, author, parent);
-    UnparsedPublicKey::new(&ring::signature::ED25519, &public)
-        .verify(&payload, &signature)
-        .map_err(|_| {
-            bad(format!(
-                "signature does not match changeset {} as recorded: the message, the author or the parent was changed after signing",
-                id
-            ))
-        })
+    let key = UnparsedPublicKey::new(&ring::signature::ED25519, &public);
+    if key
+        .verify(&signed_payload(id, message, author, parent), &signature)
+        .is_ok()
+    {
+        return Ok(());
+    }
+    // A signature made before #162 covers the old encoding. Accepting it here keeps that history
+    // verifiable, and the newline guard inside `legacy_payload` keeps the fallback from accepting
+    // the one pair that made the old encoding ambiguous.
+    if let Some(old) = legacy_payload(id, message, author, parent) {
+        if key.verify(&old, &signature).is_ok() {
+            return Ok(());
+        }
+    }
+    Err(bad(format!(
+        "signature does not match changeset {} as recorded: the message, the author or the parent was changed after signing",
+        id
+    )))
 }
 
 #[cfg(test)]
@@ -263,6 +316,66 @@ mod tests {
         let a = signed_payload("cs1", "x\nauthor:bob", "alice", None);
         let b = signed_payload("cs1", "x", "bob", None);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn an_author_carrying_a_field_separator_cannot_forge_another_pair() {
+        // #162: with the old `author:{}\nmessage:{}` encoding these two produced identical bytes,
+        // so a signature over the first verified for the second.
+        //
+        // The pair is the whole point, and a first attempt at this test used the wrong one: it put
+        // the separator in the author with an empty message, which does NOT collide, because the
+        // forged text has to land where the real message begins. The colliding pair moves the
+        // separator to the end of the message instead - `message:` is the last field, so text
+        // appended to it, plus the `\nmessage:` that the author brings, reconstructs the other
+        // spelling exactly.
+        let legit_author = "x";
+        let legit_message = " transfer everything\nmessage:";
+        let claimed_author = "x\nmessage: transfer everything";
+        let claimed_message = "";
+
+        let legit = signed_payload("cs1", legit_message, legit_author, None);
+        let claimed = signed_payload("cs1", claimed_message, claimed_author, None);
+        assert_ne!(
+            legit, claimed,
+            "an author containing a separator must not encode like a different (author, message) pair"
+        );
+
+        // The same shape with the two fields the other way round, so the test is about the encoding
+        // and not about which field happens to be last.
+        let a2 = signed_payload("cs1", "alice\nmessage:evil", "", None);
+        let b2 = signed_payload("cs1", "", "alice\nmessage:evil", None);
+        assert_ne!(a2, b2);
+    }
+
+    #[test]
+    fn a_signature_made_before_the_fix_still_verifies() {
+        // History signed under the v1 encoding has to keep verifying, or every old signature in
+        // every repository becomes unusable the moment this fix lands.
+        let dir = temp_key("legacy");
+        let key = SigningKey::generate(&dir).unwrap();
+        let old = legacy_payload("cs1", "fix the bug", "alice", Some("cs0")).unwrap();
+        let sig = hex::encode(key.pair.sign(&old).as_ref());
+        verify(
+            &key.public_hex(),
+            "cs1",
+            "fix the bug",
+            "alice",
+            Some("cs0"),
+            &sig,
+        )
+        .expect("a v1 signature must still verify");
+    }
+
+    #[test]
+    fn the_legacy_fallback_refuses_the_ambiguous_pair() {
+        // The fallback must not hand back the very collision #162 is about. An author with a
+        // newline is not a shape a legacy signature can be checked against, so `legacy_payload`
+        // declines it instead of guessing which reading was meant.
+        assert!(legacy_payload("cs1", "", "x\nmessage: evil", None).is_none());
+        assert!(legacy_payload("cs1", "m", "alice", Some("c\ns0")).is_none());
+        assert!(legacy_payload("c\ns1", "m", "alice", None).is_none());
+        assert!(legacy_payload("cs1", "m", "alice", None).is_some());
     }
     #[test]
     fn a_generated_key_is_created_unreadable_not_made_so_afterwards() {
