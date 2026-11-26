@@ -2379,11 +2379,22 @@ pub fn review_stack(conn: &Connection, from: Option<&str>, to: &str) -> ZResult<
     };
     let mut chain: Vec<String> = Vec::new();
     let mut cur = Some(head.clone());
+    // Guarded at the same bound and with the same message as `rebase::to_replay` and
+    // `bisect::range`. A corrupt or crafted store can hold a parent cycle, and an unguarded walk
+    // then loops forever growing `chain`, so `review` hangs instead of saying what is wrong. One
+    // wording across the three walks means a reader who has seen it once knows what it is.
+    let mut guard = 0usize;
     while let Some(id) = cur {
         if Some(&id) == stop.as_ref() {
             break;
         }
         chain.push(id.clone());
+        guard += 1;
+        if guard > 100_000 {
+            return Err(bad(
+                "history walk did not end: the parent chain contains a cycle".to_string(),
+            ));
+        }
         let (p1, _p2) = crate::store::parents_of_public(conn, &id)?;
         cur = p1;
     }
@@ -2600,6 +2611,36 @@ fn a_scoped_snapshot_leaves_another_writer_files_alone() {
 pub(crate) mod tests {
     use super::*;
     use crate::store::tests::mem_db;
+
+    #[test]
+    fn a_parent_cycle_in_the_store_is_reported_rather_than_walked_forever() {
+        // `review_stack` walked the first-parent chain with no bound, so a store holding a cycle
+        // made `review` hang and grow `chain` without limit. `rebase::to_replay` and
+        // `bisect::range` have been guarded at 100_000 with one message; this is the third walk.
+        let conn = mem_db();
+        // Two changesets that are each other's parent: a cycle nothing about a real history allows,
+        // which is exactly why the walk has to survive it.
+        for (id, parent) in [("a", "b"), ("b", "a")] {
+            conn.execute(
+                "INSERT INTO changesets(id, message, author, created_at, status, parent, branch)
+                 VALUES (?1, 'm', 't', 1, 'committed', ?2, 'main')",
+                params![id, parent],
+            )
+            .unwrap();
+        }
+        // `mem_db` already holds a `main` branch; point it at the cycle rather than adding one.
+        conn.execute("UPDATE branches SET head = 'a' WHERE name = 'main'", [])
+            .unwrap();
+
+        let err = match review_stack(&conn, None, "main") {
+            Ok(steps) => panic!("a cycle must be reported, got {} steps", steps.len()),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("contains a cycle"),
+            "the message must name the cycle, got: {err}"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
