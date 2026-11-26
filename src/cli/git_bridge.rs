@@ -10,7 +10,7 @@
 use crate::store::gitobj::{self, Entry, Kind, Repo};
 use crate::ZResult;
 use crate::{bad, store};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
@@ -69,6 +69,26 @@ pub fn import(conn: &Connection, git_root: &Path, prefix: Option<&str>) -> ZResu
     // A commit id from git is not a changeset id here, so the mapping is kept as it goes.
     let mut mapped: HashMap<String, String> = HashMap::new();
 
+    // Which branch a commit belongs to. Git commits don't carry branch identity;
+    // a commit is reachable from many branches. We assign each changeset the first
+    // branch (in BTreeMap order, so 'main' first) that reaches it by walking from
+    // each branch head back through parents.
+    let mut branch_of: HashMap<String, String> = HashMap::new();
+    for (branch, head) in &branches {
+        let mut stack = vec![head.clone()];
+        while let Some(hash) = stack.pop() {
+            if branch_of.contains_key(&hash) {
+                continue;
+            }
+            branch_of.insert(hash.clone(), branch.clone());
+            if let Ok(commit) = gitobj::parse_commit(&repo.read_object(&hash)?.body) {
+                for p in &commit.parents {
+                    stack.push(p.clone());
+                }
+            }
+        }
+    }
+
     for hash in &order {
         let obj = repo.read_object(hash)?;
         if obj.kind != Kind::Commit {
@@ -87,7 +107,7 @@ pub fn import(conn: &Connection, git_root: &Path, prefix: Option<&str>) -> ZResu
                 rusqlite::params![hash],
                 |r| r.get(0),
             )
-            .ok();
+            .optional()?;
         if let Some(id) = already {
             mapped.insert(hash.clone(), id);
             out.skipped += 1;
@@ -157,7 +177,7 @@ pub fn import(conn: &Connection, git_root: &Path, prefix: Option<&str>) -> ZResu
                 commit.author_time,
                 parent_id,
                 second_parent,
-                "main",
+                branch_of.get(hash).cloned().unwrap_or_default(),
                 hash,
                 // git hashes the author line including its offset, so a round trip that writes
                 // +0000 where the original said +0700 produces a different commit name for

@@ -1399,6 +1399,31 @@ pub fn cmd_ignore_remove(pattern: &str) -> ZResult<()> {
 /// current one, which is how a fetched history becomes part of local work
 /// without pretending the remote head is already the local head.
 fn set_tracking_branch(conn: &rusqlite::Connection, name: &str, head: &str) -> ZResult<()> {
+    // The tracking namespace `<remote>/<branch>` is not reserved. A user may have their own branch
+    // called `origin/main`, and the upsert here moved its head to the remote's without a word - a
+    // pull silently rewriting a branch the user owns.
+    //
+    // Rows this function creates are marked `from_branch = 'remote'`, so an existing row with any
+    // other marker is a user branch and is left alone. Refusing is the honest answer: the pull
+    // cannot both keep the user's branch and track the remote under the same name.
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT from_branch FROM branches WHERE name = ?1",
+            rusqlite::params![name],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(origin) = existing {
+        if origin != "remote" {
+            return Err(bad(format!(
+                "refusing to update {}: a local branch of that name already exists (it came from {}), \
+                 and a pull would repoint it. Rename it first, or pull into a branch with another name",
+                name,
+                if origin.is_empty() { "elsewhere" } else { &origin }
+            )));
+        }
+    }
     conn.execute(
         "INSERT INTO branches(name, head, created_at, from_branch) VALUES(?1, ?2, ?3, 'remote')
          ON CONFLICT(name) DO UPDATE SET head = excluded.head",
