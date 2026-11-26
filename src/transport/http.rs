@@ -28,6 +28,32 @@ use crate::{bad, ZResult};
 /// Refuse bodies larger than this rather than reading until memory runs out.
 const MAX_BODY: usize = 512 * 1024 * 1024;
 
+/// The most a whole response may occupy, headers included. The body cap plus room for a head that
+/// names the body, so a server cannot exhaust the client with a head alone.
+const MAX_RESPONSE: usize = MAX_BODY + 64 * 1024;
+
+/// Read to the end, but never past `limit`, and refuse a response that goes over it.
+///
+/// `read_to_end` grows until the peer stops, which lets a server that never ends its body exhaust
+/// the client's memory (#154). Reading one chunk past the limit is deliberate: it is how "bigger
+/// than the cap" is told apart from "exactly the cap".
+fn read_capped(stream: &mut dyn Read, raw: &mut Vec<u8>, limit: usize) -> std::io::Result<()> {
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(());
+        }
+        raw.extend_from_slice(&chunk[..n]);
+        if raw.len() > limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("the response exceeds the limit of {} bytes", limit),
+            ));
+        }
+    }
+}
+
 /// A parsed request line plus headers and body.
 pub struct Request {
     pub method: String,
@@ -350,7 +376,7 @@ pub fn request_with_pin(
                 stream.write_all(b)?;
             }
             stream.flush()?;
-            if let Err(e) = stream.read_to_end(&mut raw) {
+            if let Err(e) = read_capped(&mut stream, &mut raw, MAX_RESPONSE) {
                 // A server that closes without close_notify leaves a complete
                 // response that rustls refuses to hand over quietly. If bytes
                 // arrived and the document is whole, say so instead of failing.
@@ -370,7 +396,7 @@ pub fn request_with_pin(
             stream.write_all(b)?;
         }
         stream.flush()?;
-        stream.read_to_end(&mut raw)?;
+        read_capped(&mut stream, &mut raw, MAX_RESPONSE)?;
     }
 
     let split =
@@ -383,20 +409,8 @@ pub fn request_with_pin(
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or_else(|| bad("response has no status code"))?;
 
-    let declared = head_text.split("\r\n").find_map(|l| {
-        let (k, v) = l.split_once(':')?;
-        if k.eq_ignore_ascii_case("content-length") {
-            v.trim().parse::<usize>().ok()
-        } else {
-            None
-        }
-    });
-
     let payload = raw[split + 4..].to_vec();
-    let payload = match declared {
-        Some(n) if n <= payload.len() => payload[..n].to_vec(),
-        _ => payload,
-    };
+    let payload = complete_body(head_text, payload)?;
     Ok((status, payload))
 }
 
@@ -2142,7 +2156,7 @@ pub fn request_with_headers(
                 stream.write_all(b)?;
             }
             stream.flush()?;
-            if let Err(e) = stream.read_to_end(&mut raw) {
+            if let Err(e) = read_capped(&mut stream, &mut raw, MAX_RESPONSE) {
                 let complete = find_subslice(&raw, b"\r\n\r\n").is_some();
                 if !(complete && is_eof_error(&e)) {
                     return Err(bad(format!("reading the response failed: {}", e)));
@@ -2159,8 +2173,7 @@ pub fn request_with_headers(
             stream.write_all(b)?;
         }
         stream.flush()?;
-        stream
-            .read_to_end(&mut raw)
+        read_capped(&mut stream, &mut raw, MAX_RESPONSE)
             .map_err(|e| bad(format!("reading the response failed: {}", e)))?;
     }
     let (status, body) = parse_response(&raw)?;
@@ -2322,12 +2335,117 @@ fn parse_response(raw: &[u8]) -> ZResult<(u16, Vec<u8>)> {
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|c| c.parse::<u16>().ok())
         .ok_or_else(|| bad(format!("cannot read status from {}", head)))?;
-    Ok((status, raw[split + 4..].to_vec()))
+    // The same completeness gate as `request_with_pin`. Two client paths with two different notions
+    // of a complete response is how one of them ends up trusting a truncated body (#154).
+    let body = complete_body(&head, raw[split + 4..].to_vec())?;
+    Ok((status, body))
+}
+
+/// The `Content-Length` a response head declares, if it declares one.
+fn declared_length(head_text: &str) -> Option<usize> {
+    head_text.split("\r\n").find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        if k.eq_ignore_ascii_case("content-length") {
+            v.trim().parse::<usize>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+/// Take a response body that respects both the cap and the length the server claimed.
+///
+/// The cap is checked against the declared length *before* the bytes are read, so a server that
+/// claims a terabyte is refused without the client having to absorb it. A body that arrives shorter
+/// than its declared length is an error too: a truncated pack handed to a decoder as if whole is the
+/// failure this exists to prevent, and the bytes alone cannot show the difference between a short
+/// body and a complete small one (#154).
+fn complete_body(head_text: &str, payload: Vec<u8>) -> ZResult<Vec<u8>> {
+    let Some(want) = declared_length(head_text) else {
+        // No claim, nothing to verify against. A `Connection: close` response without a length is
+        // the end of the stream by definition.
+        return Ok(payload);
+    };
+    if want > MAX_BODY {
+        return Err(bad(format!(
+            "body of {} bytes exceeds the limit of {}",
+            want, MAX_BODY
+        )));
+    }
+    if payload.len() < want {
+        return Err(bad(format!(
+            "the response declared {} bytes but only {} arrived",
+            want,
+            payload.len()
+        )));
+    }
+    Ok(payload[..want].to_vec())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server that answers one request with the given head and body, then closes.
+    fn one_shot_reply(head: &'static str, body: &'static [u8]) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(head.as_bytes());
+            let _ = s.write_all(body);
+            let _ = s.flush();
+        });
+        format!("http://127.0.0.1:{}/x", port)
+    }
+
+    #[test]
+    fn a_response_shorter_than_its_declared_length_is_refused() {
+        // #154: `request_with_pin` read `Content-Length` into `declared` and then only used it to
+        // truncate. A body shorter than the declared length came back as a success, so a truncated
+        // pack was handed to the decoder as if it were whole. A short body is a broken transfer, not
+        // a smaller one, and the caller cannot tell the difference from the bytes alone.
+        let url = one_shot_reply(
+            "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n",
+            b"0123456789",
+        );
+        let err = request_with_pin("GET", &url, None, None, None)
+            .expect_err("a body shorter than its declared length must not be a success")
+            .to_string();
+        assert!(
+            err.contains("100") && err.contains("10"),
+            "the error should name the declared and the received length: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn a_complete_response_is_still_accepted() {
+        // The guard must not break the ordinary case: an exact body still comes through whole.
+        let url = one_shot_reply("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n", b"abc");
+        let (status, body) = request_with_pin("GET", &url, None, None, None).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, b"abc");
+    }
+
+    #[test]
+    fn an_unbounded_body_is_cut_off_rather_than_read_until_memory_runs_out() {
+        // #154: both client read paths used `read_to_end` with no cap, so a malicious or compromised
+        // server could exhaust the client's memory by never ending the body. The cap has to trip on
+        // the declared length, before the bytes are read, so the client does not have to survive the
+        // stream to refuse it.
+        let url = one_shot_reply("HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n", b"");
+        let err = request_with_pin("GET", &url, None, None, None)
+            .expect_err("a body over the cap must be refused")
+            .to_string();
+        assert!(
+            err.contains("exceeds"),
+            "the refusal should say the body exceeds the limit: {:?}",
+            err
+        );
+    }
 
     #[test]
     fn a_path_refusal_leaves_an_audit_line() {
