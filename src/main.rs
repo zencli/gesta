@@ -1531,11 +1531,17 @@ fn run() -> ZResult<()> {
             })?;
             cli::cmd_history(&file)
         }
-        Cmd::Show { spec, json } => {
+        Cmd::Show {
+            spec,
+            json: show_json,
+        } => {
             let spec = spec.ok_or_else(|| {
                 bad("show needs a path, or `rev:path`: `gesta show main:src/main.rs`".to_string())
             })?;
-            cli::cmd_show(&spec, json)
+            // `|| json`: the global flag means the same thing as the subcommand's own one, and it was
+            // ignored here. A script that sets `--json` before the subcommand got text from `show` and
+            // JSON from `status`, which is the kind of inconsistency a caller only finds in production.
+            cli::cmd_show(&spec, show_json || json)
         }
         Cmd::Ls { rev, path, long: _ } if json => cli::cmd_ls_json(rev.as_deref(), path.as_deref()),
         Cmd::Ls { rev, path, long } => cli::cmd_ls(rev.as_deref(), path.as_deref(), long),
@@ -1555,6 +1561,10 @@ fn run() -> ZResult<()> {
             fix,
             stash,
         } => {
+            // The global `--json` counts too, for the same reason as `show`: a caller that asked for
+            // machine-readable output should not have to know which flag position each subcommand
+            // honours.
+            let brief_json = brief_json || json;
             if fix {
                 cli::cmd_brief_fix(brief_json, stash)
             } else if brief_json {
@@ -1602,7 +1612,7 @@ fn run() -> ZResult<()> {
             let dest = dest.ok_or_else(|| {
                 bad("backup needs a destination file: `gesta backup repo.gesta`".to_string())
             })?;
-            cli::cmd_backup(&dest, json_backup)
+            cli::cmd_backup(&dest, json_backup || json)
         }
         Cmd::BackupRemote { sub } => cli::cmd_backup_remote(sub),
         Cmd::VerifyBackup { file } => {
@@ -1741,7 +1751,14 @@ fn run() -> ZResult<()> {
                 cli_remote::cmd_clone(&url, &dir, token.as_deref(), pin.as_deref(), depth)
             }
         },
-        Cmd::Secret { sub } => cli::cmd_secret(sub),
+        Cmd::Secret { sub } => match sub {
+            // A subcommand that answers JSON on request has to answer the global flag too, or
+            // `gesta --json secret scan` prints text while `gesta secret scan --json` prints JSON.
+            crate::SecretCmd::Scan { history, json_scan } => {
+                cli::cli_remote::cmd_secret_scan(history, json_scan || json)
+            }
+            other => cli::cmd_secret(other),
+        },
         Cmd::Land {
             source,
             onto,
@@ -1756,12 +1773,12 @@ fn run() -> ZResult<()> {
         Cmd::Landed {
             changeset,
             branch,
-            json,
+            json: landed_json,
         } => {
             let changeset = changeset.ok_or_else(|| {
                 bad("landed needs the changeset to look for: `gesta landed cs1234`".to_string())
             })?;
-            cli::cmd_landed(&changeset, &branch, json)
+            cli::cmd_landed(&changeset, &branch, landed_json || json)
         }
         Cmd::Review { from, to, min_risk } => {
             if json {
