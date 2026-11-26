@@ -647,7 +647,12 @@ pub fn push_to_git_remote(
 
     // `git init --bare <dir>` makes <dir> the git directory itself, so `export` has to be told
     // where the objects go rather than being pointed at a working tree that does not exist.
-    std::process::Command::new("git")
+    //
+    // The exit status is checked, which it was not: a `git init` that failed (a read-only temp dir,
+    // an unwritable path) left `export_bare` writing into a directory that was not a repository, and
+    // the failure surfaced later as a confusing error about objects rather than as the init that
+    // actually went wrong.
+    let init = std::process::Command::new("git")
         .arg("init")
         .arg("--bare")
         .arg("-q")
@@ -659,29 +664,42 @@ pub fn push_to_git_remote(
                 format!("git is needed to push to a remote: {}", e),
             ))
         })?;
+    if !init.status.success() {
+        let err = String::from_utf8_lossy(&init.stderr);
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(Box::new(crate::support::error::Error::new(
+            crate::support::error::Code::Remote,
+            format!("git init --bare failed: {}", err.trim()),
+        )));
+    }
 
-    let written = export_bare(conn, &staging, branch)?;
+    // Cleaned up on the way out however this ends. The staging directory is this process's own
+    // scratch space, and leaving it behind on a failed export was a leak nobody would notice until
+    // the temp directory filled.
+    let written = match export_bare(conn, &staging, branch) {
+        Ok(w) => w,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
 
-    let out = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(&staging)
-        .arg("push")
-        .arg(remote)
-        .arg(
-            written
-                .branches
-                .iter()
-                .map(|b| format!("refs/heads/{}:refs/heads/{}", b, b))
-                .collect::<Vec<_>>()
-                .join(" "),
-        )
-        .output()
-        .map_err(|e| {
-            Box::new(crate::support::error::Error::new(
-                crate::support::error::Code::Remote,
-                format!("cannot run git: {}", e),
-            ))
-        })?;
+    let mut push = std::process::Command::new("git");
+    push.arg("--git-dir").arg(&staging).arg("push").arg(remote);
+    // One argument per refspec. Joining them with a space made git read the whole string as a single
+    // malformed refspec: a single branch worked and two or more failed with a message about a
+    // refspec the caller never typed. Pushing several branches is the normal multi-branch workflow,
+    // so this was the common case broken and the rare one working.
+    for b in &written.branches {
+        push.arg(format!("refs/heads/{}:refs/heads/{}", b, b));
+    }
+    let out = push.output().map_err(|e| {
+        let _ = std::fs::remove_dir_all(&staging);
+        Box::new(crate::support::error::Error::new(
+            crate::support::error::Code::Remote,
+            format!("cannot run git: {}", e),
+        )) as Box<dyn std::error::Error>
+    })?;
 
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
