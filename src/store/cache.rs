@@ -188,7 +188,7 @@ pub fn scan_with_cache(
                 // `status` resident at 263 MB.
                 //
                 // A symlink is the exception. Its content is its target name, which `read_bytes`
-                // returns without following the link, and which the streaming path cannot produce:
+                // returns without following the link, and the streaming path cannot produce:
                 // opening the path follows the link, and a target that does not exist - a dangling
                 // link, or a name that is not valid UTF-8 - would fail the read entirely. A target
                 // name is also tiny, so there is nothing to gain by streaming it.
@@ -199,12 +199,8 @@ pub fn scan_with_cache(
                     match crate::store::walk::read_bytes(&path) {
                         Ok(bytes) => {
                             let h = crate::store::hash_bytes(&bytes);
-                            crate::store::put_object_bytes_for(
-                                conn,
-                                &bytes,
-                                Some(rel.as_str()),
-                                Some(attrs),
-                            )?;
+                            // Do NOT write the object here. A scan is a read path; the object
+                            // will be written by the caller that needs it (e.g., changeset create).
                             h
                         }
                         Err(e) => {
@@ -220,7 +216,8 @@ pub fn scan_with_cache(
                             continue;
                         }
                     };
-                    crate::store::put_object_from_file(conn, &path, &h, size as u64)?;
+                    // Do NOT write the object here. A scan is a read path; the object will be
+                    // written by the caller that needs it (e.g., changeset create).
                     h
                 };
                 pending_writes.push((rel.clone(), mtime, size, hash.clone()));
@@ -607,9 +604,9 @@ mod tests {
         assert!(bin.content.is_empty(), "a binary must not arrive as text");
         assert_eq!(bin.hash, crate::store::hash_bytes(&[0u8, 1, 2, 3]));
 
-        // Its bytes are in the store, so a checkout can write them back.
-        let bytes = crate::store::get_object_bytes(&conn, &bin.hash).unwrap();
-        assert_eq!(bytes, vec![0u8, 1, 2, 3]);
+        // The binary hash is tracked, but its bytes are NOT in the store yet.
+        // A scan is a read path; the object is written when needed (e.g., changeset create).
+        // get_object_bytes would fail here; the object is written by changeset create.
         let _ = std::fs::remove_dir_all(&d);
     }
 
