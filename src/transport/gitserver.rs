@@ -1208,12 +1208,13 @@ pub fn advertise_receive(root: &std::path::Path) -> ZResult<Vec<u8>> {
     }
     if lines.is_empty() {
         // A push to a repository with no branches still needs an advertisement, and git writes the
-        // capabilities on a zero-id line when there is nothing to advertise.
+        // capabilities on a zero-id line when there is nothing to advertise. `ref_advertisement`
+        // reads each entry as `(name, sha)` and writes `"{sha} {name}"`, so the fields go in that
+        // order: the name is the literal `capabilities^{}` and the sha is the zero id. Handing them
+        // over swapped put a NUL inside the sha field and made the client parse a ref called
+        // `capabilities^{}` with no capabilities at all (#172).
         let zero = "0".repeat(40);
-        lines.push((
-            zero.clone(),
-            format!("{} capabilities^{{}}\0report-status", zero),
-        ));
+        lines.push(("capabilities^{}".to_string(), zero));
     }
     // `delete-refs` is advertised because a push whose new id is all zeroes is a deletion and this
     // server now performs it. Advertising a capability the code does not honour is worse than not
@@ -1382,6 +1383,72 @@ mod tests {
             "capabilities belong to one line only"
         );
         assert!(out.ends_with(b"0000"));
+    }
+
+    #[test]
+    fn the_empty_repository_advertisement_keeps_the_sha_and_the_name_in_their_own_fields() {
+        // #172: `ref_advertisement` reads each entry as `(name, sha)` and writes `"{sha} {name}"`.
+        // The empty-repository branch pushed the tuple the other way round, so the ref name arrived
+        // as 40 zeroes and the sha field carried `capabilities^{}` *and* a NUL. git parses that as a
+        // ref named `capabilities^{}` with garbled capabilities, so the first push to a fresh
+        // repository is told about a ref that does not exist.
+        let dir = std::env::temp_dir().join(format!("gesta-adv-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&dir).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        // No branch, no changeset: `open_repo_for_serve` then has nothing to advertise, which is
+        // exactly the empty-repository path.
+        drop(conn);
+
+        let out = advertise_receive(&dir).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        let zero = "0".repeat(40);
+
+        // Through the same reader a client-equivalent uses, so the pkt-line length header is not
+        // read as part of the sha.
+        let lines = read_pkt_lines(&out);
+
+        // The service line, the empty-repo ref line, then a flush.
+        let ref_line = lines
+            .iter()
+            .find(|l| l.contains("capabilities^{}"))
+            .unwrap_or_else(|| panic!("no capabilities line in {:?}", lines));
+
+        let (rest, caps) = ref_line
+            .split_once('\0')
+            .unwrap_or_else(|| panic!("the capabilities line has no NUL: {:?}", ref_line));
+        assert_eq!(
+            caps, "report-status delete-refs",
+            "the capabilities are garbled: {:?}",
+            caps
+        );
+        assert!(
+            !caps.contains('\0'),
+            "a NUL leaked into the capabilities field: {:?}",
+            caps
+        );
+
+        let (sha, name) = rest
+            .split_once(' ')
+            .unwrap_or_else(|| panic!("the capabilities line has no space: {:?}", rest));
+        assert_eq!(sha, zero, "the sha field is not the zero id: {:?}", sha);
+        assert_eq!(
+            name, "capabilities^{}",
+            "the ref name field is not `capabilities^{{}}`: {:?}",
+            name
+        );
+
+        // One NUL for the whole advertisement: the empty-repo line carries the capabilities, and a
+        // second NUL would end the ref section early for a strict client.
+        assert_eq!(
+            out.iter().filter(|b| **b == 0).count(),
+            1,
+            "the advertisement has more than one NUL: {:?}",
+            text
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
