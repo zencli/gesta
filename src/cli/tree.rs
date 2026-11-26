@@ -619,10 +619,31 @@ pub fn cmd_status_json() -> ZResult<()> {
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
+    // stale pending check - same as text output
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM changesets", [], |r| r.get(0))?;
+    let stale = if !pending.is_empty() {
+        pending_out_of_date(&conn, &root, total)?
+    } else {
+        Vec::new()
+    };
+    let stale_json: Vec<Json> = stale
+        .into_iter()
+        .map(|(id, paths)| {
+            Json::obj(vec![
+                ("id", Json::str(id)),
+                (
+                    "paths",
+                    Json::arr(paths.into_iter().map(Json::str).collect()),
+                ),
+            ])
+        })
+        .collect();
+
     emit(Json::obj(vec![
         ("branch", Json::str(branch)),
         ("head", head.map(Json::str).unwrap_or(Json::Null)),
         ("pending_changesets", Json::arr(pending)),
+        ("stale_pending", Json::arr(stale_json)),
         (
             "added",
             Json::arr(d.added.into_iter().map(Json::str).collect()),
@@ -799,28 +820,38 @@ pub fn cmd_diff_range_json(from: Option<&str>, to: Option<&str>, name_only: bool
     let (_root, conn) = open_repo()?;
     let from = resolve_from(&conn, from, to)?;
     let diffs = crate::repo::diff_revs(&conn, from.as_deref(), to)?;
+    if diffs.is_empty() {
+        emit(Json::obj(vec![
+            ("from", from.map(Json::str).unwrap_or(Json::Null)),
+            ("to", Json::str(to.unwrap_or("an empty tree"))),
+            ("files", Json::arr(Vec::new())),
+        ]));
+        return Ok(());
+    }
     use crate::support::json::Json;
-    let arr = Json::arr(
-        diffs
-            .into_iter()
-            .map(|(path, removed, added)| {
-                if name_only {
-                    return Json::str(path);
-                }
-                Json::obj(vec![
-                    ("path", Json::str(path)),
-                    (
-                        "removed",
-                        Json::arr(removed.into_iter().map(Json::str).collect()),
-                    ),
-                    (
-                        "added",
-                        Json::arr(added.into_iter().map(Json::str).collect()),
-                    ),
-                ])
-            })
-            .collect(),
-    );
-    emit(arr);
+    let files: Vec<Json> = diffs
+        .into_iter()
+        .map(|(path, removed, added)| {
+            if name_only {
+                return Json::str(path);
+            }
+            Json::obj(vec![
+                ("path", Json::str(path)),
+                (
+                    "removed",
+                    Json::arr(removed.into_iter().map(Json::str).collect()),
+                ),
+                (
+                    "added",
+                    Json::arr(added.into_iter().map(Json::str).collect()),
+                ),
+            ])
+        })
+        .collect();
+    emit(Json::obj(vec![
+        ("from", from.map(Json::str).unwrap_or(Json::Null)),
+        ("to", Json::str(to.unwrap_or("an empty tree"))),
+        ("files", Json::arr(files)),
+    ]));
     Ok(())
 }
