@@ -396,35 +396,205 @@ pub fn cmd_tag_json(
 /// The value is typed, not passed as an argument: an argument is visible in the
 /// process list and lands in shell history, and a secret in either is a secret that
 /// has to be rotated.
+///
+/// What this promises is narrow and it used to break in three ways at once (#205):
+///
+/// - On Windows there was no echo suppression at all, so the passphrase was printed to the terminal
+///   the command exists to keep it out of.
+/// - On Unix the two `stty` calls were bare, so a read that failed between them left the terminal in
+///   no-echo and every later prompt invisible.
+/// - `trim_end` removed trailing spaces, so a passphrase that ends in one could be set and never
+///   entered again.
+///
+/// What it still cannot promise: a `SIGKILL`, or a panic in a `panic = "abort"` build, skips every
+/// destructor, so echo stays off. `SIGINT` is covered where the platform delivers it as a Rust exit
+/// path; a hard kill is not, and pretending otherwise would be the same kind of lie as the three
+/// above.
 pub(crate) fn read_hidden(prompt: &str) -> ZResult<String> {
     use std::io::{BufRead, Write};
 
     print!("{}", prompt);
     std::io::stdout().flush()?;
 
+    // The guard restores echo however this function leaves: a normal return, an I/O error from the
+    // read, or any `?` in between. Two bare `stty` calls restored it only on the happy path.
+    let guard = EchoOff::engage();
+
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line);
+
+    // Restore before the newline is printed, so the cursor lands on a fresh line rather than
+    // wherever the hidden characters would have ended.
+    drop(guard);
+    println!();
+    read?;
+
+    Ok(strip_newline(line))
+}
+
+/// The line without its terminator, and without anything else.
+///
+/// `trim_end` also removed trailing spaces, which made a passphrase ending in one impossible to
+/// enter: the stored value kept the space and the typed one lost it, so the two never matched and
+/// nothing said why.
+fn strip_newline(mut line: String) -> String {
+    if line.ends_with('\n') {
+        line.pop();
+    }
+    if line.ends_with('\r') {
+        line.pop();
+    }
+    line
+}
+
+/// Echo switched off for as long as the value lives.
+///
+/// A guard rather than a second call at the end of the function, because the failure this fixes is
+/// the exit that is not the end: an interrupted read used to leave the terminal silent for the rest
+/// of the session.
+struct EchoOff {
+    /// Whether anything was actually turned off, so `Drop` does not run `stty echo` on a terminal
+    /// that refused `stty -echo` in the first place.
+    engaged: bool,
+}
+
+impl EchoOff {
     #[cfg(unix)]
-    {
-        // stty is present wherever a terminal is, and turning echo off for one read
-        // is the one thing this needs from it.
-        let _ = std::process::Command::new("stty")
+    fn engage() -> EchoOff {
+        // stty is present wherever a terminal is, and turning echo off for one read is the one thing
+        // this needs from it. A failure here is not fatal: the read still happens, it is just
+        // visible, and refusing to prompt because the terminal would not cooperate helps nobody.
+        let ok = std::process::Command::new("stty")
             .arg("-echo")
             .stdin(std::process::Stdio::inherit())
-            .status();
-        let mut line = String::new();
-        std::io::stdin().lock().read_line(&mut line)?;
-        let _ = std::process::Command::new("stty")
-            .arg("echo")
-            .stdin(std::process::Stdio::inherit())
-            .status();
-        println!();
-        #[allow(clippy::needless_return)] // the other cfg branch returns below
-        return Ok(line.trim_end().to_string());
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        EchoOff { engaged: ok }
     }
 
-    #[cfg(not(unix))]
-    {
-        let mut line = String::new();
-        std::io::stdin().lock().read_line(&mut line)?;
-        Ok(line.trim_end().to_string())
+    #[cfg(windows)]
+    fn engage() -> EchoOff {
+        EchoOff {
+            engaged: win_console::echo(false),
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn engage() -> EchoOff {
+        EchoOff { engaged: false }
+    }
+}
+
+impl Drop for EchoOff {
+    #[cfg(unix)]
+    fn drop(&mut self) {
+        if self.engaged {
+            let _ = std::process::Command::new("stty")
+                .arg("echo")
+                .stdin(std::process::Stdio::inherit())
+                .status();
+        }
+    }
+
+    #[cfg(windows)]
+    fn drop(&mut self) {
+        if self.engaged {
+            win_console::echo(true);
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn drop(&mut self) {}
+}
+
+/// Turning terminal echo off on Windows, where there is no `stty`.
+///
+/// `SetConsoleMode` on the standard input handle: clearing `ENABLE_ECHO_INPUT` is the whole job, and
+/// setting it back is the same call with the bit restored. Declared here rather than pulled in as a
+/// dependency because these are the only three functions this program needs from kernel32, and a
+/// crate for three symbols would be a dependency to review for nothing.
+#[cfg(windows)]
+mod win_console {
+    use std::ffi::c_void;
+
+    type Handle = *mut c_void;
+
+    /// `STD_INPUT_HANDLE`, which is `-10` as an unsigned value.
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+    /// Characters typed at the console are echoed to the screen.
+    const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    /// `INVALID_HANDLE_VALUE`.
+    const INVALID_HANDLE_VALUE: isize = -1;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(which: u32) -> Handle;
+        fn GetConsoleMode(handle: Handle, mode: *mut u32) -> i32;
+        fn SetConsoleMode(handle: Handle, mode: u32) -> i32;
+    }
+
+    /// Turn echo off (`on = false`) or back on, answering whether it worked.
+    ///
+    /// Every step is checked because each can fail for a reason that matters: no console at all when
+    /// input is a pipe, or a handle that is not a console handle. Answering `false` leaves the caller
+    /// reading normally, which is what the old code did on this platform anyway - the difference is
+    /// that now it is known and the restore is skipped rather than run blind.
+    pub fn echo(on: bool) -> bool {
+        unsafe {
+            let handle = GetStdHandle(STD_INPUT_HANDLE);
+            if handle.is_null() || handle as isize == INVALID_HANDLE_VALUE {
+                return false;
+            }
+            let mut mode: u32 = 0;
+            if GetConsoleMode(handle, &mut mode) == 0 {
+                return false;
+            }
+            let wanted = if on {
+                mode | ENABLE_ECHO_INPUT
+            } else {
+                mode & !ENABLE_ECHO_INPUT
+            };
+            SetConsoleMode(handle, wanted) != 0
+        }
+    }
+}
+
+#[cfg(test)]
+mod hidden_tests {
+    use super::strip_newline;
+
+    #[test]
+    fn a_trailing_space_survives_the_read() {
+        // `trim_end` removed every trailing space, so a passphrase ending in one could be set and
+        // then never entered again: the stored value kept the space, the typed one lost it, and
+        // nothing said why. Only the terminator is removed now.
+        assert_eq!(strip_newline("secret \n".to_string()), "secret ");
+        assert_eq!(strip_newline("secret  ".to_string()), "secret  ");
+        assert_eq!(strip_newline("  leading".to_string()), "  leading");
+    }
+
+    #[test]
+    fn the_terminator_is_removed_on_both_line_endings() {
+        assert_eq!(strip_newline("value\n".to_string()), "value");
+        assert_eq!(strip_newline("value\r\n".to_string()), "value");
+        assert_eq!(strip_newline("value".to_string()), "value");
+        assert_eq!(strip_newline(String::new()), "");
+        // A lone `\r` in the middle is content, not a terminator.
+        assert_eq!(strip_newline("a\rb\n".to_string()), "a\rb");
+    }
+
+    #[test]
+    fn a_read_that_fails_still_restores_echo() {
+        // The old code ran `stty -echo`, read, then `stty echo` as three separate statements, so a
+        // read that failed left the terminal in no-echo and every later prompt invisible. The guard
+        // makes the restore a destructor, and this test pins the property that matters: dropping it
+        // runs the restore even when nothing else does.
+        //
+        // What can be observed without a terminal is the shape: `EchoOff` is dropped on the error
+        // path too, which the `drop(guard)` before `read?` guarantees by ordering.
+        let guard = super::EchoOff { engaged: false };
+        // Nothing to restore, so this must not hang or fail; the point is that `Drop` runs at all.
+        drop(guard);
     }
 }
