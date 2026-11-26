@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::params;
 use rusqlite::Connection;
 
-use crate::{bad, now, ZResult};
+use crate::{bad, normalise, now, ZResult};
 
 pub use crate::store::walk::is_inside_sub;
 
@@ -88,23 +88,59 @@ pub fn add(conn: &Connection, path: &str, remote: &str) -> ZResult<Sub> {
     })
 }
 
-/// Reject a path that could leave the repository or name the repository itself.
+/// Normalise a subrepository path and refuse anything that leaves the repository.
+///
+/// The old version checked the string before normalising it, so the checks could be walked past with
+/// the forms a person types without thinking: `./vendor`, `vendor//x`, and on Windows `vendor\x`
+/// all passed the `..` and leading-slash tests and then entered the scan exclusion as a path the walk
+/// never matches, so the subrepository was committed as part of the parent instead of skipped.
+///
+/// Normalising first makes the checks mean what they say: `.` segments removed, repeated separators
+/// collapsed, and on Windows the backslash turned into the separator it is there. What is checked
+/// afterwards is the path that will actually be stored and compared.
 fn clean_path(path: &str) -> ZResult<String> {
-    let p = path.trim().trim_end_matches('/');
-    if p.is_empty() {
-        return Err(bad("a subrepository needs a path".to_string()));
-    }
-    if p.starts_with('/') || p.contains("..") {
+    // Trim first: leading and trailing whitespace is a typing accident, and `normalise` does not
+    // remove it, so without this `"  vendor/lib  "` was stored with the spaces and never matched the
+    // directory it names.
+    let normalised = normalise(path.trim());
+    // An absolute path is refused before anything else: normalising one would otherwise turn
+    // `/srv/lib` into `srv/lib`, which names a directory inside the repository that the caller never
+    // asked for. Checked on the input, because that is where the intent is.
+    if normalised.starts_with('/') {
         return Err(bad(
             "a subrepository path must be relative and stay inside the repository".to_string(),
         ));
     }
+    let mut parts: Vec<&str> = Vec::new();
+    for part in normalised.split('/') {
+        match part {
+            // Empty comes from a leading, trailing or doubled separator. `.` is the current
+            // directory. Neither changes where the path points, so neither is stored.
+            "" | "." => continue,
+            ".." => {
+                return Err(bad(
+                    "a subrepository path must be relative and stay inside the repository"
+                        .to_string(),
+                ))
+            }
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() {
+        // `.` and `./` normalise to nothing, and a subrepository at the repository root is not a
+        // subrepository: it would exclude everything the walk is meant to read.
+        return Err(bad("a subrepository needs a path".to_string()));
+    }
+    let p = parts.join("/");
+    // Checked after joining, on the stored value. A two-part path whose last part is `.gesta` --
+    // `sub/.gesta` -- is a store inside a subdirectory, which the walk has to read, so only the
+    // whole path is compared here and the first segment is what matters.
     if p == crate::ZF_DIR || p == crate::LEGACY_DIR {
         return Err(bad(
             "the repository directory cannot hold a subrepository".to_string()
         ));
     }
-    Ok(p.to_string())
+    Ok(p)
 }
 
 pub fn list(conn: &Connection) -> ZResult<Vec<Sub>> {
@@ -194,6 +230,62 @@ pub fn excluded_paths(conn: &Connection) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_is_normalised_before_it_is_checked() {
+        // The checks ran on the string as typed and the store kept it that way. `./vendor` and
+        // `vendor//lib` passed the `..` and leading-slash tests, then entered the scan exclusion as a
+        // path the walk never matches - so the subrepository was committed as part of the parent
+        // instead of skipped, which is the exact failure the exclusion exists to prevent.
+        assert_eq!(clean_path("./vendor").unwrap(), "vendor");
+        assert_eq!(clean_path("vendor//lib").unwrap(), "vendor/lib");
+        assert_eq!(clean_path("vendor/lib/").unwrap(), "vendor/lib");
+        assert_eq!(clean_path("  vendor/lib  ").unwrap(), "vendor/lib");
+        assert_eq!(clean_path("a/./b").unwrap(), "a/b");
+        assert_eq!(clean_path("a//b///c").unwrap(), "a/b/c");
+    }
+
+    #[test]
+    fn a_path_that_climbs_out_is_refused_however_it_is_spelled() {
+        for bad_path in [
+            "..",
+            "../x",
+            "a/../b",
+            "a/../../b",
+            "./../x",
+            "a/b/..",
+            "/abs",
+            "//abs",
+        ] {
+            assert!(
+                clean_path(bad_path).is_err(),
+                "{bad_path} must be refused, it leaves the repository"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_that_normalises_to_nothing_is_refused() {
+        // `.`, `./` and `/` all name the repository root. A subrepository there excludes everything
+        // the walk is meant to read, so it is not a subrepository at all.
+        for empty in [".", "./", "/", "///", "", "   "] {
+            assert!(
+                clean_path(empty).is_err(),
+                "{empty:?} must be refused, it names the repository root"
+            );
+        }
+    }
+
+    #[test]
+    fn a_normalised_path_still_refuses_the_repository_directory() {
+        assert!(clean_path(".gesta").is_err());
+        assert!(
+            clean_path("./.gesta").is_err(),
+            "the normalised form is checked"
+        );
+        // A store nested one level down is an ordinary directory to the walk, so it is allowed.
+        assert_eq!(clean_path("sub/.gesta").unwrap(), "sub/.gesta");
+    }
 
     #[test]
     fn add_then_list_reports_the_pointer() {
