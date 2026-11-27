@@ -87,6 +87,9 @@ pub fn brief(conn: &Connection, root: &Path) -> ZResult<Brief> {
     let stashes = crate::repo::stash::list(conn)?.len();
 
     let delta = crate::repo::diff_worktree(conn, root, &branch)?;
+    // `absent` is deliberately not counted: nothing is owed for a file that was never here. Counting
+    // it made `brief` say the tree "differs from the head" and advise `changeset create` + `commit`,
+    // which would record a deletion of content the user never had (#342).
     let changed = delta.added.len() + delta.modified.len() + delta.deleted.len();
     // A `.theirs` file left beside a path is what a stopped merge writes, so its presence is
     // the honest signal for an unresolved conflict. The delta does not carry one.

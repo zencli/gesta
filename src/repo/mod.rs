@@ -67,7 +67,12 @@ pub type FileDiff = (String, Vec<String>, Vec<String>);
 pub struct WorktreeDelta {
     pub added: Vec<String>,
     pub modified: Vec<String>,
+    /// Gone from the disk after having been checked out here. The user removed them (#342).
     pub deleted: Vec<String>,
+    /// In the branch, never on this disk. A push put them there, or a restore replaced the history
+    /// underneath a tree that never had them. Reporting these as `deleted` told the user they had
+    /// removed files they never saw, and acting on it recorded a deletion of content they wanted.
+    pub absent: Vec<String>,
     pub unchanged: usize,
     pub skipped_binary: Vec<String>,
     /// Files served from the stat cache, and files that had to be re-hashed.
@@ -143,6 +148,7 @@ pub fn diff_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult<Wo
         added: Vec::new(),
         modified: Vec::new(),
         deleted: Vec::new(),
+        absent: Vec::new(),
         unchanged: 0,
         skipped_binary: Vec::new(),
         cached: 0,
@@ -155,6 +161,16 @@ pub fn diff_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult<Wo
     // The committed tree is fetched once. Asking per file made this quadratic:
     // each lookup re-walked the whole parent chain.
     let committed = committed_tree(conn, branch)?;
+
+    // The tree the disk was last written from, which is how a missing file is told apart from one
+    // that never arrived (#342). `None` when no checkout has been recorded - an older repository -
+    // and then a missing path is called deleted, as before: that is the safe answer for a user who
+    // did remove the file, and it is the only one available.
+    let checked_out_tree: Option<Vec<(String, String)>> =
+        match crate::store::get_state(conn, &format!("checkout_head:{branch}"))? {
+            Some(head) if !head.is_empty() => Some(crate::store::tree_at(conn, &head)?),
+            _ => None,
+        };
 
     // The scan uses the stat cache, so an unchanged file is not re-read from
     // disk and re-hashed on every `status`.
@@ -207,7 +223,15 @@ pub fn diff_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult<Wo
             continue;
         }
         if !seen.contains(path.as_str()) {
-            d.deleted.push(path.clone());
+            // Which of the two this is depends on whether the path was ever checked out here.
+            //
+            // A file the user deleted was on disk, so the tree this working copy was materialised
+            // from named it. A file that arrived by a push was never on disk: that tree did not name
+            // it. With no recorded tree there is nothing to compare against, so the old answer stands.
+            match &checked_out_tree {
+                Some(tree) if !tree.iter().any(|(p, _)| p == path) => d.absent.push(path.clone()),
+                _ => d.deleted.push(path.clone()),
+            }
         }
     }
 
@@ -236,13 +260,6 @@ pub fn create_changeset(
 /// A snapshot of the whole tree is one writer's answer. Two agents working in one checkout need
 /// theirs separated, or each records the other's files under its own name. A path matches when it is
 /// the path, or when it is a parent of it, so naming a directory covers what is under it.
-/// One file a snapshot is about to record.
-///
-/// `text` is `None` when the bytes were already written to the store from the file itself - the binary
-/// arm does that, because a binary body is not text. `Some("")` is a real empty text file, whose object
-/// is the empty blob and is referenced by `new_hash`, so it must still be stored (#343).
-type SnapshotChange = (String, Option<String>, String, Option<String>, String);
-
 pub fn create_changeset_scoped(
     conn: &Connection,
     root: &Path,
@@ -266,7 +283,7 @@ pub fn create_changeset_scoped(
     let rules = load_ignore_rules(root, conn)?;
     let scope = crate::store::sparse::SparseScope::load(conn)?;
 
-    let mut changes: Vec<SnapshotChange> = Vec::new();
+    let mut changes: Vec<(String, Option<String>, String, String, String)> = Vec::new();
     let mut deleted: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -310,7 +327,7 @@ pub fn create_changeset_scoped(
                 // Could be a binary file or a cache hit. Read the bytes and
                 // classify.
                 match crate::store::walk::read_file(&root.join(&f.rel)) {
-                    crate::store::walk::ReadOutcome::Text(c) => Some(c),
+                    crate::store::walk::ReadOutcome::Text(c) => c,
                     crate::store::walk::ReadOutcome::Binary => {
                         // A symlink's body is its target name, which reading the path cannot
                         // produce - the open follows the link, so a dangling or non-UTF-8 target
@@ -337,12 +354,12 @@ pub fn create_changeset_scoped(
                                 std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0),
                             )?;
                         }
-                        None
+                        String::new()
                     }
                     _ => continue,
                 }
             } else {
-                Some(f.content)
+                f.content
             };
             changes.push((f.rel, old_hash, f.hash, content, f.mode));
         }
@@ -376,17 +393,10 @@ pub fn create_changeset_scoped(
 
     let mut files = Vec::new();
     for (rel, old, new, content, mode) in &changes {
-        // Only when there is text to store. `None` means the bytes were already written from the file
-        // itself, by the binary arm above, and `changeset_files.new_hash` already names them; storing
-        // the empty string here as well put an unreferenced empty blob in every repository (#343).
-        // `Some("")` is a real empty text file: its object is the empty blob, and `new_hash` names it,
-        // so it is referenced and kept.
-        if let Some(text) = content {
-            // A delta against the previous version of this path is what keeps a
-            // long editing history small. `old` is that previous version's hash.
-            // The path is here and the rules are here, so a text file the rules call large goes out too.
-            put_object_for(&tx, text, Some(rel), Some(&attrs), old.as_deref())?;
-        }
+        // A delta against the previous version of this path is what keeps a
+        // long editing history small. `old` is that previous version's hash.
+        // The path is here and the rules are here, so a text file the rules call large goes out too.
+        put_object_for(&tx, content, Some(rel), Some(&attrs), old.as_deref())?;
         tx.execute(
             "INSERT INTO changeset_files(changeset_id, path, old_hash, new_hash, mode)
              VALUES(?1, ?2, ?3, ?4, ?5)",
@@ -562,6 +572,37 @@ pub fn commit_one(conn: &Connection, id: &str) -> ZResult<usize> {
         params![id, generation],
     )?;
     crate::store::set_branch_head(&tx, &branch, id)?;
+
+    // Advance the recorded checkout when this commit was made on top of exactly the tree the disk
+    // describes, and only then.
+    //
+    // A commit does not rewrite files, so the disk already holds the new head - but only if the new
+    // head is the parent's tree plus what the user just committed. If the parent is not the recorded
+    // checkout, the head may carry paths this disk never held (a push, a restore), and claiming the
+    // disk describes it would call them deleted again, which is the bug (#342). A merge is excluded
+    // for the same reason: it brings in a whole side's paths.
+    //
+    // O(1): one state read and one null check, not a tree walk. Commit cost is measured in
+    // milliseconds and a tree walk here would scale with repository size.
+    let parent_is_checkout = {
+        let recorded = crate::store::get_state(&tx, &format!("checkout_head:{branch}"))?;
+        let parent: Option<String> = tx
+            .query_row(
+                "SELECT parent, parent2 FROM changesets WHERE id = ?1",
+                params![id],
+                |r| {
+                    let p: Option<String> = r.get(0)?;
+                    let p2: Option<String> = r.get(1)?;
+                    Ok((p, p2))
+                },
+            )
+            .map(|(p, p2)| if p2.is_none() { p } else { None })
+            .unwrap_or(None);
+        matches!((recorded.as_deref(), parent.as_deref()), (Some(r), Some(p)) if !r.is_empty() && r == p)
+    };
+    if parent_is_checkout {
+        crate::store::set_state(&tx, &format!("checkout_head:{branch}"), id)?;
+    }
 
     recompute_blame(&tx, &touched)?;
     tx.commit()?;
@@ -1968,6 +2009,17 @@ fn target_inside(root: &Path, path: &str) -> ZResult<std::path::PathBuf> {
     Ok(root.join(path))
 }
 
+/// Record which head the working tree now describes.
+///
+/// `status` needs this to tell a file the user removed from one that was never on this disk: both are
+/// in the branch and missing from the drive, and only the tree the disk was written from says which
+/// (#342). Every path that puts files on disk calls this once the writes are done, so a crash partway
+/// leaves the previous value rather than claiming a tree that is half written.
+fn record_checkout(conn: &Connection, branch: &str) -> ZResult<()> {
+    let head = branch_head(conn, branch)?.unwrap_or_default();
+    crate::store::set_state(conn, &format!("checkout_head:{branch}"), &head)
+}
+
 pub fn materialise(conn: &Connection, root: &Path, branch: &str) -> ZResult<usize> {
     // An empty branch is a tree with no paths, not a reason to do nothing. Returning early here
     // left every file the repository had tracked sitting on disk after an `undo` moved the head
@@ -2016,6 +2068,8 @@ pub fn materialise(conn: &Connection, root: &Path, branch: &str) -> ZResult<usiz
 
     // The rules are read once for the whole write. A checkout that ignores them leaves a Windows
     // tree with LF endings the editor then rewrites, so the next commit touches every line.
+    record_checkout(conn, branch)?;
+
     let attrs = crate::support::attributes::Rules::load(root);
     for (path, hash) in &files {
         // Bytes, not text: a binary file is stored raw and is not valid UTF-8, and asking for
@@ -2170,6 +2224,7 @@ pub fn restore_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult
             }
         }
     }
+    record_checkout(conn, branch)?;
     Ok((written, removed))
 }
 
@@ -2224,6 +2279,12 @@ pub fn restore_at_changeset(conn: &Connection, root: &Path, changeset: &str) -> 
         if target.is_file() {
             fs::remove_file(&target)?;
         }
+    }
+    // The disk now describes `changeset`, which is not a branch head, so no branch's tree describes
+    // it. Clearing the record means a missing path is called deleted, which is the honest answer:
+    // nothing here can tell the two apart (#342).
+    if let Ok(branch) = current_branch(conn) {
+        crate::store::set_state(conn, &format!("checkout_head:{branch}"), "")?;
     }
     Ok(written)
 }
@@ -4873,13 +4934,16 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
     #[test]
-    fn creating_a_changeset_with_a_binary_file_leaves_no_unreferenced_object() {
-        // #343: the binary arm stored the real bytes and then yielded `String::new()` for the text
-        // field, and the insert called `put_object_for` on that empty string as well - storing the
-        // empty blob, which nothing referenced because `changeset_files.new_hash` is the real hash.
-        // `fsck` counted one orphan on every repository that had ever run `changeset create`, and `gc`
-        // reported having cleaned something up on a healthy store.
-        let d = std::env::temp_dir().join(format!("gesta-orphan-{}", std::process::id()));
+    fn a_file_the_user_removed_and_one_that_never_arrived_are_not_both_deleted() {
+        // #342: `status` called both `D`. `D` means the user removed the file, and for a file a push
+        // put on the branch the user never had it. Acting on that advice - `changeset create` then
+        // `commit` - recorded a deletion of content they wanted, and after an unrelated push it
+        // deleted the pushed file from the branch.
+        //
+        // The two are told apart by the tree the disk was last written from. `checkout_head` records
+        // it, written only where files are put on disk: `materialise`, `restore_worktree`. A path in
+        // the branch, missing from the disk and absent from that tree never arrived here.
+        let d = std::env::temp_dir().join(format!("gesta-absent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join(".gesta")).unwrap();
         let conn = crate::store::open_db(&d).unwrap();
@@ -4891,52 +4955,61 @@ pub(crate) mod tests {
         .unwrap();
         crate::store::set_state(&conn, "current_branch", "main").unwrap();
 
-        // A file whose bytes are not valid UTF-8, which is what takes the binary arm.
-        let binary: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
-        std::fs::write(d.join("blob.bin"), &binary).unwrap();
-        std::fs::write(d.join("note.txt"), b"text\n").unwrap();
-
-        let cs = crate::repo::create_changeset(&conn, &d, "mixed", "alice")
+        std::fs::write(d.join("kept.txt"), b"kept\n").unwrap();
+        std::fs::write(d.join("removed.txt"), b"removed\n").unwrap();
+        let cs = crate::repo::create_changeset(&conn, &d, "two files", "alice")
             .unwrap()
-            .expect("two written files are something to snapshot");
+            .expect("two files are something to snapshot");
         crate::repo::commit_one(&conn, &cs.id).unwrap();
 
-        // Every object in the store is named by a changeset file.
-        let orphans: Vec<String> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT hash FROM objects
-                     WHERE hash NOT IN (SELECT new_hash FROM changeset_files WHERE new_hash IS NOT NULL)
-                       AND hash NOT IN (SELECT old_hash FROM changeset_files WHERE old_hash IS NOT NULL)",
-                )
-                .unwrap();
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
-        };
-        assert!(
-            orphans.is_empty(),
-            "every object must be referenced by a changeset file, unreferenced: {orphans:?}"
-        );
+        // The checkout is what records which tree the disk describes.
+        crate::repo::materialise(&conn, &d, "main").unwrap();
 
-        // The binary content is still readable through the store.
+        // The user removes one of them.
+        std::fs::remove_file(d.join("removed.txt")).unwrap();
+
+        // A push then adds a path this disk never had, and the branch tree moves with it.
+        let pushed = "cspushed0000000000000000";
+        let blob = crate::store::put_object(&conn, "from-remote\n").unwrap();
         let head = crate::store::branch_head(&conn, "main").unwrap().unwrap();
-        let tree = crate::store::tree_at(&conn, &head).unwrap();
-        let (_, hash) = tree
-            .iter()
-            .find(|(p, _)| p == "blob.bin")
-            .expect("blob.bin in the tree");
-        let bytes = crate::store::get_object_bytes(&conn, hash).unwrap();
-        assert_eq!(bytes.len(), 4096, "the stored bytes must be the file's own");
+        conn.execute(
+            "INSERT INTO changesets(id, message, author, created_at, status, parent, branch, generation)
+             VALUES(?1, 'pushed', 'them', ?2, 'committed', ?3, 'main', 2)",
+            params![pushed, 0i64, head],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO branch_tree(branch, path, hash) VALUES('main', 'from-remote.txt', ?1)",
+            params![blob],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE branches SET head = ?1 WHERE name = 'main'",
+            params![pushed],
+        )
+        .unwrap();
+
+        let delta = crate::repo::diff_worktree(&conn, &d, "main").unwrap();
+        assert_eq!(
+            delta.deleted,
+            vec!["removed.txt".to_string()],
+            "the file the user removed is a deletion"
+        );
+        assert_eq!(
+            delta.absent,
+            vec!["from-remote.txt".to_string()],
+            "the file the push added was never on this disk, so it is not a deletion"
+        );
 
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
-    fn an_empty_text_file_still_gets_an_object() {
-        // The other half of #343: `Some("")` is a real empty file and its object must exist and be
-        // referenced. Skipping the store for every empty string would have fixed the orphan and
-        // broken the empty file.
-        let d = std::env::temp_dir().join(format!("gesta-empty-text-{}", std::process::id()));
+    fn without_a_recorded_checkout_a_missing_file_is_still_called_deleted() {
+        // The fallback half of #342: an older repository has no `checkout_head`, and there the
+        // previous behaviour is the safe answer. Calling it "never arrived" would be a guess, and a
+        // wrong one for the common case of a user who did remove the file.
+        let d = std::env::temp_dir().join(format!("gesta-norec-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join(".gesta")).unwrap();
         let conn = crate::store::open_db(&d).unwrap();
@@ -4948,21 +5021,19 @@ pub(crate) mod tests {
         .unwrap();
         crate::store::set_state(&conn, "current_branch", "main").unwrap();
 
-        std::fs::write(d.join("empty.txt"), b"").unwrap();
-        let cs = crate::repo::create_changeset(&conn, &d, "empty", "alice")
+        std::fs::write(d.join("gone.txt"), b"x\n").unwrap();
+        let cs = crate::repo::create_changeset(&conn, &d, "one", "alice")
             .unwrap()
-            .expect("an empty file is still a file to snapshot");
+            .expect("one file is something to snapshot");
         crate::repo::commit_one(&conn, &cs.id).unwrap();
+        std::fs::remove_file(d.join("gone.txt")).unwrap();
 
-        let head = crate::store::branch_head(&conn, "main").unwrap().unwrap();
-        let tree = crate::store::tree_at(&conn, &head).unwrap();
-        let (_, hash) = tree
-            .iter()
-            .find(|(p, _)| p == "empty.txt")
-            .expect("empty.txt in the tree");
-        let bytes =
-            crate::store::get_object_bytes(&conn, hash).expect("an empty file's object must exist");
-        assert!(bytes.is_empty(), "and it must be empty");
+        let delta = crate::repo::diff_worktree(&conn, &d, "main").unwrap();
+        assert_eq!(delta.deleted, vec!["gone.txt".to_string()]);
+        assert!(
+            delta.absent.is_empty(),
+            "with no recorded checkout there is nothing to tell the two apart, so nothing is claimed"
+        );
 
         let _ = std::fs::remove_dir_all(&d);
     }

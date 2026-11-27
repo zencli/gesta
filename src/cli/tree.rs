@@ -164,7 +164,7 @@ pub fn cmd_status() -> ZResult<()> {
 
     let d = repo::diff_worktree(&conn, &root, &branch)?;
 
-    if d.added.is_empty() && d.modified.is_empty() && d.deleted.is_empty() {
+    if d.added.is_empty() && d.modified.is_empty() && d.deleted.is_empty() && d.absent.is_empty() {
         println!("working tree clean ({} files tracked)", d.unchanged);
     } else {
         if !d.added.is_empty() {
@@ -184,6 +184,17 @@ pub fn cmd_status() -> ZResult<()> {
             for f in &d.deleted {
                 println!("  D {}", f);
             }
+        }
+        // Not `D`: `D` means the user removed the file, and here the user never had it. A push put
+        // it on the branch, or a restore replaced the history under a tree that never held it.
+        // Calling it deleted made `brief` advise committing, which records a deletion of content
+        // that was never theirs to delete (#342).
+        if !d.absent.is_empty() {
+            println!("\nnot checked out ({}):", d.absent.len());
+            for f in &d.absent {
+                println!("  - {}", f);
+            }
+            println!("  these are on the branch but were never written here; `gesta checkout .` brings them");
         }
     }
 
