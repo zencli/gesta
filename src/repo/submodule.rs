@@ -197,7 +197,10 @@ fn checkout_our_repo(dest: &Path, commit: &str, sub_path: &str) -> ZResult<()> {
     if exists == 0 {
         return Err(bad(format!(
             "the pin {} of submodule {} is not in the child's history",
-            &commit[..commit.len().min(14)],
+            // `head_chars`: `.min(14)` caps a long pin but says nothing about char boundaries, so a
+            // 15-byte pin ending in a 2-byte character panicked right here, while formatting the
+            // message that was supposed to report the bad pin (#313).
+            crate::support::paths::head_chars(commit, 14),
             sub_path
         )));
     }
@@ -462,6 +465,40 @@ pub fn child_head(path: &Path) -> ZResult<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pin_with_a_multibyte_character_is_reported_without_panicking() {
+        // #313: `&commit[..commit.len().min(14)]` capped a long pin but said nothing about char
+        // boundaries, so a 15-byte pin whose byte 14 sits inside `é` panicked while formatting the
+        // error message. The message exists to report a bad pin; crashing on it is the opposite.
+        let pin = format!("{}é", "a".repeat(13));
+        assert_eq!(pin.len(), 15);
+
+        let dest = std::env::temp_dir().join(format!("gesta-pin-child-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(dest.join(".gesta")).unwrap();
+
+        // A child repository with no changesets, so the pin cannot be found in its history.
+        let conn = crate::store::open_db(&dest).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        crate::store::migrate(&conn).unwrap();
+        drop(conn);
+
+        let err = checkout_our_repo(&dest, &pin, "sub")
+            .expect_err("a pin that is not in the child's history must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("is not in the child's history"),
+            "the refusal must be the pin message, not a different failure: {msg}"
+        );
+        // The truncated pin appears in the message, cut on a boundary: all 13 `a`s, no half of `é`.
+        assert!(
+            msg.contains(&"a".repeat(13)),
+            "the message must name the pin it refused: {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
 
     #[test]
     fn a_pin_that_is_not_a_commit_id_is_refused_before_git_runs() {

@@ -13,6 +13,23 @@
 ///
 /// `src/main.rs` could. `/etc/passwd`, `../../etc/shadow`, `C:/Windows/win.ini` and `a\b` could not.
 /// The empty string could not: it names the root, not a file in it.
+/// The first `n` characters of `s`, cut only on a char boundary.
+///
+/// `&s[..n]` panics when byte `n` sits inside a multi-byte character, and three separate places were
+/// doing exactly that on values that arrive from outside the program: an S3 key (#274), a signing key
+/// name (#290) and a submodule pin (#313). Two of them panicked while formatting an error message,
+/// which turns a bad input into a crash on the path whose job is to report the bad input.
+///
+/// Bytes are the wrong unit here anyway: the caller wants "a short prefix for a message", so the cut
+/// belongs at a character. Keeping it in one function means the next caller that needs a prefix does
+/// not write `&s[..16]` again.
+pub fn head_chars(s: &str, n: usize) -> &str {
+    match s.char_indices().nth(n) {
+        Some((byte, _)) => &s[..byte],
+        None => s,
+    }
+}
+
 pub fn is_repo_relative(path: &str) -> bool {
     if path.is_empty() {
         return false;
@@ -71,5 +88,40 @@ mod tests {
                 "{bad:?} must be refused as a tree path"
             );
         }
+    }
+
+    #[test]
+    fn head_chars_cuts_on_a_character_boundary() {
+        // The whole reason this function exists (#274, #290, #313): `&s[..n]` panics when byte n sits
+        // inside a multi-byte character, and every caller takes a string from outside the program.
+        assert_eq!(head_chars("abcdef", 3), "abc");
+        assert_eq!(
+            head_chars("abc", 10),
+            "abc",
+            "a short string is returned whole"
+        );
+        assert_eq!(head_chars("", 4), "");
+
+        // The pin shape from #313: 13 `a` then `é` is 15 BYTES and 14 CHARACTERS. Slicing at byte 14
+        // split `é` and panicked. Counting characters, 14 characters is the whole string, so nothing
+        // is cut and nothing can be split.
+        let pin = format!("{}é", "a".repeat(13));
+        assert_eq!(pin.len(), 15, "15 bytes");
+        assert_eq!(pin.chars().count(), 14, "but 14 characters");
+        assert_eq!(
+            head_chars(&pin, 14),
+            pin,
+            "14 characters is the whole string"
+        );
+        assert_eq!(
+            head_chars(&pin, 13),
+            "a".repeat(13),
+            "asking for 13 characters stops before the multi-byte one"
+        );
+
+        // Still multi-byte, cut after two characters rather than two bytes.
+        assert_eq!(head_chars("éééé", 2), "éé");
+        // A four-byte character counts as one.
+        assert_eq!(head_chars("🙂🙂", 1), "🙂");
     }
 }

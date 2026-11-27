@@ -255,7 +255,10 @@ pub mod local {
                 who,
                 decision: Decision::Allowed,
                 action: "key-rotate",
-                target: &new_public[..16.min(new_public.len())],
+                // `head_chars`, not `&new_public[..16]`: the name is a `&str` of arbitrary text and
+                // byte 16 can sit inside a multi-byte character (#290). Real keys are ASCII, but the
+                // function takes any string and panicked on the one it was given.
+                target: crate::support::paths::head_chars(new_public, 16),
                 reason: &reason,
                 remote: None,
             },

@@ -296,10 +296,22 @@ fn is_our_backup(key: &str) -> bool {
         return false;
     };
     // 20260101T120000000Z, which is 19 characters: 8 date, 'T', 9 time with milliseconds, 'Z'.
-    stamp.len() == 19
-        && stamp.ends_with('Z')
-        && stamp.as_bytes()[8] == b'T'
-        && stamp[..8].bytes().all(|b| b.is_ascii_digit())
+    //
+    // Every test below is byte-wise on purpose, and the length check makes them safe: a 19-BYTE stamp
+    // that also has `T` at byte 8 and `Z` at byte 18 is pure ASCII by construction, so slicing the
+    // digits afterwards cannot split a character. The earlier version checked `len()` (bytes) but
+    // then sliced by byte before proving ASCII, so a key with `é` where the digits belong panicked
+    // with "byte index 17 is not a char boundary" (#274). The key list comes from the bucket, so
+    // anyone who can write under the prefix could reach it, and a panic is not something `push` can
+    // survive: it swallowed the prune error with `let _ =`, which does nothing for a panic.
+    if stamp.len() != 19
+        || !stamp.is_ascii()
+        || !stamp.ends_with('Z')
+        || stamp.as_bytes()[8] != b'T'
+    {
+        return false;
+    }
+    stamp[..8].bytes().all(|b| b.is_ascii_digit())
         && stamp[9..17].bytes().all(|b| b.is_ascii_digit())
 }
 
@@ -396,6 +408,29 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_key_with_a_multibyte_character_where_the_digits_belong_is_not_ours() {
+        // #274: `stamp[9..17]` was sliced before proving the stamp was ASCII, so a key with `é` in the
+        // digit range panicked with "byte index 17 is not a char boundary". The key list comes from
+        // the bucket, so this was reachable by anyone who could write under the prefix, and a panic
+        // is not something `push` survives.
+        //
+        // 19 bytes: 8 digits, `T`, then a multi-byte character inside the time range, then `Z`.
+        let key = "backups/gesta-20260101T1200000éZ.bak";
+        assert_eq!(
+            "20260101T1200000éZ".len(),
+            19,
+            "the fixture must be 19 bytes"
+        );
+        assert!(!is_our_backup(key), "a non-ASCII stamp is not one of ours");
+
+        // The control: a real stamp is still recognised, so the check did not become "always false".
+        assert!(is_our_backup("backups/gesta-20260101T120000000Z.bak"));
+        // And the boundary cases around it.
+        assert!(!is_our_backup("backups/gesta-20260101T120000000Z.bakx"));
+        assert!(!is_our_backup("backups/other-20260101T120000000Z.bak"));
+    }
 
     #[test]
     fn the_plaintext_backup_lives_in_a_directory_only_its_owner_can_enter() {
