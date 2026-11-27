@@ -1907,6 +1907,59 @@ pub fn materialise(conn: &Connection, root: &Path, branch: &str) -> ZResult<usiz
     Ok(files.len())
 }
 
+/// The first control character in `s`, if any, as a printable stand-in.
+///
+/// A symlink target with a newline in it is not something any checkout writes, and it cannot be
+/// represented in a path on any platform (#334). Reported rather than stripped: a target that
+/// arrived with a control character is a store problem the user should see.
+fn strip_control(s: &str) -> Option<String> {
+    s.chars()
+        .find(|c| c.is_control())
+        .map(|c| format!("{:?}", c))
+}
+
+/// Create a symlink at `link` pointing at `target`.
+///
+/// The two platforms differ in argument order and in what a failure means: on Windows an unprivileged
+/// process may be refused outright, and that refusal is reported rather than silently writing a
+/// regular file whose content is the target path - which would look like a symlink to `show` and
+/// behave like a copy everywhere else.
+#[cfg(unix)]
+fn make_symlink(target: &str, link: &Path) -> ZResult<()> {
+    std::os::unix::fs::symlink(target, link)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn make_symlink(target: &str, link: &Path) -> ZResult<()> {
+    // A directory target needs `symlink_dir`; a file target needs `symlink_file`. The store does not
+    // record which, so the shape of the target is used: a target that exists and is a directory, or
+    // one ending in a separator, is created as a directory link.
+    let looks_like_dir =
+        target.ends_with('/') || target.ends_with('\\') || Path::new(target).is_dir();
+    let r = if looks_like_dir {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    };
+    r.map_err(|e| {
+        bad(format!(
+            "cannot create the symlink {:?} -> {:?}: {}. On Windows this needs Developer Mode or \
+             an elevated process; the file is left absent rather than written as a copy that would \
+             behave differently from the link it replaces",
+            link, target, e
+        ))
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn make_symlink(target: &str, link: &Path) -> ZResult<()> {
+    Err(bad(format!(
+        "this platform has no symlink support, so {:?} -> {:?} cannot be restored",
+        link, target
+    )))
+}
+
 /// Restore every tracked file of `branch` to its committed content, and remove
 /// tracked files that should not exist. Untracked files are left alone.
 pub fn restore_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult<(usize, usize)> {
@@ -1918,11 +1971,13 @@ pub fn restore_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult
     // The tree at `head` is the newest version of every path reachable from it,
     // not just the paths that `head` itself touched. Reading file_versions for
     // the head changeset alone loses every file added by an earlier changeset.
-    let files = crate::store::tree_at(conn, &head)?;
+    //
+    // With modes, because the write below has to know whether a path is a symlink (#334).
+    let files = crate::store::tree_at_with_mode(conn, &head)?;
 
     let attrs = crate::support::attributes::Rules::load(root);
     let mut written = 0usize;
-    for (path, hash) in &files {
+    for (path, hash, mode) in &files {
         let content = crate::store::get_object_bytes(conn, hash)?;
         let plan = crate::support::attributes::plan_for(&attrs, path);
         let content = plan.checked_out(&content);
@@ -1930,12 +1985,52 @@ pub fn restore_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
+
+        // A tracked symlink is written as a symlink, never written through (#334).
+        //
+        // `fs::write` followed whatever the path pointed at, so checking out a repository could
+        // overwrite any file the user could write: a committed link to `/tmp/victim.txt` made
+        // `gesta checkout .` put the link text into that file. The store was already correct - a
+        // link is mode 120000 and its blob is the target path, same as git - and only the write path
+        // was wrong.
+        //
+        // `remove_file` first because creating a symlink where one already exists fails, and because
+        // the existing entry may be a regular file left by an older build. Removing it touches the
+        // directory entry only; the link target is never opened.
+        if mode == "120000" {
+            let link_text = String::from_utf8_lossy(&content).to_string();
+            if let Some(bad_char) = strip_control(&link_text) {
+                return Err(bad(format!(
+                    "refusing to create symlink {:?}: its target {:?} holds a control character, \
+                     which no checkout writes",
+                    path, bad_char
+                )));
+            }
+            match std::fs::symlink_metadata(&target) {
+                Ok(_) => {
+                    std::fs::remove_file(&target)?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            make_symlink(&link_text, &target)?;
+            written += 1;
+            continue;
+        }
+
+        // A path that is a symlink on disk is not written through either. The committed entry here
+        // is a regular file, so the link is stale and is replaced rather than followed.
+        if let Ok(md) = std::fs::symlink_metadata(&target) {
+            if md.file_type().is_symlink() {
+                std::fs::remove_file(&target)?;
+            }
+        }
         fs::write(&target, &content)?;
         written += 1;
     }
 
     // Tracked on an older changeset but gone from this one: delete it.
-    let present: std::collections::HashSet<&String> = files.iter().map(|(p, _)| p).collect();
+    let present: std::collections::HashSet<&String> = files.iter().map(|(p, _, _)| p).collect();
     let mut removed = 0usize;
     let mut all_stmt = conn.prepare("SELECT DISTINCT path FROM file_versions")?;
     let all: Vec<String> = all_stmt
@@ -2738,6 +2833,133 @@ pub(crate) mod tests {
         }
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_checkout_writes_a_symlink_as_a_symlink_and_never_through_it() {
+        // #334: the store recorded a link correctly as mode 120000 with the target path as its blob,
+        // and `restore_worktree` then called `fs::write(path)`, which followed the link. A repository
+        // could therefore overwrite any file its user could write: a committed link to
+        // /tmp/victim.txt made `gesta checkout .` put the link text into that file.
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("gesta-symlink-write-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("gesta-symlink-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let victim = outside.join("victim.txt");
+        fs::write(&victim, "ORIGINAL\n").unwrap();
+        symlink(&victim, root.join("link.txt")).unwrap();
+        fs::write(root.join("normal.txt"), "plain\n").unwrap();
+
+        let conn = mem_db();
+        let cs = create_changeset(&conn, &root, "links", "t")
+            .unwrap()
+            .unwrap();
+        commit_one(&conn, &cs.id).unwrap();
+
+        // The store side was already right; assert it so a future change cannot quietly break it.
+        let mode: String = conn
+            .query_row(
+                "SELECT mode FROM changeset_files WHERE changeset_id=?1 AND path='link.txt'",
+                params![cs.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode, "120000");
+
+        // Change the target from outside, then check out. The target's bytes must be untouched.
+        fs::write(&victim, "CHANGED-FROM-OUTSIDE\n").unwrap();
+        // And the link on disk is now pointed somewhere else, which is the shape the bug needed:
+        // an existing symlink at the path that the checkout will write.
+        let other = outside.join("other.txt");
+        fs::write(&other, "OTHER\n").unwrap();
+        fs::remove_file(root.join("link.txt")).unwrap();
+        symlink(&other, root.join("link.txt")).unwrap();
+
+        restore_worktree(&conn, &root, "main").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "CHANGED-FROM-OUTSIDE\n",
+            "the checkout must not write through a symlink into a file outside the repository"
+        );
+        assert_eq!(
+            fs::read_to_string(&other).unwrap(),
+            "OTHER\n",
+            "and it must not write into the other link target either"
+        );
+
+        // The path itself is a symlink again, pointing where the store says it points.
+        let md = std::fs::symlink_metadata(root.join("link.txt")).unwrap();
+        assert!(
+            md.file_type().is_symlink(),
+            "the tracked path must be restored as a symlink, not as a regular file"
+        );
+        assert_eq!(
+            fs::read_link(root.join("link.txt")).unwrap(),
+            victim,
+            "and it must point at the committed target"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("normal.txt")).unwrap(),
+            "plain\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_regular_file_replaces_a_stale_symlink_rather_than_writing_through_it() {
+        // The other direction: the store says regular file, the disk holds a symlink. Writing through
+        // it would write outside the repository; the link has to be removed and a real file created.
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("gesta-symlink-stale-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("gesta-symlink-stale-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        fs::write(root.join("f.txt"), "committed\n").unwrap();
+        let conn = mem_db();
+        let cs = create_changeset(&conn, &root, "one", "t").unwrap().unwrap();
+        commit_one(&conn, &cs.id).unwrap();
+
+        // Replace the file with a link to a file outside, then check out.
+        let target = outside.join("elsewhere.txt");
+        fs::write(&target, "MUST-NOT-CHANGE\n").unwrap();
+        fs::remove_file(root.join("f.txt")).unwrap();
+        symlink(&target, root.join("f.txt")).unwrap();
+
+        restore_worktree(&conn, &root, "main").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "MUST-NOT-CHANGE\n",
+            "a regular file must not be written through a stale symlink"
+        );
+        let md = std::fs::symlink_metadata(root.join("f.txt")).unwrap();
+        assert!(
+            md.file_type().is_file(),
+            "the tracked path must be a regular file again"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("f.txt")).unwrap(),
+            "committed\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     pub fn commit_files(conn: &Connection, id: &str, msg: &str, files: &[(&str, &str)]) {
