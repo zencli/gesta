@@ -385,15 +385,35 @@ fn apply_delta(base: &[u8], delta: &[u8]) -> ZResult<Vec<u8>> {
     // of this check used 255x and refused a legitimate full copy of a long run - the delta was
     // larger than the object, which is fine, and the ceiling was simply too tight.
     let ceiling = delta.len().saturating_mul(65536);
-    if result_size > ceiling {
+    // The ratio ceiling alone is not a bound (#279).
+    //
+    // 65536x is the per-byte maximum for a single copy op, which is the right shape for "this delta
+    // cannot legitimately claim more". It is not an absolute limit: a 1 MiB delta passes the ratio
+    // check while claiming 64 GiB, and `Vec::with_capacity` then tries to reserve it before a single
+    // op is validated. Whether that aborts or returns depends on the allocator, and neither outcome is
+    // a refusal a caller can act on. `MAX_INFLATED` is the same absolute ceiling every decompression
+    // path in this store already uses.
+    if result_size > ceiling || result_size > crate::store::MAX_INFLATED {
         return Err(bad(format!(
-            "delta claims {} bytes of output from a {} byte body",
+            "delta claims {} bytes of output from a {} byte body{}",
             result_size,
-            delta.len()
+            delta.len(),
+            if result_size > crate::store::MAX_INFLATED {
+                format!(
+                    ", which is above the {} byte ceiling this store accepts",
+                    crate::store::MAX_INFLATED
+                )
+            } else {
+                String::new()
+            }
         )));
     }
 
-    let mut out = Vec::with_capacity(result_size);
+    // Grown incrementally rather than reserved up front. `with_capacity(result_size)` trusted the
+    // claimed size before the ops were checked; the ops are the only thing that proves the claim, and
+    // growing means a delta that lies about its size costs memory in proportion to what it actually
+    // emits rather than to what it says.
+    let mut out = Vec::new();
     while at < delta.len() {
         let op = delta[at];
         at += 1;
@@ -491,6 +511,70 @@ fn be64(bytes: &[u8], at: usize) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Encode a size as the varint delta headers use.
+    fn varint(mut v: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if v == 0 {
+                return out;
+            }
+        }
+    }
+
+    #[test]
+    fn a_delta_claiming_more_than_the_absolute_ceiling_is_refused_before_allocating() {
+        // #279: the ratio ceiling is 65536x the delta length, which is the right shape for "this delta
+        // cannot legitimately claim more" but not an absolute bound. A 1 MiB delta passed the ratio
+        // check claiming 64 GiB, and `Vec::with_capacity` reserved that before a single op was
+        // validated.
+        //
+        // The delta here is four bytes and claims 2 GiB. The refusal has to happen without attempting
+        // the allocation: a `with_capacity` of 2 GiB would either abort the process or make this test
+        // allocate gigabytes, and neither happens.
+        let base = b"hello".to_vec();
+        let mut delta = Vec::new();
+        delta.extend(varint(base.len()));
+        delta.extend(varint(2 * 1024 * 1024 * 1024));
+        delta.push(0x01);
+
+        let err = apply_delta_for_test(&base, &delta)
+            .expect_err("a delta above the absolute ceiling must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("claims"),
+            "the refusal must be the size check, not a parse failure: {msg}"
+        );
+        assert!(
+            msg.contains("ceiling"),
+            "the refusal must say which limit was hit: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_delta_within_the_ceiling_still_applies() {
+        // The control: the guard must not refuse ordinary deltas.
+        let base = b"hello".to_vec();
+        let mut delta = Vec::new();
+        delta.extend(varint(base.len())); // base size
+        delta.extend(varint(base.len() + 1)); // result size
+        delta.push(0x80 | 0x10 | 0x01); // copy: offset present, size present
+        delta.push(0x00); // offset = 0
+        delta.push(0x05); // size = 5
+        delta.push(0x01); // insert one literal
+        delta.push(b'!');
+
+        let out = apply_delta_for_test(&base, &delta).expect("a small delta must apply");
+        assert_eq!(out, b"hello!".to_vec());
+    }
+
     /// The header parsers read from a file now, so a test that used to pass a slice writes the
     /// bytes to a file and hands back a handle. A scribble file per test rather than a shared one:
     /// the parsers seek, and two tests sharing a handle would interleave their seeks.
@@ -510,7 +594,6 @@ mod tests {
         let f = std::fs::File::open(&p).unwrap();
         (f, p)
     }
-    use super::*;
 
     #[test]
     fn a_delta_header_claiming_more_than_its_body_could_produce_is_refused() {

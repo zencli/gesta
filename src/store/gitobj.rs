@@ -14,7 +14,7 @@
 use crate::bad;
 use crate::ZResult;
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// The four kinds of object git stores.
@@ -361,9 +361,16 @@ impl Repo {
             return self.read_packed(hash);
         }
         let packed = std::fs::read(&path)?;
-        let mut dec = flate2::read::ZlibDecoder::new(&packed[..]);
-        let mut raw = Vec::new();
-        dec.read_to_end(&mut raw)?;
+        // Capped while inflating (#278). `read_to_end` had no ceiling, so a zlib bomb placed as a
+        // loose object grew until RAM ran out; the declared-size check below only ran after the whole
+        // stream was already in memory, which is exactly the work a bomb wants done. Loose objects are
+        // the default shape of a repository that never went through `git gc`, and the source pack of an
+        // import decides what is in them. `inflate_capped` is what `mod.rs` and `packfile.rs` already
+        // use, so this path was the odd one out rather than a new policy.
+        let raw = crate::store::inflate_capped(
+            flate2::read::ZlibDecoder::new(&packed[..]),
+            crate::store::MAX_INFLATED,
+        )?;
         let nul = raw
             .iter()
             .position(|b| *b == 0)
@@ -718,6 +725,74 @@ fn kind_code(k: &Kind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loose_object_bomb_is_refused_instead_of_inflated_without_limit() {
+        // #278: `read_object` decompressed a loose object with `read_to_end`, no ceiling, and checked
+        // the declared size only after the whole stream was in memory. A zlib bomb grew until RAM ran
+        // out; the check that was supposed to catch it ran on work already done.
+        //
+        // The fixture writes the compressed stream directly rather than through `write_object`, which
+        // computes the hash from the body it is given - a bomb has to be a file whose *content* says
+        // 2 GiB while its compressed form is small. That is exactly a hostile pack's shape.
+        let dir = std::env::temp_dir().join(format!("gesta-bomb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".git/objects")).unwrap();
+        let repo = Repo::open(&dir).expect("a directory holding .git/objects is a repository");
+
+        // A header claiming above the ceiling, then that many zeros, compressed. Deflate turns the
+        // zeros into a few megabytes, which is why the ratio is the weapon.
+        //
+        // Written in chunks: the point of the fixture is that the *file* is small, so the test must not
+        // allocate the inflated size itself. `write_all` per chunk keeps peak memory at one chunk plus
+        // the compressed output.
+        let claimed: usize = crate::store::MAX_INFLATED + 64 * 1024 * 1024;
+        let header = format!("blob {}\0", claimed).into_bytes();
+
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut packed = Vec::new();
+        {
+            let mut e = ZlibEncoder::new(&mut packed, flate2::Compression::best());
+            e.write_all(&header).unwrap();
+            let chunk = vec![0u8; 1024 * 1024];
+            let mut written = 0usize;
+            while written < claimed {
+                e.write_all(&chunk).unwrap();
+                written += chunk.len();
+            }
+            e.finish().unwrap();
+        }
+        assert!(
+            packed.len() < 32 * 1024 * 1024,
+            "the fixture must be a small file claiming a huge body, got {} bytes",
+            packed.len()
+        );
+
+        // Put it where a loose object of that name would be. The name is arbitrary: `read_object`
+        // reads the file first and validates the header later.
+        let name = "a".repeat(40);
+        let path = repo.object_path(&name).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &packed).unwrap();
+
+        let err = repo
+            .read_object(&name)
+            .expect_err("an object that inflates past the ceiling must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("inflates past") || msg.contains("decompression bomb"),
+            "the refusal must name the size problem, not something incidental: {msg}"
+        );
+        // The ceiling itself, not a claim about the declared header: the interesting case is a stream
+        // that keeps producing bytes, which is what a bomb does.
+        assert!(
+            msg.contains(&crate::store::MAX_INFLATED.to_string()),
+            "the refusal must name the ceiling it hit: {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn malformed_object_names_are_refused_before_filesystem_access() {
