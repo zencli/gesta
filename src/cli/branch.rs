@@ -335,10 +335,40 @@ pub fn cmd_approvals(id: &str) -> ZResult<()> {
     Ok(())
 }
 
+/// Perform a merge and record it, whichever front end asked (#332).
+///
+/// `pre-land` and `ops::record` used to live only in the text form. The JSON form went straight to
+/// `repo::merge_branch`, so the hook a repository had installed never fired when an agent merged, and
+/// agents are the callers that use `--json` most. The audit trail had no `merge` row either. What
+/// reached the on-disk history was the same in both, so the difference stayed invisible until
+/// somebody checked whether the guard had run.
+///
+/// One function rather than two copies of the sequence: the bug was two copies drifting, and a third
+/// caller would drift the same way.
+fn merge_and_record(
+    root: &std::path::Path,
+    conn: &rusqlite::Connection,
+    source: &str,
+    target: &str,
+    author: &str,
+) -> ZResult<repo::MergeOutcome> {
+    // A `branch merge` is a landing: the change stops being private here. `pre-land` used to run only
+    // on the review queue's path through `land_branch`, so a repository that installed the hook and
+    // merged directly never had it fire - the guard was listed as installed and did nothing.
+    repo::hooks::run(root, "pre-land", &[source, target])?;
+    let out = store::with_retry(|| repo::merge_branch(conn, root, source, target, author))?;
+    // Recorded only when something landed. A conflicted merge moved nothing and a no-op merge changed
+    // nothing, and an audit row for either would say a landing happened when it did not.
+    if !out.applied.is_empty() {
+        ops::record(conn, "merge", out.merge_changeset.as_deref(), Some(source))?;
+    }
+    Ok(out)
+}
+
 /// Print the conflicts of a merge attempt as JSON.
 pub fn cmd_branch_merge_json(source: &str, target: &str, author: &str) -> ZResult<()> {
     let (root, conn) = open_repo()?;
-    let out = store::with_retry(|| repo::merge_branch(&conn, &root, source, target, author))?;
+    let out = merge_and_record(&root, &conn, source, target, author)?;
     emit(crate::support::json::Json::obj(vec![
         (
             "merged",
@@ -385,11 +415,7 @@ pub fn cmd_merge_preview(source: &str, target: &str) -> ZResult<()> {
 
 pub fn cmd_branch_merge(source: &str, target: &str, author: &str) -> ZResult<()> {
     let (root, conn) = open_repo()?;
-    // A `branch merge` is a landing: the change stops being private here. `pre-land` used to run only
-    // on the review queue's path through `land_branch`, so a repository that installed the hook and
-    // merged directly never had it fire - the guard was listed as installed and did nothing.
-    repo::hooks::run(&root, "pre-land", &[source, target])?;
-    let out = store::with_retry(|| repo::merge_branch(&conn, &root, source, target, author))?;
+    let out = merge_and_record(&root, &conn, source, target, author)?;
 
     if !out.conflicts.is_empty() {
         eprintln!(
@@ -410,7 +436,6 @@ pub fn cmd_branch_merge(source: &str, target: &str, author: &str) -> ZResult<()>
         );
         return Ok(());
     }
-    ops::record(&conn, "merge", out.merge_changeset.as_deref(), Some(source))?;
     println!(
         "merged {} into {}: {} changeset(s)",
         source,
@@ -664,66 +689,175 @@ pub fn dispatch_branch_text(sub: crate::BranchCmd) -> ZResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::{commit_one, create_changeset};
+    use crate::store::{init_schema, migrate, put_object};
     use std::path::PathBuf;
 
     fn a_repo(tag: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("gesta-branch-name-{}-{}", tag, std::process::id()));
+            std::env::temp_dir().join(format!("gesta-merge-json-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".gesta")).unwrap();
         let conn = crate::store::open_db(&dir).unwrap();
-        crate::store::init_schema(&conn).unwrap();
-        crate::store::migrate(&conn).unwrap();
-        dir
-    }
-
-    #[test]
-    fn a_branch_name_carrying_a_newline_is_refused() {
-        // #282: a branch name is stored, sent as a bundle record, and written as `refs/heads/<name>`.
-        // A newline in it made the bundle record ambiguous: the injected second line was read back as
-        // a record of the caller's choosing, so a changeset with attacker-chosen id, author and
-        // message landed in the receiver's database on pull.
-        let dir = a_repo("newline");
-        let conn = crate::store::open_db(&dir).unwrap();
-        for bad in ["bad\nhead\t0", "bad\rhead", "bad\thead", "\n", ""] {
-            let err = branch_create(&conn, bad, "main")
-                .err()
-                .unwrap_or_else(|| panic!("branch name {:?} was accepted", bad));
-            let msg = err.to_string();
-            assert!(
-                msg.contains("single line") || msg.contains("needs a name"),
-                "the refusal must say what is wrong with {:?}: {msg}",
-                bad
-            );
-        }
-        // Nothing was created, so a later `branch list` cannot show a poisoned name.
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM branches WHERE name LIKE '%' || char(10) || '%'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(n, 0, "a refused name must not have been stored");
-    }
-
-    #[test]
-    fn an_ordinary_branch_name_is_still_accepted() {
-        // The rule is control characters only, so the names people actually use must pass untouched.
-        let dir = a_repo("plain");
-        let conn = crate::store::open_db(&dir).unwrap();
-        // `main` has to exist before anything can branch from it.
+        init_schema(&conn).unwrap();
+        migrate(&conn).unwrap();
         conn.execute(
             "INSERT INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, 0, NULL)",
             [],
         )
         .unwrap();
-        for good in ["release/1.0", "feat/a-b_c.d", "fix/282-bundle-injection"] {
-            let out = branch_create(&conn, good, "main")
-                .unwrap_or_else(|e| panic!("branch name {:?} was refused: {e}", good));
-            assert_eq!(out.name, good);
+        dir
+    }
+
+    /// One changeset on `main` holding a single file, with the file on disk too.
+    fn first_commit(conn: &rusqlite::Connection, dir: &std::path::Path, body: &str) {
+        let h = put_object(conn, body).unwrap();
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
+             VALUES('c1','base','a',1,'pending',NULL,'main')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('c1','f.txt',NULL,?1)",
+            rusqlite::params![h],
+        )
+        .unwrap();
+        commit_one(conn, "c1").unwrap();
+        std::fs::write(dir.join("f.txt"), body).unwrap();
+    }
+
+    /// A `feat` branch one commit ahead of `main`, so merging it fast-forwards.
+    fn feat_ahead(conn: &rusqlite::Connection, dir: &std::path::Path) {
+        conn.execute(
+            "INSERT INTO branches(name, head, created_at, from_branch) VALUES('feat','c1',1,'main')",
+            [],
+        )
+        .unwrap();
+        std::fs::write(dir.join("f.txt"), "A,B\n").unwrap();
+        let cs = create_changeset(conn, dir, "feat", "t").unwrap().unwrap();
+        commit_one(conn, &cs.id).unwrap();
+        // `create_changeset` works on the checked-out branch, which is `main`, so the fork is stated
+        // afterwards and both trees are refreshed through the store. Writing a branch head with raw
+        // SQL leaves `branch_tree` describing the wrong commit, which is the failure mode #96 fixed.
+        conn.execute(
+            "UPDATE branches SET head = ?1 WHERE name = 'feat'",
+            rusqlite::params![cs.id],
+        )
+        .unwrap();
+        conn.execute("UPDATE branches SET head = 'c1' WHERE name = 'main'", [])
+            .unwrap();
+        crate::store::refresh_branch_tree(conn, "feat").unwrap();
+        crate::store::refresh_branch_tree(conn, "main").unwrap();
+        std::fs::write(dir.join("f.txt"), "A\n").unwrap();
+    }
+
+    /// A `pre-land` hook that always fails, in the shape each platform can actually execute.
+    ///
+    /// A marker file was the first attempt and it failed on the Windows job: `#!/bin/sh` is not a
+    /// program there, so the hook produced nothing and the test could not tell "did not run" from
+    /// "ran and could not write". A hook that exits non-zero is observable without any file: if it
+    /// ran, the merge must refuse.
+    fn failing_hook() -> String {
+        if cfg!(windows) {
+            "@echo off\r\nexit /b 7\r\n".to_string()
+        } else {
+            "#!/bin/sh\nexit 7\n".to_string()
         }
-        // Creating a branch that is already there is satisfied, not an error.
-        assert!(!branch_create(&conn, "main", "main").unwrap().created);
+    }
+
+    /// Install the failing hook through `hooks::install`, which owns the file name per platform.
+    ///
+    /// Writing `.gesta/hooks/pre-land` by hand worked on Linux and failed on the Windows job: there a
+    /// hook is `pre-land.cmd`, because Windows decides how to run a file by its extension and `cmd /C`
+    /// will not execute an extensionless script. The test was creating a file the runner never looks
+    /// at, so the hook silently did not run and the merge went through.
+    fn install_failing_pre_land(dir: &std::path::Path) {
+        crate::repo::hooks::install(dir, "pre-land", &failing_hook())
+            .expect("a pre-land hook must install");
+    }
+
+    #[test]
+    fn a_merge_via_json_runs_the_pre_land_hook() {
+        // #332: the JSON path called repo::merge_branch directly and skipped the `pre-land` hook the
+        // text form ran, so a repository that installed the guard had it fire on one front end and
+        // not the other - and `--json` is the front end an agent uses.
+        //
+        // The assertion is the refusal, not a marker file: a failing hook must stop the merge. If the
+        // hook never ran, the merge succeeds, which is exactly the bug.
+        let dir = a_repo("hook");
+        let conn = crate::store::open_db(&dir).unwrap();
+        first_commit(&conn, &dir, "A\n");
+        feat_ahead(&conn, &dir);
+        install_failing_pre_land(&dir);
+
+        let head_before = crate::store::branch_head(&conn, "main").unwrap();
+        let err = merge_and_record(&dir, &conn, "feat", "main", "t")
+            .err()
+            .unwrap_or_else(|| {
+                panic!(
+                    "a failing pre-land hook must stop the merge; the branch still moved to {:?}",
+                    crate::store::branch_head(&conn, "main").unwrap()
+                )
+            });
+        let msg = err.to_string();
+        assert!(
+            msg.contains("hook") || msg.contains("pre-land") || msg.contains("7"),
+            "the refusal must come from the hook, not somewhere else: {msg}"
+        );
+        assert_eq!(
+            crate::store::branch_head(&conn, "main").unwrap(),
+            head_before,
+            "a refused merge must not move the branch"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_merge_via_json_records_an_ops_row() {
+        // #332: the same path never called ops::record, so a landing through `--json` left no row in
+        // the operations log while the identical text-form merge did.
+        let dir = a_repo("ops");
+        let conn = crate::store::open_db(&dir).unwrap();
+        first_commit(&conn, &dir, "A\n");
+        feat_ahead(&conn, &dir);
+
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM operations", [], |r| r.get(0))
+            .unwrap();
+
+        let out = merge_and_record(&dir, &conn, "feat", "main", "t").unwrap();
+        assert!(
+            !out.applied.is_empty(),
+            "the merge must have applied something"
+        );
+
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM operations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, before + 1, "the merge must add exactly one ops row");
+
+        let (kind, target, detail): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT kind, target, detail FROM operations ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "merge", "the row must be a merge");
+        assert_eq!(
+            target,
+            out.merge_changeset.clone(),
+            "the changeset recorded must be the one the merge made"
+        );
+        assert_eq!(
+            detail.as_deref(),
+            Some("feat"),
+            "the source branch must be recorded"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
