@@ -1731,6 +1731,20 @@ fn create_changeset_from_json(
     let branch = field(payload, "branch")
         .and_then(json::as_str)
         .unwrap_or("main");
+    // A branch name is a single line and nothing else (#282).
+    //
+    // This is the highest-value place to check it: the value comes straight from the request body,
+    // goes into `changesets.branch`, and is later written into an outgoing bundle. A newline here
+    // used to reach `Bundle::encode` and inject extra records into what a pulling client applied,
+    // including changeset rows with every field chosen by the caller. Refused at the edge so a
+    // poisoned name never reaches the store, which is the only place it can do harm.
+    if branch.is_empty() || branch.chars().any(|c| c.is_control()) {
+        return Err(ChangeErr::Bad(format!(
+            "branch {:?} is not a usable branch name: it must be non-empty and hold no control \
+             characters",
+            branch
+        )));
+    }
     // The branch scope, before anything is written (#155).
     //
     // This handler checked `permits` for every path and never checked the branch, so a token scoped

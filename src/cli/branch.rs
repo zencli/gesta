@@ -33,6 +33,28 @@ pub struct BranchCreated {
 }
 
 pub fn branch_create(conn: &Connection, name: &str, from: &str) -> ZResult<BranchCreated> {
+    // A branch name is one line and must survive every place it is written (#282).
+    //
+    // It is stored in `branches.name`, sent as a bundle record, written into a pkt-line as
+    // `refs/heads/<name>`, and printed by `ls_refs`. A name carrying a newline is representable in
+    // SQLite but not in any of those formats, and in the bundle format it is an injection: the
+    // second line is read back as a record of the attacker's choosing. Refused where the branch is
+    // created, which is the one door every writer goes through - the CLI, the HTTP create route,
+    // and anybody calling this directly.
+    //
+    // Control characters are the whole rule rather than a list, because `\n`, `\r` and `\t` all
+    // break a tab-separated record the same way, and git's own `refs/heads` rules refuse the rest
+    // of C0 anyway.
+    if name.is_empty() {
+        return Err(bad("a branch needs a name".to_string()));
+    }
+    if let Some(c) = name.chars().find(|c| c.is_control()) {
+        return Err(bad(format!(
+            "branch name {:?} holds the control character {:?}; a branch name is a single line \
+             of text, and the bundle, ref and pkt-line formats cannot carry this one",
+            name, c
+        )));
+    }
     let exists: Option<String> = conn
         .query_row(
             "SELECT name FROM branches WHERE name = ?1",
@@ -636,5 +658,72 @@ pub fn dispatch_branch_text(sub: crate::BranchCmd) -> ZResult<()> {
         }
         crate::BranchCmd::Protect { name, unset } => cmd_branch_protect(&name, unset),
         crate::BranchCmd::Conflicts { source, target } => cmd_merge_preview(&source, &target),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn a_repo(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("gesta-branch-name-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&dir).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        crate::store::migrate(&conn).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_branch_name_carrying_a_newline_is_refused() {
+        // #282: a branch name is stored, sent as a bundle record, and written as `refs/heads/<name>`.
+        // A newline in it made the bundle record ambiguous: the injected second line was read back as
+        // a record of the caller's choosing, so a changeset with attacker-chosen id, author and
+        // message landed in the receiver's database on pull.
+        let dir = a_repo("newline");
+        let conn = crate::store::open_db(&dir).unwrap();
+        for bad in ["bad\nhead\t0", "bad\rhead", "bad\thead", "\n", ""] {
+            let err = branch_create(&conn, bad, "main")
+                .err()
+                .unwrap_or_else(|| panic!("branch name {:?} was accepted", bad));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("single line") || msg.contains("needs a name"),
+                "the refusal must say what is wrong with {:?}: {msg}",
+                bad
+            );
+        }
+        // Nothing was created, so a later `branch list` cannot show a poisoned name.
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM branches WHERE name LIKE '%' || char(10) || '%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "a refused name must not have been stored");
+    }
+
+    #[test]
+    fn an_ordinary_branch_name_is_still_accepted() {
+        // The rule is control characters only, so the names people actually use must pass untouched.
+        let dir = a_repo("plain");
+        let conn = crate::store::open_db(&dir).unwrap();
+        // `main` has to exist before anything can branch from it.
+        conn.execute(
+            "INSERT INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, 0, NULL)",
+            [],
+        )
+        .unwrap();
+        for good in ["release/1.0", "feat/a-b_c.d", "fix/282-bundle-injection"] {
+            let out = branch_create(&conn, good, "main")
+                .unwrap_or_else(|e| panic!("branch name {:?} was refused: {e}", good));
+            assert_eq!(out.name, good);
+        }
+        // Creating a branch that is already there is satisfied, not an error.
+        assert!(!branch_create(&conn, "main", "main").unwrap().created);
     }
 }

@@ -110,7 +110,15 @@ impl Bundle {
     pub fn encode(&self) -> ZResult<Vec<u8>> {
         let mut s = String::new();
         s.push_str("gesta-bundle 1\n");
-        s.push_str(&format!("branch\t{}\n", self.branch));
+        // The branch is escaped like every other caller-controlled field (#282).
+        //
+        // It was the one field written raw, and `decode` splits on `lines()` and matches each line by
+        // its first tab-separated column. A branch carrying a newline therefore injects whole records:
+        // `x\nhead\t<sha>` overwrites the head (the last assignment wins) and
+        // `x\ncs\t<id>\t0\t<author>\t<message>` inserts a changeset with every field chosen by the
+        // attacker into the receiver's database on pull. The path checks at the end of decode cover
+        // `fv`, `cf` and `sn`, so a `cs` row went in unexamined.
+        s.push_str(&format!("branch\t{}\n", enc(&self.branch)));
         s.push_str(&format!(
             "head\t{}\n",
             self.head.clone().unwrap_or_else(|| "-".into())
@@ -210,11 +218,48 @@ impl Bundle {
             deltas: Vec::new(),
         };
 
+        // One branch record and one head record is the format. More than one means the framing was
+        // broken before this loop ran, and the only writer that does that is an older build putting
+        // an unescaped branch name on the wire (#282).
+        let mut branch_seen = false;
+        let mut head_seen = false;
+
         for line in lines {
             let f: Vec<&str> = line.split('\t').collect();
             match f.as_slice() {
-                ["branch", name] => b.branch = name.to_string(),
-                ["head", h] => b.head = if *h == "-" { None } else { Some(h.to_string()) },
+                // Decoded like author, message and path (#282), and checked on the RAW field first.
+                //
+                // The check has to run here rather than on the decoded value. This build escapes a
+                // newline into `\n` on the wire, and `dec_str` restores it, so a decoded branch
+                // legitimately contains a control character and a check after decoding would refuse
+                // the build's own output. What matters is whether the RAW field is a single
+                // tab-free, newline-free token: if it is, the escaping is unambiguous and the
+                // decoded value is whatever the sender meant. If it is not, an older server wrote it
+                // raw and the record framing has already been broken by the time this line is read,
+                // so it is refused instead of guessed at.
+                ["branch", name] => {
+                    if branch_seen {
+                        return Err(bad(
+                            "bundle carries more than one branch record, which no writer emits: \
+                             the framing has been broken, most likely by a branch name containing \
+                             a newline in a bundle written by an older build",
+                        ));
+                    }
+                    branch_seen = true;
+                    b.branch = dec_str(name);
+                }
+                ["head", h] => {
+                    // A second head record is how an injected branch name overwrote the head, since
+                    // the last assignment wins (#282). One head per bundle is the format.
+                    if head_seen {
+                        return Err(bad(
+                            "bundle carries more than one head record; the record framing has been \
+                             broken, most likely by an unescaped newline in a branch name",
+                        ));
+                    }
+                    head_seen = true;
+                    b.head = if *h == "-" { None } else { Some(h.to_string()) };
+                }
                 ["shallow", root] => b.shallow_root = Some(root.to_string()),
                 // A seven field row is what a bundle written before provenance existed
                 // contains, so both forms are accepted rather than refusing old archives.
@@ -929,6 +974,145 @@ mod tests {
     use crate::repo::commit_one;
     use crate::repo::tests::commit_files;
     use crate::store::tests::mem_db;
+
+    fn empty_bundle_with_branch(branch: &str) -> Bundle {
+        Bundle {
+            branch: branch.to_string(),
+            head: None,
+            changesets: Vec::new(),
+            objects: Vec::new(),
+            binaries: Vec::new(),
+            versions: Vec::new(),
+            files: Vec::new(),
+            hashes: Vec::new(),
+            shallow_root: None,
+            snapshot: Vec::new(),
+            deltas: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_branch_name_carrying_a_newline_cannot_inject_records() {
+        // #282: `branch` was the one caller-controlled field written raw into the bundle text, and
+        // decode splits on lines and matches each line by its first tab-separated column. A branch
+        // containing a newline therefore forged whole records in the receiver's database on pull.
+        //
+        // The forged head is the cheapest demonstration: the last `head` line wins, so a branch of
+        // `x\nhead\t<sha>` silently replaces the head the receiver applies.
+        let forged = "x\nhead\tdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let b = empty_bundle_with_branch(forged);
+
+        // Encoding escapes it, so what goes on the wire has one branch line and one head line only.
+        // `encode` returns zlib bytes, so the text has to be inflated before it can be read.
+        let wire = b.encode().unwrap();
+        let text = String::from_utf8(
+            crate::store::inflate_capped(ZlibDecoder::new(&wire[..]), crate::store::MAX_INFLATED)
+                .expect("encode must produce a valid zlib stream"),
+        )
+        .expect("bundle text must be UTF-8");
+        let branch_lines = text.lines().filter(|l| l.starts_with("branch\t")).count();
+        let head_lines = text.lines().filter(|l| l.starts_with("head\t")).count();
+        assert_eq!(
+            branch_lines, 1,
+            "the branch must occupy exactly one line: {text}"
+        );
+        assert_eq!(
+            head_lines, 1,
+            "an injected head record must not appear: {text}"
+        );
+
+        // And the value survives a round trip as itself, not as two records.
+        let back = Bundle::decode(&wire).expect("a bundle this build wrote must decode");
+        assert_eq!(back.branch, forged, "the escaping must be reversible");
+        assert!(
+            back.head.is_none(),
+            "the forged head must not have been taken as the bundle head: {:?}",
+            back.head
+        );
+    }
+
+    #[test]
+    fn a_bundle_from_an_old_server_with_a_multi_line_branch_is_refused() {
+        // The fix has two halves because the escape only protects bundles this build wrote. A server
+        // running an older build still writes the branch raw, so by the time `lines()` runs the
+        // branch name has already become two records.
+        //
+        // The shape of the attack matters. `encode` always writes a head line, so a branch of
+        // `x\nhead\t<chosen>` produces TWO head records: the injected one, then the real one. That
+        // is what makes the framing check sound: a legitimate bundle has exactly one of each, and
+        // the forger cannot produce a bundle that has one of each while also smuggling a record.
+        let plain = b"gesta-bundle 1\n\
+branch\tx\n\
+head\t1111111111111111111111111111111111111111\n\
+head\t2222222222222222222222222222222222222222\n\
+end\n";
+        let mut raw = Vec::new();
+        {
+            use flate2::write::ZlibEncoder;
+            use std::io::Write;
+            let mut e = ZlibEncoder::new(&mut raw, flate2::Compression::default());
+            e.write_all(plain).unwrap();
+            e.finish().unwrap();
+        }
+        let err = match Bundle::decode(&raw) {
+            Ok(b) => panic!(
+                "a bundle carrying two head records was accepted with branch {:?} and head {:?}",
+                b.branch, b.head
+            ),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("more than one head record"),
+            "the refusal must name the framing problem: {err}"
+        );
+    }
+
+    #[test]
+    fn a_forged_branch_cannot_smuggle_a_changeset_row() {
+        // The other half of #282: an injected `cs` row put a changeset with attacker-chosen id,
+        // author, message and parent into the victim's database on pull. The path checks at the end
+        // of decode cover fv/cf/sn and never looked at cs, so this went in unexamined.
+        //
+        // The duplicate-record rule does not catch it on its own - `cs` rows are many by design -
+        // which is why the branch is validated where it enters (`create_changeset_from_json`) and
+        // escaped where it leaves (`encode`). This test pins the escape so a later change cannot
+        // quietly drop it and let the row through again.
+        let forged_branch = "x\ncs\tdeadbeef\t0\tmallory\tsteal everything\t-\t-";
+        let b = empty_bundle_with_branch(forged_branch);
+        let wire = b.encode().unwrap();
+
+        // Whatever this build writes must decode back to exactly one branch and no changesets.
+        let back = Bundle::decode(&wire).expect("our own bundle must decode");
+        assert_eq!(back.branch, forged_branch);
+        assert!(
+            back.changesets.is_empty(),
+            "the escaped branch must not have become a changeset row: {} row(s)",
+            back.changesets.len()
+        );
+    }
+
+    #[test]
+    fn a_plain_branch_name_is_untouched_by_the_escape() {
+        // The escape must not change what an ordinary bundle looks like on the wire, or every
+        // existing test that inspects the text, and every old client, sees a different format.
+        for name in ["main", "release/1.0", "feat/a-b_c.d"] {
+            let b = empty_bundle_with_branch(name);
+            let wire = b.encode().unwrap();
+            let text = String::from_utf8(
+                crate::store::inflate_capped(
+                    ZlibDecoder::new(&wire[..]),
+                    crate::store::MAX_INFLATED,
+                )
+                .expect("encode must produce a valid zlib stream"),
+            )
+            .expect("bundle text must be UTF-8");
+            assert!(
+                text.contains(&format!("branch\t{}\n", name)),
+                "the branch line changed for a plain name: {text}"
+            );
+            assert_eq!(Bundle::decode(&wire).unwrap().branch, name);
+        }
+    }
 
     #[test]
     fn a_bundle_holding_a_climbing_path_is_refused_whole() {
