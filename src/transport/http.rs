@@ -2654,10 +2654,19 @@ mod tests {
                 running.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             });
         }
+        // Wait for the SLOTS, not for the workers.
+        //
+        // `spawn_bounded` releases its slot after `work()` returns, so `running` reaching 0 says the
+        // closures are done while up to 40 slots are still held by the threads that are about to
+        // release them. Reading `slots` at that moment saw 40 and failed on Windows, where the thread
+        // that decrements runs later than on Linux - the assertion was correct and the wait was not.
+        // `slots` is the thing being asserted, so it is the thing to wait on.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while running.load(std::sync::atomic::Ordering::SeqCst) > 0
-            && std::time::Instant::now() < deadline
-        {
+        loop {
+            let left = *slots.lock().unwrap_or_else(|e| e.into_inner());
+            if left == 0 || std::time::Instant::now() > deadline {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let peak = peak.load(std::sync::atomic::Ordering::SeqCst);
