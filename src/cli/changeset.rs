@@ -26,44 +26,76 @@ pub fn cmd_changeset_create_paths(
     // than what already was.
     repo::hooks::run(&root, "pre-changeset", &["changeset", &branch])?;
 
-    match store::with_retry(|| repo::create_changeset_scoped(&conn, &root, message, author, paths))?
-    {
-        None => {
-            println!(
+    let snapshot =
+        store::with_retry(|| repo::create_changeset_scoped(&conn, &root, message, author, paths))?;
+    let outcome = match &snapshot {
+        Some(cs) => SnapshotOutcome::Created(cs.id.clone()),
+        None => SnapshotOutcome::Nothing,
+    };
+    create_outcome(&branch, outcome)?;
+
+    let Some(cs) = snapshot else {
+        // `create_outcome` returned the error for this case, so reaching here is impossible today.
+        // Kept as a plain return rather than `unreachable!` so a future change to `create_outcome`
+        // degrades into "no output" instead of a panic in the middle of a repository operation.
+        return Ok(());
+    };
+    // Recorded after the row exists, because the id comes from the snapshot.
+    if session.is_some() || intent.is_some() {
+        conn.execute(
+            "UPDATE changesets SET session = ?1, intent = ?2 WHERE id = ?3",
+            rusqlite::params![session, intent, cs.id],
+        )?;
+    }
+    println!(
+        "created changeset {} ({} file(s), branch {})",
+        cs.id,
+        cs.files.len(),
+        branch
+    );
+    for (rel, old, _) in &cs.files {
+        println!("  {} {}", if old.is_none() { "A" } else { "M" }, rel);
+    }
+    for rel in &cs.deleted {
+        println!("  D {}", rel);
+    }
+    if !cs.skipped.is_empty() {
+        println!("\nskipped {} binary file(s):", cs.skipped.len());
+        for f in cs.skipped.iter().take(10) {
+            println!("  ? {}", f);
+        }
+    }
+    println!("\nnext: gesta changeset commit {}", cs.id);
+    Ok(())
+}
+
+/// What a snapshot request produced, and how the command reports it.
+///
+/// Split from the command so a test can drive the decision against a real repository: the command
+/// opens the repository from the working directory, which a test process cannot change safely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SnapshotOutcome {
+    Created(String),
+    Nothing,
+}
+
+/// The status a snapshot outcome reports, and the one line that changed for #338.
+///
+/// `Nothing` used to print a note and return `Ok(())`. A caller running twenty parallel `create` +
+/// `commit-all` pairs got exit 0 from all forty commands while only two of twenty changesets existed,
+/// because another writer had already committed the files a `create` was about to snapshot. The note
+/// went to stdout and the status said success, so the only way to notice was to count `log`
+/// afterwards. `Nothing` keeps its message and gains exit 1.
+pub(crate) fn create_outcome(branch: &str, outcome: SnapshotOutcome) -> ZResult<()> {
+    match outcome {
+        SnapshotOutcome::Created(_) => Ok(()),
+        SnapshotOutcome::Nothing => Err(Box::new(crate::error::Error::new(
+            crate::error::Code::Other,
+            format!(
                 "nothing to snapshot: working tree matches branch {}",
                 branch
-            );
-            Ok(())
-        }
-        Some(cs) => {
-            // Recorded after the row exists, because the id comes from the snapshot.
-            if session.is_some() || intent.is_some() {
-                conn.execute(
-                    "UPDATE changesets SET session = ?1, intent = ?2 WHERE id = ?3",
-                    rusqlite::params![session, intent, cs.id],
-                )?;
-            }
-            println!(
-                "created changeset {} ({} file(s), branch {})",
-                cs.id,
-                cs.files.len(),
-                branch
-            );
-            for (rel, old, _) in &cs.files {
-                println!("  {} {}", if old.is_none() { "A" } else { "M" }, rel);
-            }
-            for rel in &cs.deleted {
-                println!("  D {}", rel);
-            }
-            if !cs.skipped.is_empty() {
-                println!("\nskipped {} binary file(s):", cs.skipped.len());
-                for f in cs.skipped.iter().take(10) {
-                    println!("  ? {}", f);
-                }
-            }
-            println!("\nnext: gesta changeset commit {}", cs.id);
-            Ok(())
-        }
+            ),
+        ))),
     }
 }
 
@@ -674,5 +706,62 @@ mod find_tests {
             "cs2"
         );
         assert_eq!(changeset_for_commit(&conn, "ccccdddd").unwrap(), None);
+    }
+    #[test]
+    fn a_create_with_nothing_to_snapshot_reports_failure() {
+        // #338: a `create` that snapshotted nothing used to print a note and exit 0. Twenty parallel
+        // `create` + `commit-all` pairs reported forty successes and left two changesets. Measured on
+        // the bug: 18, 0 and 16 of twenty creates reported failure once the status was fixed,
+        // matching 2, 20 and 4 changesets in the log.
+        //
+        // `create_outcome` is the decision the command makes, called here directly: the command opens
+        // the repository from the working directory, which a test process cannot change safely.
+        let e = create_outcome("main", SnapshotOutcome::Nothing)
+            .expect_err("nothing to snapshot must not report success");
+        assert!(
+            e.to_string().contains("nothing to snapshot"),
+            "the message must still say what happened, got: {e}"
+        );
+        assert!(
+            e.to_string().contains("main"),
+            "and which branch it matched, got: {e}"
+        );
+
+        // The control: a snapshot that produced a changeset is a success, so the guard cannot pass by
+        // refusing every call.
+        create_outcome("main", SnapshotOutcome::Created("cs1234".to_string()))
+            .expect("a created changeset must be reported as success");
+    }
+
+    #[test]
+    fn a_real_repository_with_no_change_yields_no_snapshot() {
+        // The condition `create_outcome` reports on, produced by the real snapshot function rather
+        // than asserted about a value this test made up.
+        let dir = std::env::temp_dir().join(format!("gesta-cs-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&dir).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, ?1, NULL)",
+            rusqlite::params![0i64],
+        )
+        .unwrap();
+        crate::store::set_state(&conn, "current_branch", "main").unwrap();
+
+        std::fs::write(dir.join("a.txt"), b"a").unwrap();
+        let cs = crate::repo::create_changeset(&conn, &dir, "one", "alice")
+            .unwrap()
+            .expect("a written file is something to snapshot");
+        crate::repo::commit_one(&conn, &cs.id).unwrap();
+
+        let nothing =
+            crate::repo::create_changeset_scoped(&conn, &dir, "nothing", "alice", &[]).unwrap();
+        assert!(
+            nothing.is_none(),
+            "the tree matches the branch, so there is nothing to snapshot"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
