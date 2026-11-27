@@ -167,7 +167,28 @@ fn escape_into(s: &str, out: &mut String) {
 /// stays inside a default 8 MiB stack.
 pub const MAX_DEPTH: usize = 512;
 
+/// How large an input this parser will look at.
+///
+/// The parser collects the input into a `Vec<char>` before reading it, which is four bytes per
+/// character: a 10 MiB MCP line became 40 MiB of heap, and the MCP path parses one stdin line per
+/// message with nothing above it counting bytes (#299). The depth cap bounds the stack and this
+/// bounds the heap, because they are two different ways to stop the process and only one of them was
+/// capped.
+///
+/// 64 MiB is far past anything this program sends - the largest message it writes is a bundle
+/// summary - and small enough that the four-byte expansion stays inside a modest container's memory
+/// limit. The refusal names the limit so a caller can tell "too large" from "malformed".
+pub const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
+
 pub fn parse(input: &str) -> Result<Json, String> {
+    // Checked before the collect, which is the allocation the limit exists to prevent.
+    if input.len() > MAX_INPUT_BYTES {
+        return Err(format!(
+            "input is {} bytes, over the {} byte limit this parser accepts",
+            input.len(),
+            MAX_INPUT_BYTES
+        ));
+    }
     let bytes: Vec<char> = input.chars().collect();
     let mut i = 0usize;
     let v = parse_value(&bytes, &mut i, 0)?;
@@ -520,6 +541,30 @@ mod tests {
             parse(&too_deep).is_err(),
             "{} must be refused",
             MAX_DEPTH + 1
+        );
+    }
+    #[test]
+    fn an_input_over_the_limit_is_refused_before_it_is_copied() {
+        // #299: the parser collected the input into a `Vec<char>` before reading a byte of it, so a
+        // 10 MiB line became 40 MiB of heap and nothing above this layer counted bytes. The depth cap
+        // from #80 bounds the stack; this bounds the heap.
+        //
+        // The input is built at the limit rather than over it to keep the test cheap: the assertion is
+        // that the check runs BEFORE the collect, so a string one byte over is refused without the
+        // four-byte expansion happening at all.
+        let at_limit = " ".repeat(MAX_INPUT_BYTES);
+        // It parses as nothing (whitespace only is not a value), which proves the size check passed.
+        assert!(parse(&at_limit).is_err());
+        assert!(
+            !parse(&at_limit).unwrap_err().contains("over the"),
+            "an input at the limit must reach the parser, not the size check"
+        );
+
+        let over = " ".repeat(MAX_INPUT_BYTES + 1);
+        let e = parse(&over).unwrap_err();
+        assert!(
+            e.contains("over the") && e.contains(&MAX_INPUT_BYTES.to_string()),
+            "the refusal must name the limit: {e}"
         );
     }
 }

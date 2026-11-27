@@ -400,50 +400,14 @@ fn truncate(s: &str, n: usize) -> String {
     format!("{}...", cut)
 }
 
-/// A tiny glob, the same one the attribute rules use: `*` within a segment, `**` across.
+/// The shared glob, so this file and `attributes.rs` cannot drift (#300).
+///
+/// The local copy recursed afresh for every split point at each `*`, so a pattern with several stars
+/// against a long path was exponential: a committed allowlist file is attacker-controlled by a clone,
+/// which is what made the cost reachable from data rather than from an argument. The one in `paths`
+/// memoizes on `(pattern index, text index)`, which bounds the work at the product of the two lengths.
 fn glob(pattern: &str, text: &str) -> bool {
-    fn at(p: &[char], pi: usize, t: &[char], ti: usize) -> bool {
-        let mut pi = pi;
-        let mut ti = ti;
-        while pi < p.len() {
-            match p[pi] {
-                '*' => {
-                    let double = pi + 1 < p.len() && p[pi + 1] == '*';
-                    let start = if double { pi + 2 } else { pi + 1 };
-                    if double && start < p.len() && p[start] == '/' && at(p, start + 1, t, ti) {
-                        return true;
-                    }
-                    for end in ti..=t.len() {
-                        if at(p, start, t, end) {
-                            return true;
-                        }
-                        if !double && end < t.len() && t[end] == '/' {
-                            return false;
-                        }
-                    }
-                    return false;
-                }
-                '?' => {
-                    if ti >= t.len() {
-                        return false;
-                    }
-                    pi += 1;
-                    ti += 1;
-                }
-                c => {
-                    if ti >= t.len() || t[ti] != c {
-                        return false;
-                    }
-                    pi += 1;
-                    ti += 1;
-                }
-            }
-        }
-        ti == t.len()
-    }
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    at(&p, 0, &t, 0)
+    crate::support::paths::glob_match(pattern, text)
 }
 
 /// The rules shipped with the tool.

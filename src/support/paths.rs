@@ -96,6 +96,64 @@ pub fn is_git_ref_name(name: &str) -> bool {
     true
 }
 
+/// A path glob: `*` within a segment, `**` across segments, `?` one character.
+///
+/// One implementation, memoized, because three hand-written copies existed and two of them
+/// backtracked exponentially (#300). A pattern with several `*` against a long path tried every split
+/// at each star; a committed `.gitattributes` or allowlist file is attacker-controlled by a clone, so
+/// the cost was reachable from data rather than from an argument.
+///
+/// The memo is three states per `(pattern index, text index)` cell, which bounds the work at
+/// `pattern length * text length` regardless of how many stars the pattern holds. `auth.rs` already
+/// did this (#166) and the two other copies did not, which is the reason this is now the only one.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let mut memo = vec![GLOB_UNKNOWN; (p.len() + 1) * (t.len() + 1)];
+    glob_at(0, 0, &p, &t, &mut memo)
+}
+
+const GLOB_UNKNOWN: u8 = 0;
+const GLOB_NO: u8 = 1;
+const GLOB_YES: u8 = 2;
+
+fn glob_at(pi: usize, ti: usize, p: &[char], t: &[char], memo: &mut Vec<u8>) -> bool {
+    let cell = pi * (t.len() + 1) + ti;
+    if memo[cell] != GLOB_UNKNOWN {
+        return memo[cell] == GLOB_YES;
+    }
+    let answer = if pi == p.len() {
+        ti == t.len()
+    } else if p[pi] == '*' && pi + 1 < p.len() && p[pi + 1] == '*' {
+        // `**` crosses separators; the `/` in `**/x` is optional so `**/a.md` matches a top-level
+        // `a.md`, which is what every git attributes file assumes.
+        let rest = if pi + 2 < p.len() && p[pi + 2] == '/' {
+            pi + 3
+        } else {
+            pi + 2
+        };
+        let mut hit = false;
+        for skip in ti..=t.len() {
+            if glob_at(rest, skip, p, t, memo) {
+                hit = true;
+                break;
+            }
+        }
+        hit
+    } else if p[pi] == '*' {
+        // A single `*` stops at a separator. Consuming zero characters first keeps `*` matching an
+        // empty name.
+        glob_at(pi + 1, ti, p, t, memo)
+            || (ti < t.len() && t[ti] != '/' && glob_at(pi, ti + 1, p, t, memo))
+    } else if p[pi] == '?' {
+        ti < t.len() && t[ti] != '/' && glob_at(pi + 1, ti + 1, p, t, memo)
+    } else {
+        ti < t.len() && p[pi] == t[ti] && glob_at(pi + 1, ti + 1, p, t, memo)
+    };
+    memo[cell] = if answer { GLOB_YES } else { GLOB_NO };
+    answer
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +258,37 @@ mod tests {
             !is_git_ref_name(control),
             "a newline in a ref name must be refused"
         );
+    }
+
+    #[test]
+    fn a_glob_with_many_stars_finishes_instead_of_backtracking_exponentially() {
+        // #300: the hand-written copies in `leak.rs` and `attributes.rs` recursed afresh for every
+        // split point at each `*`, so a pattern with several stars against a long text was
+        // exponential. A committed `.gitattributes` or allowlist file arrives with a clone, which is
+        // what made the cost reachable from data rather than from an argument.
+        //
+        // What is asserted is that it finishes and answers, not how long it took: the memo bounds the
+        // work at `pattern length * text length`, and the previous version did not finish at all on
+        // this input within any reasonable time.
+        let text = "a/".repeat(200) + "end";
+        let pattern = "*a/*a/*a/*a/*a/*a/*a/*a/*a/*a/*a/*a/*a/*a/*a/*a/*a/*a/*a/z";
+        // The answer is false - the pattern demands a `z` - and the point is that it is returned.
+        assert!(!glob_match(pattern, &text));
+
+        // The semantics the three copies shared: `*` stays inside a segment, `**` crosses, `?` is one
+        // character, and `**/x` matches a top-level `x`.
+        assert!(glob_match("src/*.rs", "src/main.rs"));
+        assert!(
+            !glob_match("src/*.rs", "src/deep/main.rs"),
+            "a single star stops at a separator"
+        );
+        assert!(glob_match("src/**/*.rs", "src/deep/main.rs"));
+        assert!(glob_match("**/build", "build"));
+        assert!(glob_match("*.md", "README.md"));
+        assert!(!glob_match("*.md", "a/README.md"));
+        assert!(glob_match("a?c", "abc"));
+        assert!(!glob_match("a?c", "a/c"));
+        // A star matches the empty string, which is what makes `*` match a file at the root.
+        assert!(glob_match("a/*/b", "a//b"));
     }
 }

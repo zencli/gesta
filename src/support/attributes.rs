@@ -101,53 +101,11 @@ impl Matcher {
 /// A tiny glob: `*` matches within a segment, `**` crosses segments, `?` one character.
 ///
 /// Written here rather than pulled in, because the full pattern language buys nothing here and every
-/// dependency in a storage tool is a thing an operator has to trust.
+/// dependency in a storage tool is a thing an operator has to trust. The implementation is shared with
+/// `leak.rs` and `auth.rs` since #300: three memo-free copies each backtracked exponentially on a
+/// pattern with several stars, and a `.gitattributes` file arrives with a clone.
 fn glob(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    glob_at(&p, 0, &t, 0)
-}
-
-fn glob_at(p: &[char], mut pi: usize, t: &[char], mut ti: usize) -> bool {
-    while pi < p.len() {
-        match p[pi] {
-            '*' => {
-                // `**` crosses path separators, a single `*` does not.
-                let double = pi + 1 < p.len() && p[pi + 1] == '*';
-                let start = if double { pi + 2 } else { pi + 1 };
-                // A `**/` at the start also matches nothing at all, which is what makes
-                // `**/build` match `build`.
-                if double && start < p.len() && p[start] == '/' && glob_at(p, start + 1, t, ti) {
-                    return true;
-                }
-                for end in ti..=t.len() {
-                    if glob_at(p, start, t, end) {
-                        return true;
-                    }
-                    // A single star never swallows a separator.
-                    if !double && end < t.len() && t[end] == '/' {
-                        return false;
-                    }
-                }
-                return false;
-            }
-            '?' => {
-                if ti >= t.len() || t[ti] == '/' {
-                    return false;
-                }
-                pi += 1;
-                ti += 1;
-            }
-            c => {
-                if ti >= t.len() || t[ti] != c {
-                    return false;
-                }
-                pi += 1;
-                ti += 1;
-            }
-        }
-    }
-    ti == t.len()
+    crate::support::paths::glob_match(pattern, text)
 }
 
 /// The rules a repository carries, in the order they were written.
