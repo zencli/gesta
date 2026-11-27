@@ -614,18 +614,61 @@ pub fn split_push(body: &[u8]) -> ZResult<(Vec<PushCommand>, Vec<u8>)> {
     Ok((commands, body[i..].to_vec()))
 }
 
-/// Answer `git-receive-pack`: take the objects, make them changesets, move the refs.
-///
-/// The pack is unpacked by git into a scratch bare repository and then read through the same import
-/// path a `git import` uses. Writing a second reader for a pack that arrives over the wire would be
-/// a second implementation to keep in step with the first, and the first difference between them
-/// shows up as a push that reports success and a branch that did not move.
-/// Answer `git-receive-pack`.
-///
-/// `allowed`, when given, is which branches this caller may write. Returning false for a ref rejects
-/// that ref and leaves the others alone, which is what a push naming three refs expects when one of
-/// them is not its business. The pack is still unpacked: refusing the whole transfer would let one
-/// forbidden branch hide the objects the permitted ones need.
+// Put a branch back to where it was before a push, and say what could not be done (#271).
+//
+// Three refusals in `receive_pack_scoped` reported `ng` and left the branch where the import had
+// moved it: the branch scope, the path scope, and the stale `old` value. Only the approval refusal
+// rolled anything back, and the comment on the path-scope refusal claimed it did "the same rollback
+// a refused branch uses", which was the one thing it did not do. The result was a client told
+// `! [remote rejected]` while the server kept the refused commit - the outcome a version control
+// server must never produce.
+//
+// One function rather than four copies: the shapes differ only in whether the branch existed before,
+// and copies of a rollback are how they came to disagree in the first place.
+//
+// Every failure is collected. A rollback that fails silently is worse than no rollback, because the
+// report can then say the branch may have moved instead of pretending it did not.
+fn rollback_branch(
+    conn: &rusqlite::Connection,
+    before: &[(String, Option<String>, Option<String>)],
+    branch: &str,
+) -> Vec<String> {
+    let mut errs = Vec::new();
+    let had = before
+        .iter()
+        .find(|(b, _, _)| b == branch)
+        .and_then(|(_, _, id)| id.clone());
+    match had {
+        Some(prev) => {
+            if let Err(e) = crate::store::set_branch_head(conn, branch, &prev) {
+                errs.push(format!("restore head: {}", e));
+            }
+            // The tree must follow the head. Restoring the head alone leaves `branch_tree`
+            // describing the refused commit, so `status` reports every file of that commit as
+            // a local change - a branch whose tree contradicts its own head.
+            if let Err(e) = crate::store::refresh_branch_tree(conn, branch) {
+                errs.push(format!("restore tree: {}", e));
+            }
+        }
+        // The push created the branch, so undoing the creation is the rollback.
+        None => {
+            if let Err(e) = conn.execute(
+                "DELETE FROM branches WHERE name = ?1",
+                rusqlite::params![branch],
+            ) {
+                errs.push(format!("drop branch: {}", e));
+            }
+            if let Err(e) = conn.execute(
+                "DELETE FROM branch_tree WHERE branch = ?1",
+                rusqlite::params![branch],
+            ) {
+                errs.push(format!("drop tree: {}", e));
+            }
+        }
+    }
+    errs
+}
+
 pub fn receive_pack_scoped(
     root: &std::path::Path,
     body: &[u8],
@@ -916,13 +959,22 @@ pub fn receive_pack_scoped(
             // same push still apply.
             if let Some(permitted) = allowed {
                 if !permitted(&branch) {
-                    out.extend_from_slice(
-                        pkt_line(
-                            format!("ng {} this token may not write that branch\n", c.name)
-                                .as_bytes(),
+                    // The import moved this branch before the check ran, so a refusal that only sends
+                    // `ng` leaves the token-scoped-out commit on the branch (#271).
+                    rollback_errors = rollback_branch(&conn, &before, &branch);
+                    let reason = if rollback_errors.is_empty() {
+                        "this token may not write that branch".to_string()
+                    } else {
+                        format!(
+                            "this token may not write that branch (and the branch could not be put \
+                             back: {})",
+                            rollback_errors.join("; ")
                         )
-                        .as_slice(),
+                    };
+                    out.extend_from_slice(
+                        pkt_line(format!("ng {} {}\n", c.name, reason).as_bytes()).as_slice(),
                     );
+                    crate::support::audit::local::push_refused(root, &branch, pusher, &reason);
                     continue;
                 }
             }
@@ -973,24 +1025,30 @@ pub fn receive_pack_scoped(
                         },
                         None,
                     );
-                    // Put the branch back, otherwise the client reads `ng` while the branch has moved.
-                    if let Some((_, _, Some(head))) = before.iter().find(|(b, _, _)| b == &branch) {
-                        let _ = conn.execute(
-                            "UPDATE branches SET head = ?1 WHERE name = ?2",
-                            rusqlite::params![head, branch],
-                        );
-                    }
-                    out.extend_from_slice(
-                        pkt_line(
+                    // The shared rollback, not a bare `UPDATE branches SET head` (#271).
+                    //
+                    // That statement moved the head and left `branch_tree` describing the refused
+                    // commit, so the branch's tree contradicted its own head and every file of the
+                    // refused commit read as a local change. It also covered only a branch that
+                    // existed before: on a new branch the import's creation was never undone. And the
+                    // error was discarded with `let _ =`, so a rollback that failed left the branch
+                    // moved while the client was told it had been refused.
+                    rollback_errors = rollback_branch(&conn, &before, &branch);
+                    let reason = format!(
+                        "this token may not write {} ({} of the pushed files are outside its path scope){}",
+                        outside.first().map(|s| s.as_str()).unwrap_or(""),
+                        outside.len(),
+                        if rollback_errors.is_empty() {
+                            String::new()
+                        } else {
                             format!(
-                                "ng {} this token may not write {} ({} of the pushed files are outside its path scope)\n",
-                                c.name,
-                                outside.first().map(|s| s.as_str()).unwrap_or(""),
-                                outside.len()
+                                " (and the branch could not be put back: {})",
+                                rollback_errors.join("; ")
                             )
-                            .as_bytes(),
-                        )
-                        .as_slice(),
+                        }
+                    );
+                    out.extend_from_slice(
+                        pkt_line(format!("ng {} {}\n", c.name, reason).as_bytes()).as_slice(),
                     );
                     continue;
                 }
@@ -1135,16 +1193,26 @@ pub fn receive_pack_scoped(
                     .and_then(|(_, sha, _)| sha.clone());
                 if let Some(was) = was {
                     if was != c.old {
-                        out.extend_from_slice(
-                            pkt_line(
-                                format!(
-                                    "ng {} the branch moved on the server since the client last fetched\n",
-                                    c.name
-                                )
-                                .as_bytes(),
+                        // The import already moved the branch to the stale push's commit, so refusing
+                        // without a rollback kept the commit the client was told had been rejected
+                        // (#271). Newer server work then fell off the branch: its changesets are still
+                        // in the store, but nothing points at them, so the branch silently lost
+                        // history that the server had accepted a moment earlier.
+                        rollback_errors = rollback_branch(&conn, &before, &branch);
+                        let reason = if rollback_errors.is_empty() {
+                            "the branch moved on the server since the client last fetched"
+                                .to_string()
+                        } else {
+                            format!(
+                                "the branch moved on the server since the client last fetched (and \
+                                 the branch could not be put back: {})",
+                                rollback_errors.join("; ")
                             )
-                            .as_slice(),
+                        };
+                        out.extend_from_slice(
+                            pkt_line(format!("ng {} {}\n", c.name, reason).as_bytes()).as_slice(),
                         );
+                        crate::support::audit::local::push_refused(root, &branch, pusher, &reason);
                         continue;
                     }
                 }
@@ -1575,6 +1643,131 @@ mod tests {
             left,
             vec!["keep".to_string(), "main".to_string()],
             "gone must be deleted"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_refused_push_puts_an_existing_branch_back_head_and_tree() {
+        // #271 (a) and (b): the branch scope and the path scope sent `ng` and left the branch at the
+        // commit the import had just moved it to. The tree was the worse half: the path-scope path ran
+        // a bare `UPDATE branches SET head`, so `branch_tree` still described the refused commit and
+        // every file of it read as a local change.
+        let d = std::env::temp_dir().join(format!("gesta-rb-existing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&d).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, 0, NULL)",
+            [],
+        )
+        .unwrap();
+
+        std::fs::write(d.join("a.txt"), "one\n").unwrap();
+        let good = crate::repo::create_changeset(&conn, &d, "good", "t")
+            .unwrap()
+            .unwrap();
+        crate::repo::commit_one(&conn, &good.id).unwrap();
+
+        // How the branch looked before the refused push.
+        let before: Vec<(String, Option<String>, Option<String>)> =
+            vec![("main".to_string(), None, Some(good.id.clone()))];
+
+        // What the import did: move the branch onto a commit the token may not write.
+        std::fs::write(d.join("a.txt"), "one\nrefused\n").unwrap();
+        let bad = crate::repo::create_changeset(&conn, &d, "refused", "t")
+            .unwrap()
+            .unwrap();
+        crate::repo::commit_one(&conn, &bad.id).unwrap();
+        assert_eq!(
+            crate::store::branch_head(&conn, "main").unwrap().as_deref(),
+            Some(bad.id.as_str()),
+            "the fixture must reproduce the state a refusal finds: the import already moved the branch"
+        );
+
+        let errs = rollback_branch(&conn, &before, "main");
+        assert!(errs.is_empty(), "the rollback must succeed: {errs:?}");
+
+        assert_eq!(
+            crate::store::branch_head(&conn, "main").unwrap().as_deref(),
+            Some(good.id.as_str()),
+            "the head must be back where it was"
+        );
+        // The half the bare UPDATE got wrong: the tree has to follow the head.
+        let tree = crate::repo::committed_tree(&conn, "main").unwrap();
+        assert_eq!(
+            tree.keys().cloned().collect::<Vec<_>>(),
+            vec!["a.txt".to_string()],
+            "the tree must describe the restored head, not the refused commit"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_refused_push_to_a_new_branch_leaves_no_branch_behind() {
+        // #271 (b) on a new branch: `before.head` was None and nothing was rolled back at all, so the
+        // import's own branch creation survived the refusal. A token scoped to `main` could create a
+        // `release` branch pointing at a commit it was never allowed to write.
+        let d = std::env::temp_dir().join(format!("gesta-rb-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&d).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, 0, NULL)",
+            [],
+        )
+        .unwrap();
+
+        std::fs::write(d.join("a.txt"), "one\n").unwrap();
+        let cs = crate::repo::create_changeset(&conn, &d, "one", "t")
+            .unwrap()
+            .unwrap();
+        crate::repo::commit_one(&conn, &cs.id).unwrap();
+
+        // `sneaky` is what the import created for a ref this push may not write.
+        conn.execute(
+            "INSERT INTO branches(name, head, created_at, from_branch) VALUES('sneaky', ?1, 0, 'main')",
+            rusqlite::params![cs.id],
+        )
+        .unwrap();
+        crate::store::refresh_branch_tree(&conn, "sneaky").unwrap();
+        // `before` has no entry for it, which is how the refusal knows the push created it.
+        let before: Vec<(String, Option<String>, Option<String>)> =
+            vec![("main".to_string(), None, Some(cs.id.clone()))];
+
+        let errs = rollback_branch(&conn, &before, "sneaky");
+        assert!(
+            errs.is_empty(),
+            "dropping a created branch must succeed: {errs:?}"
+        );
+
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM branches WHERE name = 'sneaky'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            left, 0,
+            "a branch the refused push created must not survive it"
+        );
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM branch_tree WHERE branch = 'sneaky'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "and neither must its tree rows");
+        // The branch that existed before is untouched.
+        assert_eq!(
+            crate::store::branch_head(&conn, "main").unwrap().as_deref(),
+            Some(cs.id.as_str())
         );
 
         let _ = std::fs::remove_dir_all(&d);
