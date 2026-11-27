@@ -17,20 +17,50 @@ use crate::ZResult;
 use std::io::Write;
 use std::path::Path;
 
+/// A temp name no two calls in one process can pick at the same time (#292).
+///
+/// The name was `path.tmp-<pid>`, identical for every call in a process. Two threads replacing the
+/// same credential raced, and the loser's `create_new` failed with `AlreadyExists` for an operation
+/// that was perfectly doable. Worse, a call that died between creating the temp and the rename left
+/// the file behind, and every later replace failed the same way until somebody deleted it by hand -
+/// a credential store that cannot rewrite itself.
+///
+/// A counter closes it inside one process, which is where the collision was: the pid was already in
+/// the name for the cross-process case, and `create_new` still refuses a second process. A thread id
+/// would not be enough, because one thread can call twice and the second call may start before the
+/// first renames.
+fn temp_path_for(path: &Path) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let mut tmp = path.to_path_buf();
+    tmp.set_extension(format!("tmp-{}-{}", std::process::id(), n));
+    tmp
+}
+
 /// Write `contents` to `path`, readable only by the current user.
 ///
-/// Creates the file with mode 0600 when it does not exist. An existing file keeps the mode it had,
-/// which is deliberate: tightening a file the caller did not create is a different decision, and
-/// `token rotate` rewrites a file that `token add` should already have tightened.
+/// Creates the file with mode 0600 when it does not exist, and tightens an existing one to 0600 as
+/// well (#293).
+///
+/// The old doc said an existing file keeps the mode it had, on the reasoning that tightening a file
+/// the caller did not create is a different decision. The effect was a `.gesta/auth` or TLS key left
+/// at 0644 by an older build staying readable by every user on the machine while being rewritten by
+/// this program - the one file whose whole purpose is to be private, and `mode()` does nothing once
+/// the file exists. Refusing instead would strand those stores; tightening is the outcome the caller
+/// asked for by calling a function named `write_private`.
 #[cfg(unix)]
 pub fn write_private(path: &Path, contents: &[u8]) -> ZResult<()> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(path)?;
+    // `mode` above only applies at creation. Set it after opening, on the descriptor's file, so a
+    // pre-existing 0644 file is fixed rather than left alone.
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     f.write_all(contents)?;
     f.sync_all()?;
     Ok(())
@@ -101,8 +131,7 @@ pub fn write_new_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 #[cfg(unix)]
 pub fn replace_private(path: &Path, contents: &[u8]) -> ZResult<()> {
     use std::os::unix::fs::OpenOptionsExt;
-    let mut tmp = path.to_path_buf();
-    tmp.set_extension(format!("tmp-{}", std::process::id()));
+    let tmp = temp_path_for(path);
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -123,8 +152,7 @@ pub fn replace_private(path: &Path, contents: &[u8]) -> ZResult<()> {
 
 #[cfg(not(unix))]
 pub fn replace_private(path: &Path, contents: &[u8]) -> ZResult<()> {
-    let mut tmp = path.to_path_buf();
-    tmp.set_extension(format!("tmp-{}", std::process::id()));
+    let tmp = temp_path_for(path);
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -150,6 +178,79 @@ pub fn replace_private(path: &Path, contents: &[u8]) -> ZResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn two_replaces_of_one_path_do_not_collide_on_the_temp_name() {
+        // #292: the temp name was `path.tmp-<pid>`, identical for every call in a process. Two
+        // concurrent replaces of one credential raced and the loser failed `AlreadyExists` for an
+        // operation that was perfectly doable. A temp left behind by a call that died before renaming
+        // made every later replace fail the same way - a credential store that could not rewrite
+        // itself until somebody deleted the file by hand.
+        //
+        // The stale case needs no threads and is the one that hurts most, so it is what this asserts.
+        let dir = std::env::temp_dir().join(format!("gesta-private-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth");
+
+        // The exact name the pid-only scheme used for this path.
+        let stale = dir.join(format!("auth.tmp-{}", std::process::id()));
+        std::fs::write(&stale, b"leftover-from-a-dead-call").unwrap();
+
+        replace_private(&path, b"first")
+            .expect("a leftover temp from a dead call must not stop a later replace");
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+
+        // The operation is repeatable, which the pid-only name also forbade once the first call had
+        // not yet renamed.
+        replace_private(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_private_tightens_a_file_that_already_exists() {
+        // #293: `mode(0o600)` only applies when the file is created, so a `.gesta/auth` written by an
+        // older build at 0644 stayed 0644 while this program kept rewriting it - the one file whose
+        // whole purpose is to be private.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("gesta-private-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth");
+
+        // An existing file at 0644, as an older build left it.
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "the fixture must start at 0644"
+        );
+
+        write_private(&path, b"new").unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "an existing file must be tightened to 0600, not left readable by others"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+
+        // A file created fresh is 0600 too, which the old code already did.
+        let fresh = dir.join("fresh");
+        write_private(&fresh, b"x").unwrap();
+        assert_eq!(
+            std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_written_file_is_readable_only_by_its_owner() {
@@ -238,8 +339,19 @@ mod tests {
         replace_private(&path, b"keep").unwrap();
 
         // A directory where the temp file wants to be makes the open fail.
-        let blocker = dir.join(format!("store.tmp-{}", std::process::id()));
-        std::fs::create_dir_all(&blocker).unwrap();
+        //
+        // The name now carries a counter (#292), so a fixture cannot guess it. Blocking a RANGE of
+        // upcoming names is the honest version: the counter is global and other tests advance it, so
+        // the next value is not knowable from here. The blocker that matches is the one the call
+        // tried; the rest are removed with the directory.
+        let mut blocked = 0usize;
+        for n in 0..256usize {
+            let blocker = dir.join(format!("store.tmp-{}-{}", std::process::id(), n));
+            if std::fs::create_dir_all(&blocker).is_ok() {
+                blocked += 1;
+            }
+        }
+        assert!(blocked > 0, "the fixture must create at least one blocker");
         let e = replace_private(&path, b"new").unwrap_err();
         let _ = e;
         assert_eq!(
@@ -247,6 +359,7 @@ mod tests {
             b"keep",
             "the old content must survive a failed replace"
         );
+        // The failed call removed its own temp, so no directory was created where a file belongs.
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
