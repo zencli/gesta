@@ -85,6 +85,20 @@ def sh_out(cmd, cwd=ZF_DIR, timeout=900):
     return r.returncode, r.stdout.strip()
 
 
+# A backup is sealed, so every command that writes, checks or reads one needs the passphrase (#340).
+BACKUP_PASS = "gate-backup-passphrase"
+
+
+def sh_sealed(cmd, cwd=ZF_DIR, timeout=900):
+    """Run a backup or restore command with the passphrase set, which they now require."""
+    import os as _os
+    env = dict(_os.environ)
+    env["GESTA_BACKUP_PASSPHRASE"] = BACKUP_PASS
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=cwd,
+                       timeout=timeout, env=env)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
 def zf_repo_view():
     """A repository over this project's files, for the checks that need one.
 
@@ -3933,7 +3947,7 @@ def main():
         sh(f"{ZF} branch switch main", cwd=d)
 
         snap = os.path.join(d, "snap.db")
-        r = sh(f"{ZF} backup {snap}", cwd=d)
+        r = sh_sealed(f"{ZF} backup {snap}", cwd=d)
         record("a backup is written", os.path.exists(snap) and r[0] == 0, r[1].strip()[:200])
         record(
             "and it carries the branches and tags a bundle does not",
@@ -3941,7 +3955,7 @@ def main():
             r[1].strip()[:200],
         )
 
-        v = sh(f"{ZF} verify-backup {snap}", cwd=d)
+        v = sh_sealed(f"{ZF} verify-backup {snap}", cwd=d)
         record(
             "and the file verifies on its own",
             "is readable" in v[1] and "1 tag(s)" in v[1],
@@ -3957,14 +3971,14 @@ def main():
         sh(f"{ZF} init", cwd=d)
 
         # A restore replaces the store, so it has to ask first.
-        asked = sh(f"{ZF} restore-repo {snap}", cwd=d)
+        asked = sh_sealed(f"{ZF} restore-repo {snap}", cwd=d)
         record(
             "a restore says what it would replace unless told to proceed",
             "Pass --yes" in asked[1],
             asked[1].strip()[:200],
         )
 
-        r2 = sh(f"{ZF} restore-repo {snap} --yes", cwd=d)
+        r2 = sh_sealed(f"{ZF} restore-repo {snap} --yes", cwd=d)
         record("a restore installs the backup", r2[0] == 0, r2[1].strip()[:200])
 
         log = sh(f"{ZF} log --oneline", cwd=d)[1]
@@ -4002,14 +4016,14 @@ def main():
             cwd=d,
         )
         _tmpb.sleep(0.15)
-        live_report = sh(f"{ZF} backup {live}", cwd=d)
+        live_report = sh_sealed(f"{ZF} backup {live}", cwd=d)
         writer.wait(timeout=120)
         record(
             "a backup succeeds while the repository is being written",
             live_report[0] == 0 and os.path.exists(live),
             live_report[1].strip()[:200],
         )
-        live_check = sh(f"{ZF} verify-backup {live}", cwd=d)
+        live_check = sh_sealed(f"{ZF} verify-backup {live}", cwd=d)
         record(
             "and the live backup verifies",
             "is readable" in live_check[1],

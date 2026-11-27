@@ -561,6 +561,51 @@ pub fn cmd_checkout(file: Option<&str>, changeset: Option<&str>) -> ZResult<()> 
 pub fn cmd_restore_repo(file: &str, yes: bool) -> ZResult<()> {
     let (root, conn) = open_repo()?;
     let path = std::path::PathBuf::from(file);
+
+    // A sealed backup is unsealed to a private temporary file first (#340).
+    //
+    // `backup` now writes a sealed container, so this command reads one. It used to open the named
+    // file directly as SQLite, which was correct only while backups were plain - and a sealed file
+    // handed to SQLite is "file is not a database", which is the message a person sees while trying to
+    // recover from a backup they cannot read.
+    //
+    // The detection is the magic, not a flag: a file that starts with `gesta-backup-v1` is sealed and
+    // needs a passphrase, and an older plain backup still restores without one.
+    let named = path.clone();
+    let raw = std::fs::read(&path)?;
+    let sealed = raw.starts_with(crate::support::backup_remote::MAGIC.as_bytes());
+    let _keep_alive;
+    let path = if sealed {
+        let pass = match crate::cli::secret_not_in_argv(
+            None,
+            "GESTA_BACKUP_PASSPHRASE",
+            "backup passphrase: ",
+            false,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(Box::new(crate::support::error::Error::new(
+                    crate::support::error::Code::Usage,
+                    format!("this backup is sealed, so restoring it needs its passphrase: {e}"),
+                )));
+            }
+        };
+        let plain = crate::support::backup_remote::unseal(&raw, &pass)?;
+        let temp = std::env::temp_dir().join(format!(
+            "gesta-restore-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        crate::support::private_file::write_private(&temp, &plain)?;
+        _keep_alive = temp.clone();
+        temp
+    } else {
+        _keep_alive = path.clone();
+        path.clone()
+    };
     let c = crate::support::backup::verify(&path)?;
     let here = crate::support::backup::contents(&conn)?;
 
@@ -573,20 +618,24 @@ pub fn cmd_restore_repo(file: &str, yes: bool) -> ZResult<()> {
                 "this replaces {} change(s) here with {} from {}. Pass --yes to do it",
                 here.changesets,
                 c.changesets,
-                path.display()
+                named.display()
             ),
         )));
     }
 
     drop(conn);
     let restored = crate::support::backup::restore(&root, &path)?;
+    if sealed {
+        // The unsealed copy is the whole history in the clear; it does not outlive the command.
+        let _ = std::fs::remove_file(&_keep_alive);
+    }
     println!(
         "restored {} change(s), {} object(s), {} branch(es), {} tag(s) from {}",
         restored.changesets,
         restored.objects,
         restored.branches,
         restored.tags,
-        path.display()
+        named.display()
     );
     Ok(())
 }

@@ -35,7 +35,47 @@ fn unseal_to_private_temp(plain: &[u8]) -> ZResult<std::path::PathBuf> {
 pub fn cmd_backup(dest: &str, json: bool) -> ZResult<()> {
     let (_root, conn) = open_repo()?;
     let path = std::path::PathBuf::from(dest);
-    let report = crate::support::backup::backup(&conn, &path)?;
+
+    // Sealed, the same way `backup-remote` seals (#340).
+    //
+    // This wrote plain SQLite and accepted `GESTA_BACKUP_PASSPHRASE` without reading it: three runs
+    // with no passphrase, one value and another value produced byte-identical files, and every blob
+    // the repository held - including a credential committed by mistake - sat inside in the clear.
+    // `backup-remote` builds exactly this plain file and then seals it before it leaves the machine,
+    // so the unprotected copy was the one handed to the user directly.
+    //
+    // The plain file is built first because `support::backup::backup` produces it and the sealed form
+    // is that file's bytes; the plain file is removed as soon as the sealed one has replaced it, so no
+    // window exists where an unsealed copy is on disk under the destination name.
+    let pass = match crate::cli::secret_not_in_argv(
+        None,
+        "GESTA_BACKUP_PASSPHRASE",
+        "backup passphrase: ",
+        true,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(Box::new(crate::error::Error::new(
+                crate::error::Code::Usage,
+                format!(
+                    "a backup must be sealed, so it needs a passphrase: {}. An unencrypted copy of \
+                     the whole history is a disclosure, not a backup.",
+                    e
+                ),
+            )));
+        }
+    };
+    let plain = path.with_extension("gesta-plain");
+    let report = crate::support::backup::backup(&conn, &plain)?;
+    let bytes = std::fs::read(&plain)?;
+    let sealed = crate::support::backup_remote::seal(bytes, &pass)?;
+    let _ = std::fs::remove_file(&plain);
+    crate::support::private_file::replace_private(&path, &sealed)?;
+    let report = crate::support::backup::BackupReport {
+        path: path.clone(),
+        bytes: sealed.len() as u64,
+        ..report
+    };
     if json {
         let doc = crate::support::json::Json::obj(vec![
             ("schema", crate::support::json::Json::str("gesta@1")),
@@ -72,11 +112,42 @@ pub fn cmd_backup(dest: &str, json: bool) -> ZResult<()> {
 
 /// Check a backup file. Reads only the file, so it is safe to run against a repository in use.
 pub fn cmd_verify_backup(file: &str) -> ZResult<()> {
-    let path = std::path::PathBuf::from(file);
+    let named = std::path::PathBuf::from(file);
+    // A sealed backup is unsealed to a private temporary file first (#340). `backup` writes a sealed
+    // container now, so a verifier that opened the named file as SQLite answered "file is not a
+    // database" for every backup this build makes - including on the path a person takes when they are
+    // trying to find out whether the backup they are holding is any good.
+    let raw = std::fs::read(&named)?;
+    let sealed = raw.starts_with(crate::support::backup_remote::MAGIC.as_bytes());
+    let temp = if sealed {
+        let pass = crate::cli::secret_not_in_argv(
+            None,
+            "GESTA_BACKUP_PASSPHRASE",
+            "backup passphrase: ",
+            false,
+        )?;
+        let plain = crate::support::backup_remote::unseal(&raw, &pass)?;
+        let t = std::env::temp_dir().join(format!(
+            "gesta-verify-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        crate::support::private_file::write_private(&t, &plain)?;
+        Some(t)
+    } else {
+        None
+    };
+    let path = temp.clone().unwrap_or_else(|| named.clone());
     let c = crate::support::backup::verify(&path)?;
+    if let Some(t) = &temp {
+        let _ = std::fs::remove_file(t);
+    }
     println!(
         "{} is readable: {} change(s), {} object(s), {} branch(es), {} tag(s), {} version(s), {} blame range(s)",
-        path.display(),
+        named.display(),
         c.changesets,
         c.objects,
         c.branches,

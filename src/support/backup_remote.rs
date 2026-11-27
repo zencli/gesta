@@ -22,7 +22,10 @@
 use crate::transport::s3::S3Config;
 use crate::{bad, ZResult};
 
-const MAGIC: &str = "gesta-backup-v1";
+/// Public because a reader has to tell a sealed backup from a plain one without a flag: the magic in
+/// the first bytes is the whole signal, and `restore-repo` checks it before deciding whether to ask
+/// for a passphrase.
+pub const MAGIC: &str = "gesta-backup-v1";
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 

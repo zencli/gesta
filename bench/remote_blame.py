@@ -41,7 +41,11 @@ def record(name, ok, detail=""):
 
 
 def sh(args, cwd, timeout=300):
-    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    # A backup is sealed, so the commands that write or read one need the passphrase (#340).
+    env = dict(os.environ)
+    env["GESTA_BACKUP_PASSPHRASE"] = "blame-bench-passphrase"
+    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                          env=env)
 
 
 def free_port():

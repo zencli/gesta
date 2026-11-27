@@ -565,4 +565,44 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&d);
     }
+    #[test]
+    fn a_sealed_backup_holds_no_plaintext_and_needs_its_passphrase() {
+        // #340: `gesta backup` ignored GESTA_BACKUP_PASSPHRASE and wrote plain SQLite, so three runs
+        // with no passphrase, one value and another value produced byte-identical files, and a
+        // credential committed by mistake sat inside in the clear. `backup-remote` sealed the same
+        // file before it left the machine, so the unprotected copy was the one handed to the user.
+        //
+        // What is asserted is the property, not the call: a sealed container starts with the magic,
+        // contains none of the secret bytes, differs between two passphrases, and unseals to the exact
+        // bytes that were sealed.
+        let secret = b"TOKEN-BI-MAT-XYZ789";
+        let plain = {
+            let mut v = b"SQLite format 3\0".to_vec();
+            v.extend_from_slice(secret);
+            v.resize(4096, 0);
+            v
+        };
+
+        let a = crate::support::backup_remote::seal(plain.clone(), "pw123456").unwrap();
+        let b = crate::support::backup_remote::seal(plain.clone(), "pw999999").unwrap();
+
+        assert!(
+            a.starts_with(crate::support::backup_remote::MAGIC.as_bytes()),
+            "a sealed file must announce itself, so a reader needs no flag to tell"
+        );
+        assert_ne!(a, b, "two passphrases must produce two different files");
+        assert!(
+            !a.windows(secret.len()).any(|w| w == secret),
+            "the secret must not appear in the sealed bytes"
+        );
+        assert_eq!(
+            crate::support::backup_remote::unseal(&a, "pw123456").unwrap(),
+            plain,
+            "sealing must be reversible byte for byte"
+        );
+        assert!(
+            crate::support::backup_remote::unseal(&a, "wrong").is_err(),
+            "a wrong passphrase must not open it"
+        );
+    }
 }

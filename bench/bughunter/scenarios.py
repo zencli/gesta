@@ -42,6 +42,9 @@ class LocalScenarios(unittest.TestCase):
             "LC_ALL": "C.UTF-8",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0",
+            # A backup is sealed, so the backup scenarios need a passphrase (#340). It is a fixture
+            # value in a throwaway HOME, not a real credential.
+            "GESTA_BACKUP_PASSPHRASE": "bughunter-fixture-passphrase",
         }
         self.ok("init")
         self.tracked = self.repo / "tracked.txt"
