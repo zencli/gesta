@@ -236,6 +236,13 @@ pub fn create_changeset(
 /// A snapshot of the whole tree is one writer's answer. Two agents working in one checkout need
 /// theirs separated, or each records the other's files under its own name. A path matches when it is
 /// the path, or when it is a parent of it, so naming a directory covers what is under it.
+/// One file a snapshot is about to record.
+///
+/// `text` is `None` when the bytes were already written to the store from the file itself - the binary
+/// arm does that, because a binary body is not text. `Some("")` is a real empty text file, whose object
+/// is the empty blob and is referenced by `new_hash`, so it must still be stored (#343).
+type SnapshotChange = (String, Option<String>, String, Option<String>, String);
+
 pub fn create_changeset_scoped(
     conn: &Connection,
     root: &Path,
@@ -259,7 +266,7 @@ pub fn create_changeset_scoped(
     let rules = load_ignore_rules(root, conn)?;
     let scope = crate::store::sparse::SparseScope::load(conn)?;
 
-    let mut changes: Vec<(String, Option<String>, String, String, String)> = Vec::new();
+    let mut changes: Vec<SnapshotChange> = Vec::new();
     let mut deleted: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -303,7 +310,7 @@ pub fn create_changeset_scoped(
                 // Could be a binary file or a cache hit. Read the bytes and
                 // classify.
                 match crate::store::walk::read_file(&root.join(&f.rel)) {
-                    crate::store::walk::ReadOutcome::Text(c) => c,
+                    crate::store::walk::ReadOutcome::Text(c) => Some(c),
                     crate::store::walk::ReadOutcome::Binary => {
                         // A symlink's body is its target name, which reading the path cannot
                         // produce - the open follows the link, so a dangling or non-UTF-8 target
@@ -330,12 +337,12 @@ pub fn create_changeset_scoped(
                                 std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0),
                             )?;
                         }
-                        String::new()
+                        None
                     }
                     _ => continue,
                 }
             } else {
-                f.content
+                Some(f.content)
             };
             changes.push((f.rel, old_hash, f.hash, content, f.mode));
         }
@@ -369,10 +376,17 @@ pub fn create_changeset_scoped(
 
     let mut files = Vec::new();
     for (rel, old, new, content, mode) in &changes {
-        // A delta against the previous version of this path is what keeps a
-        // long editing history small. `old` is that previous version's hash.
-        // The path is here and the rules are here, so a text file the rules call large goes out too.
-        put_object_for(&tx, content, Some(rel), Some(&attrs), old.as_deref())?;
+        // Only when there is text to store. `None` means the bytes were already written from the file
+        // itself, by the binary arm above, and `changeset_files.new_hash` already names them; storing
+        // the empty string here as well put an unreferenced empty blob in every repository (#343).
+        // `Some("")` is a real empty text file: its object is the empty blob, and `new_hash` names it,
+        // so it is referenced and kept.
+        if let Some(text) = content {
+            // A delta against the previous version of this path is what keeps a
+            // long editing history small. `old` is that previous version's hash.
+            // The path is here and the rules are here, so a text file the rules call large goes out too.
+            put_object_for(&tx, text, Some(rel), Some(&attrs), old.as_deref())?;
+        }
         tx.execute(
             "INSERT INTO changeset_files(changeset_id, path, old_hash, new_hash, mode)
              VALUES(?1, ?2, ?3, ?4, ?5)",
@@ -4855,6 +4869,100 @@ pub(crate) mod tests {
             d.join("empty.txt").exists(),
             "the added empty file must be on disk after the merge"
         );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    #[test]
+    fn creating_a_changeset_with_a_binary_file_leaves_no_unreferenced_object() {
+        // #343: the binary arm stored the real bytes and then yielded `String::new()` for the text
+        // field, and the insert called `put_object_for` on that empty string as well - storing the
+        // empty blob, which nothing referenced because `changeset_files.new_hash` is the real hash.
+        // `fsck` counted one orphan on every repository that had ever run `changeset create`, and `gc`
+        // reported having cleaned something up on a healthy store.
+        let d = std::env::temp_dir().join(format!("gesta-orphan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&d).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, ?1, NULL)",
+            params![0i64],
+        )
+        .unwrap();
+        crate::store::set_state(&conn, "current_branch", "main").unwrap();
+
+        // A file whose bytes are not valid UTF-8, which is what takes the binary arm.
+        let binary: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        std::fs::write(d.join("blob.bin"), &binary).unwrap();
+        std::fs::write(d.join("note.txt"), b"text\n").unwrap();
+
+        let cs = crate::repo::create_changeset(&conn, &d, "mixed", "alice")
+            .unwrap()
+            .expect("two written files are something to snapshot");
+        crate::repo::commit_one(&conn, &cs.id).unwrap();
+
+        // Every object in the store is named by a changeset file.
+        let orphans: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT hash FROM objects
+                     WHERE hash NOT IN (SELECT new_hash FROM changeset_files WHERE new_hash IS NOT NULL)
+                       AND hash NOT IN (SELECT old_hash FROM changeset_files WHERE old_hash IS NOT NULL)",
+                )
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert!(
+            orphans.is_empty(),
+            "every object must be referenced by a changeset file, unreferenced: {orphans:?}"
+        );
+
+        // The binary content is still readable through the store.
+        let head = crate::store::branch_head(&conn, "main").unwrap().unwrap();
+        let tree = crate::store::tree_at(&conn, &head).unwrap();
+        let (_, hash) = tree
+            .iter()
+            .find(|(p, _)| p == "blob.bin")
+            .expect("blob.bin in the tree");
+        let bytes = crate::store::get_object_bytes(&conn, hash).unwrap();
+        assert_eq!(bytes.len(), 4096, "the stored bytes must be the file's own");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_empty_text_file_still_gets_an_object() {
+        // The other half of #343: `Some("")` is a real empty file and its object must exist and be
+        // referenced. Skipping the store for every empty string would have fixed the orphan and
+        // broken the empty file.
+        let d = std::env::temp_dir().join(format!("gesta-empty-text-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&d).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, ?1, NULL)",
+            params![0i64],
+        )
+        .unwrap();
+        crate::store::set_state(&conn, "current_branch", "main").unwrap();
+
+        std::fs::write(d.join("empty.txt"), b"").unwrap();
+        let cs = crate::repo::create_changeset(&conn, &d, "empty", "alice")
+            .unwrap()
+            .expect("an empty file is still a file to snapshot");
+        crate::repo::commit_one(&conn, &cs.id).unwrap();
+
+        let head = crate::store::branch_head(&conn, "main").unwrap().unwrap();
+        let tree = crate::store::tree_at(&conn, &head).unwrap();
+        let (_, hash) = tree
+            .iter()
+            .find(|(p, _)| p == "empty.txt")
+            .expect("empty.txt in the tree");
+        let bytes =
+            crate::store::get_object_bytes(&conn, hash).expect("an empty file's object must exist");
+        assert!(bytes.is_empty(), "and it must be empty");
 
         let _ = std::fs::remove_dir_all(&d);
     }
