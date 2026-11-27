@@ -1091,6 +1091,60 @@ pub fn cmd_fsck(prune: bool, worktree: bool) -> ZResult<()> {
         }
     }
 
+    // Every stored object must hash to the name it is stored under (#335).
+    //
+    // `objects.hash` was trusted as an identifier and never re-derived, so replacing an object's bytes
+    // left the row, the changeset, the signature and every reader untouched: `show`, `verify`, `fsck`
+    // and `checkout` all reported success while serving altered content. Git catches the same
+    // corruption immediately because a name *is* the hash of the content; gesta stored a claim and
+    // never checked it.
+    //
+    // `get_object_bytes`, not a raw column read: it is the path every reader takes, and it resolves
+    // deltas, packed groups and compression. Checking the column directly would test a different
+    // thing from what `checkout` serves, and would false-positive on a delta object whose stored body
+    // is a set of line operations rather than the file.
+    //
+    // Bounded cost: one decompress and one hash per object. On this machine that is 1.2 ms per object
+    // for text of a few hundred bytes, so a 100,000 object store adds roughly two minutes to `fsck`.
+    // That is the right trade for a command whose whole purpose is to answer "is this store sound",
+    // and `--prune` should never run against content nobody has checked.
+    let mut hashed = 0usize;
+    let mut mismatched = 0usize;
+    {
+        let mut stmt = conn.prepare("SELECT hash FROM objects ORDER BY hash")?;
+        let hashes: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for hash in hashes {
+            match crate::store::get_object_bytes(&conn, &hash) {
+                Ok(bytes) => {
+                    hashed += 1;
+                    let actual = crate::store::hash_bytes(&bytes);
+                    if actual != hash {
+                        println!(
+                            "OBJECT {} does not match its name (content hashes to {}...)",
+                            hash,
+                            &actual[..actual.len().min(12)]
+                        );
+                        problems += 1;
+                        mismatched += 1;
+                    }
+                }
+                Err(e) => {
+                    // An object whose bytes cannot be read is worse than a mismatch: the row says the
+                    // content exists and nothing can serve it. Reported the same way, because a caller
+                    // asking whether the store is sound needs one answer, not two.
+                    println!("OBJECT {} cannot be read: {}", hash, e);
+                    problems += 1;
+                    mismatched += 1;
+                }
+            }
+        }
+    }
+    if mismatched == 0 && hashed > 0 {
+        println!("all {} object(s) hash to their names", hashed);
+    }
+
     // Objects nothing references.
     // An object named by a shallow clone's snapshot is reachable: it is the working
     // tree. Counting it as an orphan would let `--prune` delete a file that is on disk.

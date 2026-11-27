@@ -2684,6 +2684,43 @@ pub fn integrity_problems(
         }
     }
 
+    // Every stored object must hash to the name it is stored under (#335).
+    //
+    // `objects.hash` was trusted as an identifier and never re-derived, so replacing an object's
+    // bytes left the row, the changeset, the signature and every reader untouched: `show`, `verify`,
+    // `fsck` and `checkout` all reported success while serving altered content. A name in a
+    // content-addressed store is supposed to *be* the hash of the content.
+    //
+    // Checked here rather than only in `fsck` because `verify-backup` calls this function to decide
+    // whether a backup is usable, and a sealed backup carrying altered bytes was the other half of
+    // the hole: the store propagated to another machine and verified there again.
+    //
+    // `get_object_bytes`, not a raw column read. It is the path every reader takes and it resolves
+    // deltas, packed groups and compression; reading the column directly would test something other
+    // than what `checkout` serves, and would report a delta object as corrupt because its stored body
+    // is a set of line operations rather than the file.
+    {
+        let mut stmt = conn.prepare("SELECT hash FROM objects ORDER BY hash")?;
+        let hashes: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for hash in hashes {
+            match get_object_bytes(conn, &hash) {
+                Ok(bytes) => {
+                    let actual = hash_bytes(&bytes);
+                    if actual != hash {
+                        out.push(format!(
+                            "CORRUPT object {} does not match its name (its content hashes to {})",
+                            hash,
+                            &actual[..actual.len().min(16)]
+                        ));
+                    }
+                }
+                Err(e) => out.push(format!("CORRUPT object {} cannot be read: {}", hash, e)),
+            }
+        }
+    }
+
     // Every parent must exist, except at a shallow boundary.
     let boundaries: std::collections::HashSet<String> = {
         let mut stmt = conn.prepare("SELECT changeset_id FROM shallow_roots")?;
@@ -2939,6 +2976,98 @@ pub(crate) mod tests {
     /// literal path. Adding a module here means adding a line, and forgetting to means the new file is
     /// the one that gets the cycle - which is why the test also checks the count against the declarations
     /// in mod.rs.
+
+    #[test]
+    fn integrity_problems_reports_an_object_whose_bytes_no_longer_hash_to_its_name() {
+        // #335: `objects.hash` was trusted as an identifier and never re-derived, so replacing an
+        // object's bytes left the row, the changeset, the signature and every reader untouched -
+        // `show`, `verify`, `fsck` and `checkout` all reported success while serving altered content,
+        // and `backup` shipped the altered store to a machine that verified it again.
+        let conn = mem_db();
+        let hash = put_object(&conn, "noi-dung-goc\n").unwrap();
+
+        // Positive control first: an untouched store is clean.
+        let clean = integrity_problems(&conn, None).unwrap();
+        assert!(
+            clean.is_empty(),
+            "an untouched store must report no problems: {clean:?}"
+        );
+
+        // Now alter the stored bytes and leave every hash column alone, which is exactly the shape
+        // an attacker with write access to the database would produce.
+        let blob: Vec<u8> = conn
+            .query_row(
+                "SELECT content FROM objects WHERE hash = ?1",
+                params![hash],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let compressed: i64 = conn
+            .query_row(
+                "SELECT compressed FROM objects WHERE hash = ?1",
+                params![hash],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let raw = if compressed == 1 {
+            crate::store::decompress_bytes(&blob).unwrap()
+        } else {
+            blob
+        };
+        let altered = String::from_utf8(raw).unwrap().replace("goc", "DA-SUA");
+        conn.execute(
+            "UPDATE objects SET content = ?1 WHERE hash = ?2",
+            params![altered.as_bytes(), hash],
+        )
+        .unwrap();
+
+        let problems = integrity_problems(&conn, None).unwrap();
+        assert_eq!(
+            problems.len(),
+            1,
+            "exactly one problem must be reported: {problems:?}"
+        );
+        assert!(
+            problems[0].contains("CORRUPT object"),
+            "the problem must be named as corruption: {}",
+            problems[0]
+        );
+        assert!(
+            problems[0].contains(&hash),
+            "the problem must name the object so a user can find it: {}",
+            problems[0]
+        );
+
+        // And the reader still serves the altered bytes, which is why detection has to be explicit:
+        // nothing about the read path can tell.
+        assert_eq!(
+            String::from_utf8(get_object_bytes(&conn, &hash).unwrap()).unwrap(),
+            "noi-dung-DA-SUA\n",
+            "the point of the bug: the altered content is served without complaint"
+        );
+    }
+
+    #[test]
+    fn integrity_problems_is_silent_about_a_store_it_cannot_fault() {
+        // The other half of a useful check: it must not cry wolf. Several objects, a binary blob, an
+        // empty file and a long text all hash to their names, and the check has to agree.
+        let conn = mem_db();
+        let bodies: Vec<Vec<u8>> = vec![
+            b"plain text\n".to_vec(),
+            b"".to_vec(),
+            vec![0u8, 159, 146, 150, 255, 0, 12],
+            "a".repeat(200_000).into_bytes(),
+        ];
+        for body in &bodies {
+            let h = put_object_bytes(&conn, body).unwrap();
+            assert_eq!(h, hash_bytes(body), "the fixture itself must be honest");
+        }
+        let problems = integrity_problems(&conn, None).unwrap();
+        assert!(
+            problems.is_empty(),
+            "no object was altered, so nothing may be reported: {problems:?}"
+        );
+    }
 
     #[test]
     fn a_delta_that_cannot_be_recorded_leaves_no_half_written_object() {
