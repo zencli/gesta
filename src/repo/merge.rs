@@ -304,6 +304,27 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
                 out.push(base_lines[bi].to_string());
                 bi += 1;
             }
+            // Overlapping edits that produce the SAME text are not a conflict (#280).
+            //
+            // The branch above emitted a marker unconditionally, so base `1,2,3,4` with ours changing
+            // `1,2` to `X` and theirs changing `2,3` to `X` came out as a conflict whose ours side was
+            // empty - even though both sides agreed on the answer, which is `X 4`. A conflict marker
+            // stops the merge and asks a person to resolve something already resolved, and it was
+            // reported for a case with one correct outcome.
+            //
+            // The comparison is between the two replacements, not between ranges: the ranges differ by
+            // construction here, which is why this branch was reached.
+            if o_repl == t_repl {
+                out.extend(o_repl);
+                bi = o_end.max(t_end).max(bi);
+                if o_start <= t_start {
+                    oi += 1;
+                }
+                if t_start <= o_start {
+                    ti += 1;
+                }
+                continue;
+            }
             let marker = format!(
                 "<<<<<<< ours\n{}\n=======\n{}\n>>>>>>> theirs",
                 o_repl.join("\n"),
@@ -377,13 +398,23 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
                 // adds lines that were not there: base `a,a` with theirs `a,a,a` appends one `a`,
                 // the file already ends with `a`, and the append was dropped while the merge
                 // reported success. Insertions are therefore never suppressed this way.
-                let already = !their_repl_is_insertion
-                    && !their_repl.is_empty()
-                    && out.len() >= their_repl.len()
-                    && out[out.len() - their_repl.len()..] == their_repl[..];
-                if !already {
-                    out.extend(their_repl);
-                }
+                // The tail-dedup that used to live here compared `their_repl` against the end of
+                // `out` and dropped it on a match (#269). That is wrong whenever the two hunks
+                // replace DIFFERENT base lines: base `m,n` with ours changing `m` to `K` and theirs
+                // changing `n` to `K` produced `K` once, because the second `K` matched the tail the
+                // first one had just emitted. Two independent lines, two independent replacements, and
+                // the answer is `K\nK\n`.
+                //
+                // What the dedup was for is the case where BOTH sides make the same edit to the SAME
+                // base lines - base `a,a` with both sides appending `a` - and that case never reaches
+                // this branch: identical replacements to an identical region are handled by the
+                // `(true, true)` arm above, which compares `our_repl == their_repl`. A hunk whose base
+                // lines differ from what was just emitted is a real edit and is kept.
+                //
+                // So there is nothing left to suppress here. The insertion exemption from #122 stays,
+                // because it documents why this branch appends rather than dedups.
+                let _ = their_repl_is_insertion;
+                out.extend(their_repl);
                 bi = their_end;
             }
             (true, true) => {
@@ -607,9 +638,15 @@ mod tests {
     /// the longer one had already replaced and was applied a second time. A rebase produced a
     /// file with the same line twice and reported no conflict.
     #[test]
-    fn overlapping_identical_changes_do_not_duplicate_a_line() {
-        let base = "line1\nline2\nline3\n";
+    fn overlapping_replacements_of_different_lines_both_land() {
         // Ours replaces line2 with two lines; theirs replaces line3 with the second of them.
+        //
+        // This test used to assert that `B` appeared ONCE, which is the bug #269 reports: line2 and
+        // line3 are different base lines, so theirs replacing line3 with `B` is an edit in its own
+        // right and both `B`s belong in the result. The expectation was changed rather than the code
+        // because a three-way merge of two independent edits to two independent lines has exactly one
+        // correct answer, and it is `line1 A B B`.
+        let base = "line1\nline2\nline3\n";
         let ours = "line1\nA\nB\nline3\n";
         let theirs = "line1\nline2\nB\n";
         let r = merge3(base, ours, theirs);
@@ -617,12 +654,7 @@ mod tests {
             MergeResult::Clean(t) => t.clone(),
             MergeResult::Conflict { .. } => "CONFLICT".to_string(),
         };
-        assert_eq!(
-            text.matches('B').count(),
-            1,
-            "the replacement appeared more than once: {:?}",
-            text
-        );
+        assert_eq!(text, "line1\nA\nB\nB\n", "got: {text:?}");
     }
 
     #[test]
@@ -696,5 +728,27 @@ mod tests {
             }
             MergeResult::Conflict { .. } => panic!("identical changes are not a conflict"),
         }
+    }
+    #[test]
+    fn two_sides_replacing_different_lines_with_the_same_text_keep_both() {
+        // #269: base `m,n`; ours changes `m` to `K`; theirs changes `n` to `K`. Two independent base
+        // lines, two independent replacements, and the answer is `K\nK\n`. The tail-dedup in the
+        // `(false, true)` branch compared `their_repl` against the end of what had been emitted and
+        // suppressed it, so one side's edit vanished while the merge reported Clean.
+        assert_eq!(
+            merge3("m\nn\n", "K\nn\n", "m\nK\n").text(),
+            "K\nK\n",
+            "two different base lines replaced by the same text stay two lines"
+        );
+    }
+
+    #[test]
+    fn a_replacement_matching_the_emitted_tail_of_a_different_region_is_not_suppressed() {
+        // The same shape as the case above with a third line in play, so the suppressed hunk is not
+        // adjacent to the one that produced the matching tail.
+        assert_eq!(
+            merge3("a\nm\nn\n", "a\nK\nn\n", "a\nm\nK\n").text(),
+            "a\nK\nK\n"
+        );
     }
 }
