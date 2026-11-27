@@ -2174,7 +2174,11 @@ pub fn restore_at_changeset(conn: &Connection, root: &Path, changeset: &str) -> 
         let content = crate::store::get_object_bytes(conn, hash)?;
         let plan = crate::support::attributes::plan_for(&attrs, path);
         let content = plan.checked_out(&content);
-        let _target = root.join(path);
+        // `target_inside`, not `root.join` (#275). A tree entry is data, and a hostile one can name
+        // `../../etc/passwd` or an absolute path; `root.join` accepts both and hands the result to
+        // `write_safe`, which blocks symlinks and nothing else. `materialise` and `restore_worktree`
+        // already check; these two paths were the ones that did not.
+        let _target = target_inside(root, path)?;
         safe_write::write_safe(root, path, &content)?;
         written += 1;
     }
@@ -2186,11 +2190,19 @@ pub fn restore_at_changeset(conn: &Connection, root: &Path, changeset: &str) -> 
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for path in all {
-        if !present.contains(&path) {
-            let target = root.join(&path);
-            if target.is_file() {
-                fs::remove_file(&target)?;
-            }
+        if present.contains(&path) {
+            continue;
+        }
+        // A delete path is a write path with worse consequences (#275): `root.join` on
+        // `../../somebody-el ses-file` removed a file outside the repository, and the raw `remove_file`
+        // had no symlink check either. A path that cannot be placed inside the repository is skipped
+        // rather than deleted, because refusing the whole restore would leave the tree half-written and
+        // the offending entry is never one the user typed.
+        let Ok(target) = target_inside(root, &path) else {
+            continue;
+        };
+        if target.is_file() {
+            fs::remove_file(&target)?;
         }
     }
     Ok(written)
@@ -4664,5 +4676,112 @@ pub(crate) mod tests {
             short_open <= 12,
             "opening a store at 10 changesets ran {short_open} statements"
         );
+    }
+    #[test]
+    fn a_tree_entry_that_climbs_out_is_not_written_or_deleted() {
+        // #275: `restore_at_changeset` joined the tree's path onto the root and wrote it, and the
+        // delete loop did the same with `remove_file`. A tree entry is data from a pack, so `../../x`
+        // and `/etc/passwd` both passed `root.join` and reached the filesystem. `materialise` and
+        // `restore_worktree` already used `target_inside`; these two paths were the ones missed.
+        let d = std::env::temp_dir().join(format!("gesta-climb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&d).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, ?1, NULL)",
+            rusqlite::params![0i64],
+        )
+        .unwrap();
+        crate::store::set_state(&conn, "current_branch", "main").unwrap();
+
+        std::fs::write(d.join("ok.txt"), b"fine").unwrap();
+        let cs = crate::repo::create_changeset(&conn, &d, "one", "alice")
+            .unwrap()
+            .expect("a written file is something to snapshot");
+        crate::repo::commit_one(&conn, &cs.id).unwrap();
+
+        // Two hostile entries and one ordinary one, in the committed changeset.
+        let payload = crate::store::put_object_bytes(&conn, b"escaped").unwrap();
+        let outside_climb = d.parent().unwrap().join("escaped-climb.txt");
+        let outside_abs = std::env::temp_dir().join("escaped-abs.txt");
+        let _ = std::fs::remove_file(&outside_climb);
+        let _ = std::fs::remove_file(&outside_abs);
+        conn.execute(
+            "INSERT OR REPLACE INTO changeset_files(changeset_id, path, old_hash, new_hash, mode)
+             VALUES(?1, ?2, NULL, ?3, 33188)",
+            rusqlite::params![cs.id, "../../escaped-climb.txt", payload],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO changeset_files(changeset_id, path, old_hash, new_hash, mode)
+             VALUES(?1, ?2, NULL, ?3, 33188)",
+            rusqlite::params![cs.id, outside_abs.to_string_lossy(), payload],
+        )
+        .unwrap();
+
+        // What the tree reader actually returns, printed so a test that never reaches the guard is
+        // visible instead of passing for the wrong reason.
+        let tree = crate::store::tree_at(&conn, &cs.id).unwrap();
+        eprintln!(
+            "TREE = {:?}",
+            tree.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            tree.iter().any(|(p, _)| p.contains("escaped-climb")),
+            "the fixture must put the hostile entry into the tree the restore reads, \
+             otherwise this test proves nothing. tree = {:?}",
+            tree.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>()
+        );
+
+        // The restore refuses, and nothing is written outside the repository.
+        let e = crate::repo::restore_at_changeset(&conn, &d, &cs.id).unwrap_err();
+        assert!(
+            e.to_string().contains("not inside the repository"),
+            "the refusal must name the rule, got: {e}"
+        );
+        assert!(
+            !outside_climb.exists(),
+            "a climbing entry must not be written: {}",
+            outside_climb.display()
+        );
+        assert!(
+            !outside_abs.exists(),
+            "an absolute entry must not be written: {}",
+            outside_abs.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_ordinary_tree_still_restores() {
+        // The control: the guard must not refuse a tree whose paths are ordinary.
+        let d = std::env::temp_dir().join(format!("gesta-restore-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&d).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, ?1, NULL)",
+            rusqlite::params![0i64],
+        )
+        .unwrap();
+        crate::store::set_state(&conn, "current_branch", "main").unwrap();
+
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("sub/deep.txt"), b"deep").unwrap();
+        let cs = crate::repo::create_changeset(&conn, &d, "one", "alice")
+            .unwrap()
+            .expect("a written file is something to snapshot");
+        crate::repo::commit_one(&conn, &cs.id).unwrap();
+
+        std::fs::remove_file(d.join("sub/deep.txt")).unwrap();
+        let n = crate::repo::restore_at_changeset(&conn, &d, &cs.id)
+            .expect("an ordinary tree must restore");
+        assert!(n >= 1, "at least one file must be written, got {n}");
+        assert_eq!(std::fs::read(d.join("sub/deep.txt")).unwrap(), b"deep");
+
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -194,7 +194,10 @@ fn checkout(conn: &Connection, root: &Path, changeset: &str) -> ZResult<usize> {
         // reads bytes for this reason; bisect was the last one reading text, so a bisect step
         // aborted with an encoding error on any tree holding a binary file.
         let content = crate::store::get_object_bytes(conn, hash)?;
-        let target = root.join(path);
+        // Checked, like every other tree-writing path (#275). A tree entry naming `../../x` or an
+        // absolute path used to be joined onto the root and written, which put bytes outside the
+        // repository from a step the user only asked to test.
+        let target = crate::repo::target_inside(root, path)?;
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -210,7 +213,12 @@ fn checkout(conn: &Connection, root: &Path, changeset: &str) -> ZResult<usize> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for path in all {
         if !present.contains(&path) {
-            let target = root.join(&path);
+            // Skipped rather than deleted when it cannot be placed inside the repository, for the
+            // reason given in `restore_at_changeset`: refusing the whole checkout over one unusable
+            // entry would leave a half-written tree.
+            let Ok(target) = crate::repo::target_inside(root, &path) else {
+                continue;
+            };
             if target.is_file() {
                 std::fs::remove_file(&target)?;
             }
