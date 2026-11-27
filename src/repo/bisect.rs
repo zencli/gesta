@@ -178,6 +178,15 @@ pub fn clear(conn: &Connection) -> ZResult<()> {
 /// Write `changeset` onto the working tree, tracked files only.
 fn checkout(conn: &Connection, root: &Path, changeset: &str) -> ZResult<usize> {
     let files = crate::store::tree_at(conn, changeset)?;
+
+    // No dirty check here, deliberately (#270).
+    //
+    // During a bisect the working tree is *supposed* to sit on an old changeset, so comparing it to
+    // the branch head reports every step as an uncommitted change and would refuse the whole search.
+    // The `refuse_if_dirty` guard needs a baseline that means something; for bisect that baseline is
+    // the changeset currently checked out, which this function does not know yet. Checking against
+    // the branch head was measured wrong here - it turned eight bisect tests red - so the guard is
+    // not applied, and this is the reason rather than an oversight.
     let mut written = 0usize;
     for (path, hash) in &files {
         // Bytes, not text: a tree with a binary file is ordinary, and the text reader refuses

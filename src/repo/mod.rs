@@ -75,6 +75,65 @@ pub struct WorktreeDelta {
     pub rehashed: usize,
 }
 
+/// Refuse a tree rewrite that would destroy uncommitted work (#270).
+///
+/// A merge, a fast-forward and a bisect checkout all end by writing the committed tree over the
+/// working tree. `restore_worktree` writes every tracked file unconditionally and deletes tracked
+/// files the new tree no longer names, so an edit that was never committed disappears with no
+/// error, no stash and no warning.
+///
+/// `paths` is what the move is about to touch. Only those paths are checked: refusing because some
+/// unrelated file is dirty would make merges unusable in a tree with work in progress, which is the
+/// normal state of a tree. The rule the stash code already states is the rule here - a move must
+/// refuse rather than destroy.
+///
+/// A file that is dirty and *not* touched by the move is left alone deliberately: the write never
+/// reaches it, and `restore_worktree` only rewrites paths named by the new tree.
+pub fn refuse_if_dirty(
+    conn: &Connection,
+    root: &Path,
+    branch: &str,
+    paths: &[String],
+) -> ZResult<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    // Compare the disk against the branch that is CHECKED OUT, not against `branch`.
+    //
+    // `branch` is the merge target, and the two are usually different: `gesta branch merge feature
+    // --target main` runs from a tree sitting on `feature`. Diffing against `main` there reported
+    // every file `feature` changed as an uncommitted edit, so the merge refused in the ordinary
+    // case - `bench/conflicts.py` measures exactly that shape and went red. "Uncommitted" means
+    // "differs from the checked out head"; it says nothing about the branch being merged into.
+    let checkout = crate::store::current_branch(conn)?;
+    let d = diff_worktree(conn, root, &checkout)?;
+    let touched: std::collections::HashSet<&str> = paths.iter().map(|p| p.as_str()).collect();
+    let mut clashes: Vec<&str> = Vec::new();
+    for p in d
+        .modified
+        .iter()
+        .chain(d.added.iter())
+        .chain(d.deleted.iter())
+    {
+        if touched.contains(p.as_str()) {
+            clashes.push(p.as_str());
+        }
+    }
+    if clashes.is_empty() {
+        return Ok(());
+    }
+    clashes.sort_unstable();
+    clashes.dedup();
+    Err(bad(format!(
+        "refusing to move {:?}: the working tree has uncommitted changes to {} file(s) this move \
+         would overwrite - {}. Commit them, or stash them first: this command writes the committed \
+         tree over the working tree, so proceeding would discard the edits without a way back.",
+        branch,
+        clashes.len(),
+        clashes.join(", ")
+    )))
+}
+
 /// Compare the working tree to `branch`.
 pub fn diff_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult<WorktreeDelta> {
     let _q2 = std::time::Instant::now();
@@ -1197,6 +1256,41 @@ pub fn merge_branch(
             // tree still held the old contents. `status` then reported every file the move brought in
             // as an uncommitted change and every file it removed as still present - a working tree that
             // contradicts its own branch, which is what a fast-forward merge exists to avoid.
+            // The dirty check comes before the head moves, not after (#270).
+            //
+            // `restore_worktree` writes every tracked file of the incoming tree over the working
+            // tree and deletes the tracked files it no longer names. An uncommitted edit to one of
+            // those paths was destroyed here with no error: the merge reported success and the
+            // edit was gone. Checking first means the refusal costs nothing, because nothing has
+            // been written yet.
+            //
+            // The whole incoming tree, not just the paths that differ between the two trees.
+            //
+            // The narrower version - paths whose committed hash changed - was measured wrong on the
+            // CLI: with `other.txt` identical in both trees and dirty on disk, the merge went
+            // through and `restore_worktree` rewrote the file with the committed bytes anyway,
+            // turning "edited-locally" into "keep". `restore_worktree` writes every tracked file it
+            // finds, not only the ones that differ, so every dirty tracked file is at risk and the
+            // guard has to say so.
+            // The dirty check comes before the head moves, not after (#270).
+            //
+            // `restore_worktree` writes every tracked file of the incoming tree over the working
+            // tree and deletes the tracked files it no longer names. An uncommitted edit to one of
+            // those paths was destroyed here with no error: the merge reported success and the
+            // edit was gone. Checking first means the refusal costs nothing, because nothing has
+            // been written yet.
+            //
+            // The whole incoming tree, not just the paths that differ between the two trees. The
+            // narrower version - paths whose committed hash changed - was measured wrong on the CLI:
+            // with `other.txt` identical in both trees and dirty on disk, the merge went through and
+            // `restore_worktree` rewrote the file with the committed bytes anyway, turning
+            // "edited-locally" into "keep". It writes every tracked file it finds, not only the ones
+            // that differ, so every dirty tracked file is at risk.
+            let incoming: Vec<String> = crate::store::tree_at(conn, &src_head)?
+                .into_iter()
+                .map(|(p, _)| p)
+                .collect();
+            refuse_if_dirty(conn, root, target, &incoming)?;
             let tx = conn.unchecked_transaction()?;
             crate::store::set_branch_head(&tx, target, &src_head)?;
             tx.commit()?;
@@ -1372,6 +1466,15 @@ pub fn merge_branch(
     }
 
     // Record the merge as a changeset with two parents.
+    //
+    // Only a merge that lands can destroy work, so the dirty check lives here rather than before the
+    // conflict block (#270). A conflicted merge writes the markers for the user to resolve and moves
+    // nothing, which is why `bench/conflicts.py` runs a second merge over an already-conflicted tree
+    // and must succeed: the first merge left markers on disk by design, and those markers are not
+    // uncommitted work that a second merge would throw away.
+    let merge_paths: Vec<String> = merged_files.iter().map(|(p, _)| p.clone()).collect();
+    refuse_if_dirty(conn, root, target, &merge_paths)?;
+
     let id = new_changeset_id(conn, &format!("merge {} into {}", source, target), author)?;
     let tx = conn.unchecked_transaction()?;
     tx.execute(
@@ -2856,6 +2959,78 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_fast_forward_merge_refuses_rather_than_discard_uncommitted_work() {
+        // #270: the fast-forward moved the head and called `restore_worktree`, which writes every
+        // tracked file with the committed bytes. An uncommitted edit to any of them vanished with no
+        // error, no stash and no warning, and the merge exited successfully.
+        let conn = mem_db();
+        let root = std::env::temp_dir().join(format!("gesta-ff-dirty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        commit_as(&conn, "c1", "alice", "f.txt", "A");
+        conn.execute(
+            "INSERT INTO branches(name, head, created_at, from_branch) VALUES('side','c1',1,'main')",
+            [],
+        )
+        .unwrap();
+        commit_as(&conn, "c2", "bob", "f.txt", "A,B");
+        crate::store::set_branch_head(&conn, "side", "c2").unwrap();
+        crate::store::set_branch_head(&conn, "main", "c1").unwrap();
+        crate::repo::restore_worktree(&conn, &root, "main").unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "A");
+
+        // The edit that must survive.
+        std::fs::write(root.join("f.txt"), "A-local").unwrap();
+
+        let err = merge_branch(&conn, &root, "side", "main", "t")
+            .expect_err("a fast-forward over uncommitted work must refuse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("uncommitted"),
+            "the refusal must say why: {msg}"
+        );
+        assert!(msg.contains("f.txt"), "it must name the file: {msg}");
+
+        // Both halves of "refused": nothing was written and the head did not move.
+        assert_eq!(
+            std::fs::read_to_string(root.join("f.txt")).unwrap(),
+            "A-local",
+            "the uncommitted edit must still be on disk, byte for byte"
+        );
+        assert_eq!(
+            branch_head(&conn, "main").unwrap().as_deref(),
+            Some("c1"),
+            "the head must not have moved"
+        );
+    }
+
+    #[test]
+    fn a_fast_forward_still_goes_through_when_the_tree_is_clean() {
+        // The guard must not make the ordinary case fail: a clean tree fast-forwards.
+        let conn = mem_db();
+        let root = std::env::temp_dir().join(format!("gesta-ff-clean-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        commit_as(&conn, "c1", "alice", "f.txt", "A");
+        conn.execute(
+            "INSERT INTO branches(name, head, created_at, from_branch) VALUES('side','c1',1,'main')",
+            [],
+        )
+        .unwrap();
+        commit_as(&conn, "c2", "bob", "f.txt", "A,B");
+        crate::store::set_branch_head(&conn, "side", "c2").unwrap();
+        crate::store::set_branch_head(&conn, "main", "c1").unwrap();
+        crate::repo::restore_worktree(&conn, &root, "main").unwrap();
+
+        let out = merge_branch(&conn, &root, "side", "main", "t")
+            .expect("a clean tree must fast-forward");
+        assert_eq!(out.applied, vec!["c2".to_string()]);
+        assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "A,B");
+    }
+
+    #[test]
     fn a_fast_forward_merge_writes_the_files_it_brings_in() {
         // The fast-forward branch moved the head and returned. The comment above it said
         // "materialise the files" and nothing did, so the branch pointed at changesets whose files
@@ -2877,10 +3052,11 @@ pub(crate) mod tests {
         commit_as(&conn, "c2", "bob", "added.txt", "new\n");
         // `commit_as` always commits onto `main`, so the fork is stated afterwards: `side` holds the
         // newer changeset and `main` is the one behind it, which is the shape a fast-forward merges.
-        conn.execute("UPDATE branches SET head='c2' WHERE name='side'", [])
-            .unwrap();
-        conn.execute("UPDATE branches SET head='c1' WHERE name='main'", [])
-            .unwrap();
+        // `set_branch_head`, not raw SQL: it moves the head and the `branch_tree` row together, and
+        // `committed_tree` reads that row. Writing the head alone left the tree describing `c2`
+        // while the head said `c1`, so every file compared as modified (#96's failure mode).
+        crate::store::set_branch_head(&conn, "side", "c2").unwrap();
+        crate::store::set_branch_head(&conn, "main", "c1").unwrap();
         // Put the working tree where `main` is, which is the state a person is in when they run
         // `gesta merge side` from the main tree.
         crate::repo::restore_worktree(&conn, &root, "main").unwrap();
@@ -3229,10 +3405,17 @@ pub(crate) mod tests {
         .unwrap();
 
         // ours on main
+        //
+        // `commit_files` records the changeset and computes blame but never moves the branch head,
+        // which is fine for tests that only read history. This one runs a merge, and the merge guard
+        // compares the disk against `branch_tree` - the table `set_branch_head` maintains. Without
+        // the head move the tree still described `cs1`, every file compared as modified, and the
+        // merge refused. Moving the head here is what a real commit does.
         fs::write(tmp.join("shared.txt"), "ONE\ntwo\nthree\n").unwrap();
         commit_files(&conn, "cs2", "ours", &[("shared.txt", "ONE\ntwo\nthree\n")]);
         conn.execute("UPDATE changesets SET parent='cs1' WHERE id='cs2'", [])
             .unwrap();
+        crate::store::set_branch_head(&conn, "main", "cs2").unwrap();
 
         // theirs on dev
         fs::write(tmp.join("shared.txt"), "one\ntwo\nTHREE\n").unwrap();
@@ -3250,6 +3433,11 @@ pub(crate) mod tests {
         )
         .unwrap();
         commit_one(&conn, "cs3").unwrap();
+
+        // `cs3` belongs to `dev`, so the disk has to go back to what `main` holds before the merge:
+        // a person running `gesta merge dev` while on `main` has main's content on disk, not dev's.
+        // The fixture left dev's bytes there, which reads as an uncommitted edit to the merge guard.
+        fs::write(tmp.join("shared.txt"), "ONE\ntwo\nthree\n").unwrap();
 
         let out = merge_branch(&conn, &tmp, "dev", "main", "a").unwrap();
         assert!(out.conflicts.is_empty(), "disjoint edits must not conflict");
@@ -4051,6 +4239,8 @@ pub(crate) mod tests {
         )
         .unwrap();
         commit_one(&conn, "L1").unwrap();
+        // Back to main's content: `L1` belongs to `left`, and the disk is on `main`.
+        std::fs::remove_file(root.join("l.txt")).ok();
         std::fs::write(root.join("r.txt"), "right\n").unwrap();
         conn.execute(
             "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
@@ -4066,6 +4256,9 @@ pub(crate) mod tests {
         )
         .unwrap();
         commit_one(&conn, "R1").unwrap();
+
+        // `R1` belongs to `right`, so the disk goes back to what `main` holds.
+        std::fs::remove_file(root.join("r.txt")).ok();
 
         // First writer lands with the head it read.
         let read = crate::store::branch_head(&conn, "main").unwrap();
