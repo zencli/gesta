@@ -394,6 +394,11 @@ pub struct Exported {
     pub commits: usize,
     pub branches: Vec<String>,
     pub root: String,
+    /// Tags written to `refs/tags/`, in name order (#206).
+    ///
+    /// Reporting them matters for the same reason `branches` does: an export that silently drops
+    /// tags looks identical to one that had none.
+    pub tags: Vec<String>,
 }
 
 /// Write this repository into a git repository at `git_root`, which is created if missing.
@@ -425,31 +430,62 @@ fn export_into(conn: &Connection, repo: &Repo, branch: Option<&str>) -> ZResult<
         }
     };
     let mut out = Exported::default();
+    // Every changeset exported on this run, across all branches, so a tag can name a commit that was
+    // written for a branch other than the one the tag's changeset happens to sit on.
+    let mut mapped_all: HashMap<String, String> = HashMap::new();
 
     for b in &branches {
         let Some(head) = store::branch_head(conn, b)? else {
             continue;
         };
-        // Walk back to the root, then write forward, so a parent is always in the store before
-        // its child names it.
-        let chain = crate::store::ancestors_bfs(conn, &head)?;
-        let mut ids: Vec<String> = chain;
-        ids.reverse();
+        // Write parents before children, in a real topological order (#187).
+        //
+        // This used `ancestors_bfs` reversed, and a reversed BFS is not a topological order. For a
+        // head H with parents A and B where B's parent is A, BFS gives `[H, A, B, C]` because A is
+        // one hop away and B is two; reversed that is `[C, B, A, H]`, so B is written while A is
+        // still missing from `mapped` and B's link to A is silently dropped. git produces such
+        // shapes routinely - it is an ordinary criss-cross merge - so an export could lose parent
+        // links from a history git itself considers unremarkable.
+        let ids = crate::store::topological_order(conn, &head)?;
 
         let mut mapped: HashMap<String, String> = HashMap::new();
         for id in ids {
-            let (parent, message, author, ts): (Option<String>, String, String, i64) = conn
-                .query_row(
-                    "SELECT parent, message, author, created_at FROM changesets WHERE id = ?1",
-                    rusqlite::params![id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )?;
+            let (parent, parent2, message, author, ts): (
+                Option<String>,
+                Option<String>,
+                String,
+                String,
+                i64,
+            ) = conn.query_row(
+                "SELECT parent, parent2, message, author, created_at FROM changesets WHERE id = ?1",
+                rusqlite::params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?;
             let tree_hash = write_tree_for(conn, repo, &id)?;
             let (name, mail) = split_author(&author);
-            let parents: Vec<String> = parent
-                .and_then(|p| mapped.get(&p).cloned())
-                .into_iter()
-                .collect();
+            // Both parents, in order (#178). Reading only `parent` wrote every merge as a
+            // single-parent commit: the tree was right so the content survived, but `git log
+            // --graph`, `git merge-base` and `git branch --merged` all answered differently from the
+            // history this repository holds. `docs/git-parity.md` names merge parents as a shape the
+            // round-trip claim does not cover, which is a note about a gap, not permission to keep
+            // it.
+            let mut parents: Vec<String> = Vec::new();
+            for p in [parent, parent2].into_iter().flatten() {
+                match mapped.get(&p) {
+                    Some(git) => parents.push(git.clone()),
+                    // A parent that is not in `mapped` after a topological walk is a hole in the
+                    // history, not a shape to paper over. Writing the commit with fewer parents
+                    // looks like success and loses the link; the old code did exactly that for any
+                    // parent it could not find.
+                    None => {
+                        return Err(bad(format!(
+                            "changeset {} names parent {}, which was not exported before it; \
+                             refusing to write a commit with a dropped parent link",
+                            id, p
+                        )))
+                    }
+                }
+            }
             // The offset the commit was imported with, or +0000 for a changeset made here. A
             // hard-coded +0000 gave every exported commit a different name than the one it came
             // from, which made a round trip useless for anything that compares ids.
@@ -470,6 +506,7 @@ fn export_into(conn: &Connection, repo: &Repo, branch: Option<&str>) -> ZResult<
                 rusqlite::params![id, commit],
             )?;
             mapped.insert(id.clone(), commit.clone());
+            mapped_all.insert(id.clone(), commit.clone());
             out.commits += 1;
             if let Some(last) = mapped.get(&head) {
                 out.root = last.clone();
@@ -493,6 +530,36 @@ fn export_into(conn: &Connection, repo: &Repo, branch: Option<&str>) -> ZResult<
             out.branches.push(b.clone());
         }
     }
+
+    // Tags, after every branch (#206). Never written at all before this, so an export silently lost
+    // them, which is indistinguishable from a repository that had none.
+    //
+    // A tag points at the git commit its changeset became, and a changeset that was not exported on
+    // this run has no mapping - a tag on an unreachable changeset is not exportable, and saying so is
+    // better than writing a ref that names nothing. Annotated tags are not reconstructed: the store
+    // records a message, but git's tag object also carries a tagger and a signature this repository
+    // has no field for, so a lightweight ref is the honest representation of what is known.
+    let tags: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT name, changeset_id FROM tags ORDER BY name")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (name, changeset) in tags {
+        match mapped_all.get(&changeset) {
+            Some(git) => {
+                repo.write_ref(&format!("refs/tags/{}", name), git)?;
+                out.tags.push(name);
+            }
+            None => {
+                return Err(bad(format!(
+                    "tag {} names changeset {}, which is not reachable from any exported branch; \
+                     refusing to write a tag that points at nothing",
+                    name, changeset
+                )))
+            }
+        }
+    }
+
     Ok(out)
 }
 
@@ -505,11 +572,15 @@ fn write_tree_for(conn: &Connection, repo: &Repo, changeset: &str) -> ZResult<St
     // Modes come back with the paths. Writing `100644` for everything was how a script marked
     // executable arrived in git as a file git would not run: the bytes matched and the mode did not.
     let files = crate::store::tree_at_with_mode(conn, changeset)?;
+    // An empty tree is a legitimate state, not an error (#206). Refusing here meant one branch whose
+    // head tree happened to be empty aborted the whole export, including every other branch that was
+    // perfectly fine. git has an empty tree object and a commit can point at it, so the honest
+    // answer is to write it. The empty-tree hash is fixed by the object format, so it is computed
+    // once and not cached: `write_object` is idempotent on content anyway.
     if files.is_empty() {
-        return Err(bad(format!(
-            "changeset {} has no files, so there is no tree to write",
-            changeset
-        )));
+        // `build_tree_with` needs the hash kind; the repository being written decides it.
+        let body = crate::store::gitobj::build_tree_with(Vec::new(), repo.hash);
+        return repo.write_object(Kind::Tree, &body);
     }
 
     // Group the paths by their directory, and write each file's blob once.
@@ -559,11 +630,37 @@ fn write_tree_for(conn: &Connection, repo: &Repo, changeset: &str) -> ZResult<St
     // Writing it back is what keeps a submodule a submodule across a round trip; leaving it out gave
     // an export whose tree simply did not mention the path.
     //
-    // The entry is written even when the child's commit is not in this repository. That is what git
-    // itself does: a gitlink names a commit the parent does not have, which is why `git submodule
-    // update` has to clone the child before the checkout can succeed. Writing it is the only way the
-    // pointer survives; refusing would mean an export that silently drops submodules.
-    for sub in crate::repo::subrepo::list(conn)? {
+    // Only the subrepositories that already existed at this changeset (#206). The old code added all
+    // of them to every tree, so exporting history wrote submodule entries into commits from before
+    // the submodule was added - a history that never existed. `subrepos` records `created_at` and no
+    // per-changeset history, so that column is the only evidence available and this filters on it.
+    // Timestamps made in one burst can share a second, which makes the cut-off coarse; that is a
+    // limitation of what the store records, and it is still strictly better than ignoring time
+    // entirely. A real fix needs a history table, which is a schema change and not this bug.
+    let at: i64 = conn.query_row(
+        "SELECT created_at FROM changesets WHERE id = ?1",
+        rusqlite::params![changeset],
+        |r| r.get(0),
+    )?;
+    // `subrepo::list` used to call `init_schema` for us; the query is written out here so it can
+    // filter on `created_at`, so the schema has to be ensured explicitly. `subrepos` is created by
+    // `migrate`, not `init_schema` - a store written before submodules existed has no table, and a
+    // test built with `mem_db` never ran the migration.
+    crate::store::migrate(conn)?;
+    let subs: Vec<crate::repo::subrepo::Sub> = {
+        let mut stmt = conn.prepare(
+            "SELECT path, remote, pinned FROM subrepos WHERE created_at <= ?1 ORDER BY path",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![at], |r| {
+            Ok(crate::repo::subrepo::Sub {
+                path: r.get(0)?,
+                remote: r.get(1)?,
+                pinned: r.get(2)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for sub in subs {
         if sub.pinned.is_empty() {
             continue;
         }
@@ -1044,6 +1141,27 @@ mod tests {
     /// A test helper rather than a method on `Repo`: the production code never asks a git
     /// repository for a ref, and a public method kept alive only by its own test is a method that
     /// will drift from what anybody needs.
+    /// The git commit name the export recorded for a changeset.
+    fn git_of(conn: &Connection, changeset: &str) -> String {
+        conn.query_row(
+            "SELECT git_commit FROM changesets WHERE id = ?1",
+            rusqlite::params![changeset],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .unwrap()
+        .unwrap_or_else(|| panic!("changeset {} has no git_commit recorded", changeset))
+    }
+
+    /// A branch row with no head, which is what a fresh branch looks like.
+    fn ensure_branch_row(conn: &Connection, branch: &str) {
+        conn.execute(
+            "INSERT OR IGNORE INTO branches(name, head, created_at, from_branch)
+             VALUES(?1, NULL, 0, NULL)",
+            rusqlite::params![branch],
+        )
+        .unwrap();
+    }
+
     fn head_of(repo: &Repo, branch: &str) -> String {
         let loose = repo.git_dir.join("refs").join("heads").join(branch);
         if let Ok(text) = std::fs::read_to_string(&loose) {
@@ -1528,6 +1646,248 @@ mod tests {
             .expect("b.txt missing");
         assert_eq!(repo.read_object(&b.hash).unwrap().body, b"second\n");
         let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn an_export_writes_both_parents_of_a_merge() {
+        // #178: `export_into` selected only `parent`, so every merge changeset became a
+        // single-parent git commit. The tree survived so the content was right, and `git log
+        // --graph`, `git merge-base` and `git branch --merged` all answered differently from the
+        // history this repository holds.
+        let conn = crate::store::tests::mem_db();
+        crate::store::init_schema(&conn).unwrap();
+
+        // A real merge shape, with every parent written explicitly: `commit_files` chains each commit
+        // onto the current head, which quietly turns siblings into a line. Distinct messages and
+        // distinct trees keep the four git commits distinct.
+        let commit =
+            |id: &str, parent: Option<&str>, parent2: Option<&str>, path: &str, body: &str| {
+                let hash = crate::store::put_object(&conn, body).unwrap();
+                conn.execute(
+                "INSERT INTO changesets(id,message,author,created_at,status,parent,parent2,branch)
+                 VALUES(?1,?1,'a',1,'pending',?2,?3,'main')",
+                rusqlite::params![id, parent, parent2],
+            )
+            .unwrap();
+                conn.execute(
+                    "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+                 VALUES(?1,?2,NULL,?3)",
+                    rusqlite::params![id, path, &hash],
+                )
+                .unwrap();
+                crate::repo::commit_one(&conn, id).unwrap();
+                // `commit_one` sets `parent` from the branch head, which is what a real commit does but
+                // is not what a fixture for an arbitrary graph wants: leaving it alone turned this
+                // merge into a commit whose two parents were the same. The intended parents are written
+                // back afterwards.
+                conn.execute(
+                    "UPDATE changesets SET parent = ?2, parent2 = ?3 WHERE id = ?1",
+                    rusqlite::params![id, parent, parent2],
+                )
+                .unwrap();
+            };
+        commit("cs1", None, None, "a.txt", "one\n");
+        commit("cs2", Some("cs1"), None, "a.txt", "left\n");
+        commit("cs3", Some("cs1"), None, "b.txt", "right\n");
+        commit("cs4", Some("cs2"), Some("cs3"), "a.txt", "left\n");
+        crate::store::set_branch_head(&conn, "main", "cs4").unwrap();
+
+        let out = temp("merge-parents-out");
+        let _ = std::fs::remove_dir_all(&out);
+        let got = export(&conn, &out, None).unwrap();
+        assert_eq!(got.commits, 4, "every changeset must be exported");
+
+        let repo = Repo::open(&out).unwrap();
+        let head = head_of(&repo, "main");
+        let commit = gitobj::parse_commit(&repo.read_object(&head).unwrap().body).unwrap();
+        assert_eq!(
+            commit.parents.len(),
+            2,
+            "a merge must keep both parents, got {:?}",
+            commit.parents
+        );
+
+        // Both parents must be the commits of cs2 and cs3, in that order - first parent is the
+        // branch that was merged into.
+        assert_eq!(
+            commit.parents,
+            vec![git_of(&conn, "cs2"), git_of(&conn, "cs3")],
+            "the parents must be the two changesets the merge named, in order"
+        );
+        assert_ne!(
+            git_of(&conn, "cs2"),
+            git_of(&conn, "cs3"),
+            "the fixture must produce two distinct parent commits, or it proves nothing"
+        );
+
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn an_export_survives_a_history_where_the_shortcut_is_not_a_parent() {
+        // #187: `ancestors_bfs` reversed is not a topological order.
+        //
+        // The shape that breaks it: head cs4 has parents A=cs3 and B=cs2, and B is a DESCENDANT of A
+        // (cs3 -> cs2). A BFS from the head reaches both A and B at distance 1, and it queues them in
+        // parent order, so B can come out of the queue before A has been reached again as B's
+        // ancestor. Reversed, that writes B before A and B's link to A is dropped.
+        //
+        // The first two versions of this test were wrong in different ways and both passed against
+        // the old code, which is why the ordering check below comes before the export: the fixture
+        // has to be a shape that actually breaks, or the test proves nothing.
+        let conn = crate::store::tests::mem_db();
+        crate::store::init_schema(&conn).unwrap();
+        let commit =
+            |id: &str, parent: Option<&str>, parent2: Option<&str>, path: &str, body: &str| {
+                let hash = crate::store::put_object(&conn, body).unwrap();
+                conn.execute(
+                "INSERT INTO changesets(id,message,author,created_at,status,parent,parent2,branch)
+                 VALUES(?1,?1,'a',1,'pending',?2,?3,'main')",
+                rusqlite::params![id, parent, parent2],
+            )
+            .unwrap();
+                conn.execute(
+                    "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+                 VALUES(?1,?2,NULL,?3)",
+                    rusqlite::params![id, path, &hash],
+                )
+                .unwrap();
+                crate::repo::commit_one(&conn, id).unwrap();
+                // `commit_one` takes the parent from the branch head; the graph this test needs is not
+                // the one a linear commit produces.
+                conn.execute(
+                    "UPDATE changesets SET parent = ?2, parent2 = ?3 WHERE id = ?1",
+                    rusqlite::params![id, parent, parent2],
+                )
+                .unwrap();
+            };
+        // cs1 -> cs3 -> cs2, then a head that merges cs3 and cs2. No cycle: cs2 descends from cs3.
+        commit("cs1", None, None, "a.txt", "one\n");
+        commit("cs3", Some("cs1"), None, "b.txt", "three\n");
+        commit("cs2", Some("cs3"), None, "c.txt", "two\n");
+        commit("cs4", Some("cs3"), Some("cs2"), "a.txt", "merged\n");
+        crate::store::set_branch_head(&conn, "main", "cs4").unwrap();
+
+        // The ordering rule itself, before any export: every parent must come before its children.
+        let order = crate::store::topological_order(&conn, "cs4").unwrap();
+        assert_eq!(
+            order.len(),
+            4,
+            "every reachable changeset exactly once: {order:?}"
+        );
+        for (i, id) in order.iter().enumerate() {
+            let (p1, p2): (Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT parent, parent2 FROM changesets WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            for p in [p1, p2].into_iter().flatten() {
+                let at = order.iter().position(|x| *x == p).unwrap_or_else(|| {
+                    panic!("parent {} of {} is missing from {:?}", p, id, order)
+                });
+                assert!(
+                    at < i,
+                    "{} is listed before its parent {} in {:?}",
+                    id,
+                    p,
+                    order
+                );
+            }
+        }
+
+        // And the shape must be one where a reversed BFS really does come out wrong, or this test
+        // cannot fail on the bug it is about.
+        let mut bfs = crate::store::ancestors_bfs(&conn, "cs4").unwrap();
+        bfs.reverse();
+        let bfs_pos = |x: &str| bfs.iter().position(|y| y == x).unwrap();
+        assert!(
+            bfs_pos("cs2") < bfs_pos("cs3"),
+            "the fixture must be a shape where reversed BFS puts cs2 before its ancestor cs3, \
+             otherwise this test cannot observe the bug: {bfs:?}"
+        );
+
+        let out = temp("criss-cross-out");
+        let _ = std::fs::remove_dir_all(&out);
+        let got = export(&conn, &out, None).expect("export must not drop a parent link");
+        assert_eq!(got.commits, 4);
+
+        let repo = Repo::open(&out).unwrap();
+        let head = head_of(&repo, "main");
+        let c = gitobj::parse_commit(&repo.read_object(&head).unwrap().body).unwrap();
+        assert_eq!(c.parents.len(), 2, "the merge lost a parent");
+        for p in &c.parents {
+            assert!(
+                repo.read_object(p).is_ok(),
+                "the merge points at {} which was never written",
+                p
+            );
+        }
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn an_empty_tree_exports_instead_of_failing_the_whole_export() {
+        // #206: `write_tree_for` errored on an empty tree, so one branch whose head had no files
+        // aborted the entire export - every other branch included.
+        let conn = crate::store::tests::mem_db();
+        crate::store::init_schema(&conn).unwrap();
+        ensure_branch_row(&conn, "empty");
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,parent2,branch)
+             VALUES('cs1','nothing yet','a',10,'pending',NULL,NULL,'empty')",
+            [],
+        )
+        .unwrap();
+        crate::repo::commit_one(&conn, "cs1").unwrap();
+        crate::store::set_branch_head(&conn, "empty", "cs1").unwrap();
+
+        let out = temp("empty-tree-out");
+        let _ = std::fs::remove_dir_all(&out);
+        let got = export(&conn, &out, None).expect("an empty tree must not fail the export");
+        assert_eq!(got.commits, 1);
+
+        let repo = Repo::open(&out).unwrap();
+        let head = head_of(&repo, "empty");
+        let commit = gitobj::parse_commit(&repo.read_object(&head).unwrap().body).unwrap();
+        let tree = repo
+            .read_object(&commit.tree)
+            .expect("the tree object must exist");
+        assert!(
+            gitobj::parse_tree(&tree.body).unwrap().is_empty(),
+            "an empty changeset must export an empty tree"
+        );
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn tags_are_exported() {
+        // #206: `export_into` wrote branches and never tags, so they vanished silently.
+        let conn = crate::store::tests::mem_db();
+        crate::store::init_schema(&conn).unwrap();
+        crate::repo::tests::commit_files(&conn, "cs1", "root", &[("a.txt", "one\n")]);
+        conn.execute(
+            "INSERT INTO tags(name, changeset_id, message, created_at) VALUES('v1.0','cs1',NULL,20)",
+            [],
+        )
+        .unwrap();
+
+        let out = temp("tags-out");
+        let _ = std::fs::remove_dir_all(&out);
+        let got = export(&conn, &out, None).unwrap();
+        assert_eq!(got.tags, vec!["v1.0".to_string()]);
+
+        let repo = Repo::open(&out).unwrap();
+        let ref_path = repo.git_dir.join("refs").join("tags").join("v1.0");
+        let written = std::fs::read_to_string(&ref_path)
+            .unwrap_or_else(|e| panic!("refs/tags/v1.0 was not written: {e}"));
+        assert_eq!(
+            written.trim(),
+            git_of(&conn, "cs1"),
+            "the tag must point at the commit its changeset became"
+        );
         let _ = std::fs::remove_dir_all(&out);
     }
 

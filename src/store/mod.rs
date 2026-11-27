@@ -2440,6 +2440,58 @@ pub fn ancestors_bfs(conn: &Connection, id: &str) -> ZResult<Vec<String>> {
     Ok(out)
 }
 
+/// Reachable changesets with every parent before its children: a topological order.
+///
+/// `ancestors_bfs` answers "what is reachable, nearest first", and reversing it does not give a
+/// topological order (#187). For a head H whose parents are A and B, where B's parent is A, BFS
+/// returns `[H, A, B, C]` because A is one hop away and B is two; reversed that is `[C, B, A, H]`,
+/// and B is written before A exists. Any caller that builds a structure keyed on "my parent is
+/// already there" needs this order instead of a reversed BFS, and the difference only shows on the
+/// histories where it matters - criss-cross merges, which git produces on its own.
+///
+/// Implemented as a depth-first post-order over parents: a node is emitted after everything it
+/// depends on. Iterative rather than recursive because a long history would otherwise be a stack
+/// overflow on the thing this program is for.
+///
+/// A cycle is an error, not something to walk forever. The first version of this function had no
+/// check, and a `parent` chain that looped made it spin: the parent table is written by several code
+/// paths, and a loop in it must be reported, not hang an export with no output. `visiting` marks the
+/// nodes currently on the stack, which is exactly the set a back edge can point into.
+pub fn topological_order(conn: &Connection, id: &str) -> ZResult<Vec<String>> {
+    let mut out = Vec::new();
+    let mut done: HashSet<String> = HashSet::new();
+    let mut visiting: HashSet<String> = HashSet::new();
+    // (node, parents already pushed?) so a node is revisited after its parents are emitted.
+    let mut stack: Vec<(String, bool)> = vec![(id.to_string(), false)];
+    while let Some((cur, expanded)) = stack.pop() {
+        if expanded {
+            visiting.remove(&cur);
+            if done.insert(cur.clone()) {
+                out.push(cur);
+            }
+            continue;
+        }
+        if done.contains(&cur) {
+            continue;
+        }
+        if !visiting.insert(cur.clone()) {
+            return Err(bad(format!(
+                "the history loops: {} is its own ancestor, so there is no order to write it in",
+                cur
+            )));
+        }
+        // Pushed before the parents so they are emitted first: the stack is last-in first-out.
+        stack.push((cur.clone(), true));
+        let (p1, p2) = parents_of(conn, &cur)?;
+        for p in [p2, p1].into_iter().flatten() {
+            if !done.contains(&p) {
+                stack.push((p, false));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// How many objects the store holds. Used by `gc` to report what it did.
 #[cfg(test)]
 pub fn object_count(conn: &Connection) -> ZResult<i64> {
