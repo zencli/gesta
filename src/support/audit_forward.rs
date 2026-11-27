@@ -378,7 +378,8 @@ mod tests {
         // the queue holds thousands of events, so which request carries the note depends on timing.
         // The first version of this test assumed the second request was the one and failed 2 runs in
         // 3; asserting on `seen.last()` was asserting on a race.
-        let (url, handle) = collector_until_gap(1, 64);
+        let fail_first = 1;
+        let (url, handle) = collector_until_gap(fail_first, 64);
         let f = Forwarder::start(url, None);
 
         let mut accepted = 0usize;
@@ -424,19 +425,46 @@ mod tests {
         );
 
         let seen = handle.join().unwrap();
+        // The note that counts is one the collector ACCEPTED, and this asserted on whichever request
+        // carried a note first - including the one answered with 500.
+        //
+        // The forwarder's rule is that a note whose line fails to arrive goes back into the counter
+        // for the next line, so an unaccepted note is not a delivered one. On the Windows runner the
+        // first request carried a note, `find` returned it, and its count (1, all that had been
+        // dropped at that moment) was compared against `dropped` read after every send (6). The
+        // forwarder was right and the test was wrong.
+        //
+        // Even an accepted note cannot be compared for equality against `dropped`: the collector
+        // stops serving once a note is delivered, so the note carries what had been lost by the time
+        // that line went out, not the total after every send. Equality would assert that the consumer
+        // had drained before the note left, which nothing guarantees. The promise in the header is
+        // that the gap is reported with a count bounded by what was actually lost.
         let with_gap = seen
             .iter()
+            .enumerate()
+            .filter(|(i, _)| *i >= fail_first)
+            .map(|(_, r)| r)
             .find(|r| r.contains("gesta audit gap"))
             .unwrap_or_else(|| {
                 panic!(
-                    "no request among {} carried the gap note; first was: {}",
+                    "no accepted request among {} carried the gap note; first was: {}",
                     seen.len(),
                     seen.first().map(|s| s.as_str()).unwrap_or("<none>")
                 )
             });
+        let announced: u64 = with_gap
+            .split("gesta audit gap:")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("the note must announce a count, got: {with_gap}"));
         assert!(
-            with_gap.contains(&dropped.to_string()),
-            "the note must carry the count ({dropped}), got: {with_gap}"
+            announced >= 1,
+            "a note reporting zero is not reporting the gap: {with_gap}"
+        );
+        assert!(
+            announced <= dropped as u64,
+            "the note claims {announced} were dropped, but only {dropped} ever were: {with_gap}"
         );
     }
     #[test]
