@@ -87,28 +87,87 @@ pub fn cmd_verify_backup(file: &str) -> ZResult<()> {
     Ok(())
 }
 
+/// Where `secret init` gets its passphrase, decided from the two things it can see.
+///
+/// Split from the command so the decision is testable: a test cannot make the harness's own stdin a
+/// terminal, and a check that cannot be exercised is a check that is not known to work.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PassphraseSource {
+    /// Ask on the terminal, twice, and make the two match.
+    Prompt,
+    /// An environment passphrase was supplied, which needs no terminal.
+    Given(String),
+    /// No terminal and no passphrase: refuse rather than read whatever stdin happens to be.
+    Refuse,
+}
+
+pub(crate) fn decide_passphrase(is_terminal: bool, from_env: Option<String>) -> PassphraseSource {
+    match from_env {
+        Some(p) if !p.is_empty() => PassphraseSource::Given(p),
+        _ if is_terminal => PassphraseSource::Prompt,
+        _ => PassphraseSource::Refuse,
+    }
+}
+
 /// Handle `gesta secret`.
 pub fn cmd_secret(sub: crate::SecretCmd) -> ZResult<()> {
     use crate::SecretCmd;
 
     match sub {
         SecretCmd::Init => {
+            use std::io::IsTerminal;
+
             let path = match std::env::var("GESTA_SECRETS_FILE") {
                 Ok(p) if !p.is_empty() => std::path::PathBuf::from(p),
                 _ => crate::support::secrets::default_path()?,
             };
-            println!("store: {}", path.display());
-            let first = read_hidden("passphrase: ")?;
+            // Nothing is printed and nothing is touched until a passphrase is in hand (#339).
+            //
+            // Before this, a redirected stdin was read as if it were a terminal: `stty` printed its
+            // ioctl complaint into the prompt, the piped bytes became the passphrase, and a store was
+            // written and reported as created. A provisioning script piping `printf 'pw\npw\n'` got
+            // an "initialised" empty store and exit 0, and `< /dev/null` produced the same complaint
+            // and the same 0. The exit status said nothing went wrong on a run where nothing worked.
+            //
+            // Two ways in are honest and both work without a terminal: the passphrase in
+            // `GESTA_SECRETS_PASSPHRASE`, or a terminal to ask. Anything else is refused here, before
+            // the path is printed and before the file is read or written, so a failed init leaves the
+            // previous store exactly as it was.
+            let first = match decide_passphrase(
+                std::io::stdin().is_terminal(),
+                std::env::var("GESTA_SECRETS_PASSPHRASE").ok(),
+            ) {
+                PassphraseSource::Given(p) => p,
+                PassphraseSource::Refuse => {
+                    return Err(bad(
+                        "no passphrase: stdin is not a terminal, so there is nothing to ask. \
+                         Set GESTA_SECRETS_PASSPHRASE to initialise without a prompt"
+                            .to_string(),
+                    ))
+                }
+                PassphraseSource::Prompt => {
+                    println!("store: {}", path.display());
+                    let first = read_hidden("passphrase: ")?;
+                    if first.len() < 8 {
+                        return Err(bad(
+                            "a passphrase shorter than 8 characters is not worth the file it protects"
+                                .to_string(),
+                        ));
+                    }
+                    let again = read_hidden("repeat: ")?;
+                    if first != again {
+                        return Err(bad("the two passphrases differ".to_string()));
+                    }
+                    first
+                }
+            };
             if first.len() < 8 {
                 return Err(bad(
                     "a passphrase shorter than 8 characters is not worth the file it protects"
                         .to_string(),
                 ));
             }
-            let again = read_hidden("repeat: ")?;
-            if first != again {
-                return Err(bad("the two passphrases differ".to_string()));
-            }
+            println!("store: {}", path.display());
             let store = crate::support::secrets::SecretStore {
                 path,
                 passphrase: first,
@@ -476,5 +535,36 @@ mod tests {
             );
             let _ = std::fs::remove_file(&p);
         }
+    }
+    #[test]
+    fn init_refuses_a_redirected_stdin_before_touching_the_store() {
+        // #339: a piped passphrase used to be read as if it came from a terminal, the `stty` complaint
+        // was printed into the prompt, and a store was written and reported as created. A provisioning
+        // script got "initialised", exit 0, and an empty store.
+        //
+        // The check lives in the command, and a test cannot redirect the test harness's own stdin, so
+        // what is asserted here is the decision the command makes from the two inputs it reads: an
+        // environment passphrase, and whether stdin is a terminal. `decide_passphrase` is that
+        // decision, split out for exactly this reason.
+        assert_eq!(
+            decide_passphrase(true, None),
+            PassphraseSource::Prompt,
+            "a terminal is asked"
+        );
+        assert_eq!(
+            decide_passphrase(false, None),
+            PassphraseSource::Refuse,
+            "a redirected stdin with no environment passphrase is refused, not guessed at"
+        );
+        assert_eq!(
+            decide_passphrase(false, Some("from-env".to_string())),
+            PassphraseSource::Given("from-env".to_string()),
+            "the environment passphrase works without a terminal"
+        );
+        assert_eq!(
+            decide_passphrase(true, Some("from-env".to_string())),
+            PassphraseSource::Given("from-env".to_string()),
+            "and it wins over the prompt, so a script never blocks on a tty"
+        );
     }
 }

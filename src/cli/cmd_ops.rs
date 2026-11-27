@@ -483,9 +483,19 @@ pub fn cmd_notes(sub: crate::NotesCmd) -> ZResult<()> {
     let (_root, conn) = open_repo()?;
     match sub {
         NotesCmd::Add { changeset, message } => {
-            // The author is whoever is configured for commits, so a note is attributable without a
-            // separate flag nobody would remember to pass.
-            let author = crate::store::get_state(&conn, "user_name")?
+            // The author of the note is the author of the changeset it annotates (#336).
+            //
+            // It used to be `get_state(&conn, "user_name")`, which nothing in the program ever writes,
+            // so the column was always the literal "unknown" and `notes show` printed `  -- unknown`
+            // under every note. The changeset's own author is the person who made the change being
+            // explained, which is who a note is from, and it is a value that actually exists.
+            let author: String = conn
+                .query_row(
+                    "SELECT author FROM changesets WHERE id = ?1",
+                    rusqlite::params![changeset],
+                    |r| r.get(0),
+                )
+                .optional()?
                 .unwrap_or_else(|| "unknown".to_string());
             crate::repo::notes::add(&conn, &changeset, &message, &author)?;
             println!("noted on {changeset}");
@@ -494,7 +504,11 @@ pub fn cmd_notes(sub: crate::NotesCmd) -> ZResult<()> {
         NotesCmd::Show { changeset } => match crate::repo::notes::show(&conn, &changeset)? {
             Some((body, author)) => {
                 println!("{body}");
-                println!("  -- {author}");
+                // Printed only when it carries a name: an old row with an empty author used to render a
+                // bare `  -- ` line, which reads as a truncation bug rather than as "no author".
+                if !author.trim().is_empty() {
+                    println!("  -- {author}");
+                }
                 Ok(())
             }
             None => Err(bad(format!("no note on {changeset}"))),

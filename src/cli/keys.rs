@@ -288,6 +288,10 @@ pub fn cmd_tag(
 }
 
 /// What writing a tag did, so the text and JSON renderers describe the same event.
+///
+/// `Debug` because a test asserts the error case with `unwrap_err`, which needs the success value to
+/// be printable; without it the test cannot state what it expects instead of what it got.
+#[derive(Debug)]
 pub enum TagWrite {
     Created { target: String },
     Moved { old: String, target: String },
@@ -312,6 +316,23 @@ fn write_tag(
     changeset: Option<&str>,
     force: bool,
 ) -> ZResult<TagWrite> {
+    // A tag with no name is not a tag (#336). `gesta tag ""` created a row with an empty name, so
+    // `tag --list` printed a line of blanks and nothing could address it again: `tag ""` with `--force`
+    // moved it, every other spelling created a second one, and `git show-ref` after an export carried a
+    // ref whose last segment is empty. Refused before the target is resolved, so the error names the
+    // problem rather than reporting "no such changeset" for a name that was never valid.
+    if name.trim().is_empty() {
+        return Err(bad(
+            "a tag needs a non-empty name: `gesta tag <name> [--changeset REV]`".to_string(),
+        ));
+    }
+    // Whitespace inside a name is legal for git but invisible in every listing, and a name that is
+    // only whitespace is the empty case with extra steps.
+    if name.chars().any(|c| c.is_control()) {
+        return Err(bad(
+            "a tag name may not contain control characters".to_string()
+        ));
+    }
     // Whatever was named has to be turned into a changeset id before it is stored. Storing the
     // name is what let `tag v2 main` succeed while pointing at a string that is not a changeset:
     // the tag exists, resolves to nothing, and fails only when somebody reads through it.
@@ -621,5 +642,68 @@ mod hidden_tests {
         let guard = super::EchoOff { engaged: false };
         // Nothing to restore, so this must not hang or fail; the point is that `Drop` runs at all.
         drop(guard);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A temp repository with one committed changeset, so a tag has something to point at.
+    ///
+    /// `init_schema` alone is not a repository: the schema has no `main` branch row, so a changeset has
+    /// nothing to belong to. Inserting the row by hand was the alternative, and it would let this test
+    /// keep passing if `repo_init` stopped doing it - the ordinary path is the one worth using.
+    fn repo_with_one_changeset() -> (std::path::PathBuf, Connection) {
+        let dir = std::env::temp_dir().join(format!("gesta-tag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The same three steps `gesta init` performs. `init_schema` alone leaves no `main` row, so a
+        // changeset has nothing to belong to; inserting the row by hand instead would let this test
+        // keep passing if the ordinary path stopped doing it.
+        std::fs::create_dir_all(dir.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&dir).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, ?1, NULL)",
+            rusqlite::params![0i64],
+        )
+        .unwrap();
+        crate::store::set_state(&conn, "current_branch", "main").unwrap();
+        std::fs::write(dir.join("a.txt"), b"a").unwrap();
+        // Committed, not merely created: a tag needs a changeset on the branch, and a pending one leaves
+        // `main` with no head, which `write_tag` reports as "branch has no changesets to tag".
+        let cs = crate::repo::create_changeset(&conn, &dir, "c", "alice")
+            .unwrap()
+            .expect("a written file is something to snapshot");
+        crate::repo::commit_one(&conn, &cs.id).unwrap();
+        (dir, conn)
+    }
+
+    #[test]
+    fn a_tag_with_no_name_is_refused() {
+        // #336: `gesta tag ""` created a nameless tag that `tag --list` printed as a line of blanks and
+        // that nothing could address again.
+        let (dir, conn) = repo_with_one_changeset();
+        let e = write_tag(&conn, "", None, false).unwrap_err();
+        assert!(
+            e.to_string().contains("non-empty"),
+            "the refusal must say the name cannot be empty, got: {e}"
+        );
+        assert!(
+            read_tags(&conn).unwrap().is_empty(),
+            "no row may be created"
+        );
+
+        // Whitespace is the empty case with extra steps, and invisible in every listing.
+        let e = write_tag(&conn, "   ", None, false).unwrap_err();
+        assert!(e.to_string().contains("non-empty"), "got: {e}");
+        assert!(read_tags(&conn).unwrap().is_empty());
+
+        // The control: a real name still works, so the guard cannot pass by refusing everything.
+        write_tag(&conn, "v1", None, false).expect("a named tag must still be created");
+        assert_eq!(read_tags(&conn).unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
