@@ -1959,10 +1959,34 @@ fn receive_bundle(
             )));
         }
     }
+    let bundle = Bundle::decode(body)?;
+
+    // The branch the caller asked for and the branch the bundle claims to be must be the same.
+    //
+    // Everything above this line is checked against `branch`, the URL parameter: the grant's branch
+    // scope, and later the fast-forward check and its rollback. `apply_bundle` writes to
+    // `bundle.branch`, the branch named inside the body. With `?branch=main` and a bundle claiming
+    // `branch=release`, the scope check examined main while the write landed on release, so a token
+    // scoped to one branch could push to another; and because the fast-forward check compared
+    // against main's head, a non-fast-forward move of release was never caught and the 409's
+    // rollback reset main - a no-op - leaving release moved anyway.
+    //
+    // Rerouting the check to `bundle.branch` would fix the head comparison and leave the scope hole
+    // open, since the grant was already consulted for the URL branch. Rerouting the scope check as
+    // well would mean trusting a field the caller chose to decide which scope applies to them. The
+    // two names have no legitimate reason to differ: `bundle_url` and every client set the query
+    // parameter from the same branch they put in the bundle, so a mismatch is a broken or hostile
+    // request, and refusing it here is the only answer that leaves no branch moved and no scope
+    // escaped.
+    if bundle.branch != branch {
+        return Err(ApplyError::Rejected(format!(
+            "this bundle is for branch {:?} but was pushed to {:?}; push it to the branch it names",
+            bundle.branch, branch
+        )));
+    }
+
     let conn = open_db(root)?;
     init_schema(&conn)?;
-
-    let bundle = Bundle::decode(body)?;
 
     // The path scope, before anything is written (#149).
     //
@@ -2763,6 +2787,168 @@ mod tests {
             "the permitted branch must get past the scope check: {err2}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bundle_naming_a_different_branch_is_refused_before_anything_is_written() {
+        // #150: `receive_bundle` checked the scope, took the previous head, ran the fast-forward
+        // check and rolled back - all against `branch`, the URL parameter - while `apply_bundle`
+        // wrote to `bundle.branch`, the branch named inside the body. Three things went wrong at
+        // once with `?branch=main` and a bundle claiming `branch=release`:
+        //
+        //  1. the branch scope was consulted for main while the write landed on release, so a token
+        //     scoped to one branch pushed to another;
+        //  2. the fast-forward check compared the incoming head against main's head, so a
+        //     non-fast-forward move of release was never caught;
+        //  3. the 409's rollback called `set_branch_head(main, prev)`, a no-op, so release stayed
+        //     moved even though the request was refused.
+        //
+        // The refusal has to come before `apply_bundle`, which is why the check sits right after the
+        // decode and before the store is even opened: any later and the branch has already moved,
+        // whatever the status code says.
+        let src = std::env::temp_dir().join(format!("gesta-bundle-mix-src-{}", std::process::id()));
+        let dst = std::env::temp_dir().join(format!("gesta-bundle-mix-dst-{}", std::process::id()));
+        for d in [&src, &dst] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d.join(".gesta")).unwrap();
+        }
+
+        // The destination has a `main`, because a server that accepts a push has one.
+        {
+            let conn = crate::store::open_db(&dst).unwrap();
+            crate::store::init_schema(&conn).unwrap();
+            crate::store::migrate(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, 0, NULL)",
+                [],
+            )
+            .unwrap();
+        }
+
+        // A well-formed bundle aimed at `release`, pushed to `main`.
+        let body = {
+            let conn = crate::store::open_db(&src).unwrap();
+            crate::store::init_schema(&conn).unwrap();
+            crate::store::migrate(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO branches(name, head, created_at, from_branch) VALUES('release', NULL, 0, NULL)",
+                [],
+            )
+            .unwrap();
+            // `create_changeset` works off the working tree on the current branch (`main`), and
+            // this fixture's only branch is `release`, so the changeset is built directly: one
+            // changeset row, one file row, committed onto release.
+            let obj = crate::store::put_object(&conn, "fn a() {}\n").unwrap();
+            conn.execute(
+                "INSERT INTO changesets(id,message,author,created_at,status,parent,branch)
+                 VALUES('cs1','add a','t',1,'pending',NULL,'release')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+                 VALUES('cs1','src/a.rs',NULL,?1)",
+                rusqlite::params![&obj],
+            )
+            .unwrap();
+            crate::repo::commit_one(&conn, "cs1").unwrap();
+            crate::store::set_branch_head(&conn, "release", "cs1").unwrap();
+            crate::transport::remote::build_bundle(
+                &conn,
+                "release",
+                &std::collections::HashSet::new(),
+            )
+            .unwrap()
+            .encode()
+            .unwrap()
+        };
+
+        let g = grant_to(&[]);
+        let err = receive_bundle(&dst, "main", &body, "t", Some(&g)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("release") && msg.contains("main"),
+            "the refusal must name both branches so the caller can see the mix-up: {msg}"
+        );
+
+        // Nothing may have moved. The old code created `release` during `apply_bundle` and then
+        // reported a 409, so this asserts on the store and not only on the message. Read from the
+        // table rather than `branch_head`: that returns an error for a branch that does not exist,
+        // and "does not exist" is exactly the state being asserted.
+        let server = crate::store::open_db(&dst).unwrap();
+        let branches: Vec<String> = {
+            let mut st = server
+                .prepare("SELECT name FROM branches ORDER BY name")
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(
+            branches,
+            vec!["main".to_string()],
+            "a refused push must leave exactly the branch the server already had"
+        );
+        let moved: Option<String> = server
+            .query_row("SELECT head FROM branches WHERE name = 'main'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(
+            moved.is_none(),
+            "the URL branch must not have moved either, but its head is now {moved:?}"
+        );
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    #[test]
+    fn a_bundle_pushed_to_the_branch_it_names_still_applies() {
+        // The guard must not refuse legitimate pushes: every client sets the query parameter from
+        // the same branch it puts in the bundle.
+        let src =
+            std::env::temp_dir().join(format!("gesta-bundle-same-src-{}", std::process::id()));
+        let dst =
+            std::env::temp_dir().join(format!("gesta-bundle-same-dst-{}", std::process::id()));
+        for d in [&src, &dst] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d.join(".gesta")).unwrap();
+        }
+        for d in [&src, &dst] {
+            let conn = crate::store::open_db(d).unwrap();
+            crate::store::init_schema(&conn).unwrap();
+            crate::store::migrate(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, 0, NULL)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let body = {
+            let conn = crate::store::open_db(&src).unwrap();
+            std::fs::create_dir_all(src.join("src")).unwrap();
+            std::fs::write(src.join("src/a.rs"), "fn a() {}\n").unwrap();
+            let cs = crate::repo::create_changeset(&conn, &src, "add a", "t")
+                .unwrap()
+                .expect("one file is a changeset");
+            crate::repo::commit_one(&conn, &cs.id).unwrap();
+            crate::transport::remote::build_bundle(&conn, "main", &std::collections::HashSet::new())
+                .unwrap()
+                .encode()
+                .unwrap()
+        };
+
+        let g = grant_to(&[]);
+        let out = receive_bundle(&dst, "main", &body, "t", Some(&g));
+        assert!(
+            out.is_ok(),
+            "a bundle naming the branch it is pushed to must apply: {:?}",
+            out.map_err(|e| e.to_string())
+        );
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
     }
 
     #[test]
