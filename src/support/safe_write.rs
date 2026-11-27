@@ -113,7 +113,10 @@ pub fn write_safe(root: &Path, rel: &str, content: &[u8]) -> crate::ZResult<usiz
     Ok(content.len())
 }
 
-#[cfg(test)]
+// Both tests below are `#[cfg(unix)]`, and an empty module with a wildcard import is an unused import
+// on Windows - an error under `-D warnings`, which the Windows build job runs. The module is gated the
+// same way its tests are, so the file compiles on a platform where neither can run.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
