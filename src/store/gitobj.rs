@@ -433,6 +433,23 @@ impl Repo {
 
     /// Write a ref, creating it if needed.
     pub fn write_ref(&self, name: &str, hash: &str) -> ZResult<()> {
+        // The name is validated before it is joined (#311).
+        //
+        // `self.git_dir.join(name)` accepts `../..` and an absolute path, so a ref name reaching this
+        // from a branch or tag created by a pack or a remote wrote a file outside `.git`: the content
+        // is only a hash, which bounds the damage, but it is still a write the caller did not ask for
+        // and one an attacker chooses the path of.
+        //
+        // The rules are git's own, reduced to what this program writes: no leading slash, no `..`
+        // component, no control characters, no path that climbs. `git check-ref-format` is stricter
+        // about `~`, `^`, `:`, `?`, `*`, `[` and a trailing `.lock`, and refusing those here as well
+        // costs one predicate and keeps a ref this program writes readable by git.
+        if !crate::support::paths::is_git_ref_name(name) {
+            return Err(bad(format!(
+                "refusing to write the ref {name:?}: a ref name may not be empty, absolute, climb \
+                 with `..`, contain a control character, or use one of ~ ^ : ? * [ \\ or end in .lock"
+            )));
+        }
         let path = self.git_dir.join(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1051,6 +1068,60 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("packfile"), "unhelpful message: {}", err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn a_ref_name_that_leaves_the_git_directory_is_refused() {
+        // #311: `self.git_dir.join(name)` accepted `../..` and an absolute path, so a ref name from a
+        // branch or tag written a file outside `.git`. The content is only a hash, which bounds the
+        // damage, but the path is chosen by whoever supplied the name.
+        let dir = std::env::temp_dir().join(format!("gesta-ref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let repo = Repo::open(&dir).unwrap();
+
+        let outside = dir.parent().unwrap().join("escaped-ref.txt");
+        let _ = std::fs::remove_file(&outside);
+
+        let e = repo
+            .write_ref(
+                "../../escaped-ref.txt",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap_err();
+        assert!(
+            e.to_string().contains("refusing to write the ref"),
+            "the refusal must name what was refused, got: {e}"
+        );
+        assert!(
+            !outside.exists(),
+            "nothing may be written outside the git directory: {}",
+            outside.display()
+        );
+
+        // An absolute name must be refused for the same reason.
+        let abs = std::env::temp_dir().join("escaped-abs-ref.txt");
+        let _ = std::fs::remove_file(&abs);
+        assert!(repo
+            .write_ref(
+                abs.to_str().unwrap(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )
+            .is_err());
+
+        // A name that is not under `refs/` would overwrite a file git needs.
+        assert!(repo
+            .write_ref("config", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .is_err());
+
+        // The control: a real ref still writes, so the guard cannot pass by refusing everything.
+        repo.write_ref(
+            "refs/heads/main",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("a normal branch ref must still be written");
+        assert!(dir.join(".git/refs/heads/main").is_file());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

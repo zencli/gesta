@@ -56,6 +56,40 @@ pub fn is_repo_relative(path: &str) -> bool {
     true
 }
 
+/// Whether `name` is a ref name this program may write under `.git`.
+///
+/// Git's own rules, reduced to the ones that matter when the name is joined onto a directory and
+/// written: it must be relative, it must not climb, and it must not carry a character that changes
+/// what the path means or that git itself refuses.
+///
+/// `is_repo_relative` is not enough here because a ref name is joined under `.git`, not the working
+/// tree, and because git refuses a handful of characters a file name allows.
+pub fn is_git_ref_name(name: &str) -> bool {
+    if !is_repo_relative(name) {
+        return false;
+    }
+    if !name.starts_with("refs/") {
+        // Every ref this program writes lives under `refs/`. A name outside it would be a file in
+        // `.git` itself - `config`, `HEAD`, `packed-refs` - and overwriting those is a way to make a
+        // repository stop working.
+        return false;
+    }
+    if name.ends_with(".lock") || name.ends_with('/') || name.contains("//") {
+        return false;
+    }
+    // Control characters, and the characters git refuses anywhere in a ref.
+    if name.chars().any(|c| {
+        c.is_control() || c == ' ' || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+    }) {
+        return false;
+    }
+    // `..` inside a component is refused by git as well as `..` as a whole component.
+    if name.contains("..") || name.contains("@{") {
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +157,42 @@ mod tests {
         assert_eq!(head_chars("éééé", 2), "éé");
         // A four-byte character counts as one.
         assert_eq!(head_chars("🙂🙂", 1), "🙂");
+    }
+    #[test]
+    fn a_ref_name_must_stay_under_refs_and_avoid_gits_reserved_characters() {
+        // #311: `write_ref` joined the name onto `.git` and wrote it, so `../../x` and `/etc/passwd`
+        // both landed outside, and a name like `config` overwrote a file git needs.
+        for ok in [
+            "refs/heads/main",
+            "refs/heads/feature-x",
+            "refs/tags/v1.0",
+            "refs/heads/a/b/c",
+        ] {
+            assert!(is_git_ref_name(ok), "{ok} must be accepted");
+        }
+        for bad in [
+            "",
+            "/etc/passwd",
+            "../outside",
+            "refs/heads/../../outside",
+            "refs/heads/a\\b",
+            "config",
+            "HEAD",
+            "refs/heads/x.lock",
+            "refs/heads/a b",
+            "refs/heads/a~1",
+            "refs/heads/a:b",
+            "refs/heads/a..b",
+            "refs/heads/a@{b",
+            "refs/heads/",
+            "refs//heads/main",
+        ] {
+            assert!(!is_git_ref_name(bad), "{bad:?} must be refused");
+        }
+        let control = "refs/heads/a\nb";
+        assert!(
+            !is_git_ref_name(control),
+            "a newline in a ref name must be refused"
+        );
     }
 }
