@@ -1513,14 +1513,20 @@ pub fn merge_branch(
     // codebase records one. Without this the path stayed in the tree: the merge reported clean, the
     // file was still there, and the branch it came from had already deleted it.
     for path in &removed {
-        let old_hash: Option<String> = tx
-            .query_row(
-                "SELECT new_hash FROM changeset_files WHERE path = ?1 ORDER BY rowid DESC LIMIT 1",
-                params![path],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten();
+        // The hash at the TARGET HEAD, not the newest row for this path anywhere in the database
+        // (#314).
+        //
+        // `ORDER BY rowid DESC LIMIT 1` returned whichever branch touched the path most recently,
+        // across the whole store. Usually that is the base, which is why this survived: a delete row
+        // has a NULL `new_hash`, so the flatten fell back to nothing and `revert` used
+        // `hash_at_point` at the parent anyway. But when another branch edited the file after the
+        // base, this carried THAT branch's hash, and reverting a merge that deletes the file restored
+        // the other branch's content instead of the pre-merge one. The head of the target is the
+        // revision the merge started from, so it is the only correct answer.
+        let old_hash: Option<String> = match &tgt_head {
+            Some(head) => hash_at_point(&tx, path, head)?,
+            None => None,
+        };
         tx.execute(
             "INSERT INTO changeset_files(changeset_id, path, old_hash, new_hash)
              VALUES(?1, ?2, ?3, NULL)",
@@ -4781,6 +4787,74 @@ pub(crate) mod tests {
             .expect("an ordinary tree must restore");
         assert!(n >= 1, "at least one file must be written, got {n}");
         assert_eq!(std::fs::read(d.join("sub/deep.txt")).unwrap(), b"deep");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_merge_keeps_a_newly_added_empty_file() {
+        // #315: a changeset that adds an empty file has `new_hash` = hash of "". `merge3` returns ""
+        // and our side is absent, which the loop read as `""` too, so `result.text() != our_text` was
+        // false: no `changeset_files` row was written, the file never appeared on the target, and the
+        // merge reported success. The addition vanished with nothing said.
+        let d = std::env::temp_dir().join(format!("gesta-merge-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&d).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, ?1, NULL)",
+            params![0i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO branches(name, head, created_at, from_branch) VALUES('side', NULL, ?1, 'main')",
+            params![0i64],
+        )
+        .unwrap();
+        crate::store::set_state(&conn, "current_branch", "main").unwrap();
+
+        // A base commit on main, so the branch has a parent.
+        std::fs::write(d.join("base.txt"), b"base\n").unwrap();
+        let cs = crate::repo::create_changeset(&conn, &d, "base", "alice")
+            .unwrap()
+            .expect("a written file is something to snapshot");
+        crate::repo::commit_one(&conn, &cs.id).unwrap();
+
+        // On `side`, add an empty file and commit it there.
+        crate::store::set_state(&conn, "current_branch", "side").unwrap();
+        conn.execute("UPDATE branches SET head = (SELECT head FROM branches WHERE name='main') WHERE name='side'", []).unwrap();
+        std::fs::write(d.join("empty.txt"), b"").unwrap();
+        let side_cs = crate::repo::create_changeset(&conn, &d, "add empty", "alice")
+            .unwrap()
+            .expect("an empty file is still a file to snapshot");
+        crate::repo::commit_one(&conn, &side_cs.id).unwrap();
+
+        // Back to main and merge. The file the branch added is on disk from the commit; main's tree
+        // does not hold it, so `refuse_if_dirty` (#270) sees it as an uncommitted change that the move
+        // would overwrite. Removing it first is what a person merging into a clean main would see.
+        std::fs::remove_file(d.join("empty.txt")).unwrap();
+        crate::store::set_state(&conn, "current_branch", "main").unwrap();
+        let out = crate::repo::merge_branch(&conn, &d, "side", "main", "alice")
+            .expect("the merge itself must succeed");
+        assert!(
+            out.conflicts.is_empty(),
+            "adding an empty file must not conflict: {:?}",
+            out.conflicts
+        );
+
+        // The file is on the target, in the tree and on disk.
+        let main_head = crate::store::branch_head(&conn, "main").unwrap().unwrap();
+        let tree = crate::store::tree_at(&conn, &main_head).unwrap();
+        assert!(
+            tree.iter().any(|(p, _)| p == "empty.txt"),
+            "the merged tree must hold the added empty file, got: {:?}",
+            tree.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            d.join("empty.txt").exists(),
+            "the added empty file must be on disk after the merge"
+        );
 
         let _ = std::fs::remove_dir_all(&d);
     }
