@@ -2614,6 +2614,21 @@ pub fn gc(conn: &Connection) -> ZResult<u64> {
                 "DELETE FROM objects WHERE hash = ?1",
                 rusqlite::params![&hash],
             )?;
+            // The `deltas` row goes with it (#276).
+            //
+            // `get_object_at_depth` treats the presence of a row in `deltas` as decisive: if one
+            // exists it applies the payload and hash-checks each link. An orphaned row left behind
+            // by gc therefore outlives the object it described, and if the same content is stored
+            // again later - whole, because its base was collected too - every read of that hash finds
+            // the stale delta first and fails the hash check. The bytes are fine; the row makes them
+            // unreadable.
+            //
+            // Deleting it here is the same transaction as the object, so a crash between the two
+            // cannot leave the pair split.
+            conn.execute(
+                "DELETE FROM deltas WHERE hash = ?1",
+                rusqlite::params![&hash],
+            )?;
             deleted += 1;
         }
     }
@@ -4437,5 +4452,45 @@ pub(crate) mod tests {
             decompress_bytes(&small).unwrap(),
             b"under the ceiling".to_vec()
         );
+    }
+    #[test]
+    fn gc_leaves_no_orphan_delta_row_and_the_content_stays_readable() {
+        // #276: gc deleted the `objects` row and kept the `deltas` row. `get_object_at_depth` treats a
+        // `deltas` row as decisive, so when the same content was stored again later - whole, because
+        // its base had been collected - every read found the stale delta first and failed the hash
+        // check. The bytes were fine; the leftover row made them unreadable.
+        let conn = mem_db();
+        let base: String = (0..300).map(|n| format!("line {n:06}\n")).collect();
+        let tip = format!("{base}one extra line\n");
+
+        let h_base = put_object(&conn, &base).unwrap();
+        let h_tip = put_object_against(&conn, &tip, Some(&h_base)).unwrap();
+        assert!(
+            delta_depth(&conn, &h_tip).unwrap() >= 1,
+            "the fixture must store the tip as a delta, or there is nothing to orphan"
+        );
+
+        // Nothing references either object, so gc collects both.
+        let deleted = gc(&conn).unwrap();
+        assert!(deleted >= 2, "both objects were unreachable, got {deleted}");
+
+        let orphan: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM deltas WHERE hash = ?1",
+                params![&h_tip],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            orphan, 0,
+            "gc deleted the object but left its deltas row, which makes the content unreadable later"
+        );
+
+        // The content comes back, stored whole this time because its base is gone.
+        let again = put_object(&conn, &tip).unwrap();
+        assert_eq!(again, h_tip, "the same bytes hash to the same name");
+        let read = get_object(&conn, &again)
+            .expect("content stored after a gc must be readable, not shadowed by a stale delta");
+        assert_eq!(read, tip);
     }
 }
