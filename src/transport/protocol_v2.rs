@@ -11,7 +11,7 @@
 //! version 2
 //! agent=gesta/0.x
 //! ls-refs=unborn
-//! fetch=shallow wait-for-done
+//! fetch=
 //! object-format=sha1
 //! 0000
 //! ```
@@ -76,7 +76,18 @@ pub fn capability_advertisement(version: &str) -> Vec<u8> {
     out.extend_from_slice(&pkt_line(b"ls-refs=unborn\n"));
     // `ref-in-want` is deliberately absent: it would need a way to send objects for a ref name
     // rather than a sha, and the v0 path already covers that case.
-    out.extend_from_slice(&pkt_line(b"fetch=shallow\n"));
+    // `shallow` is deliberately absent (#175). The module docs already said shallow fetch is not
+    // implemented and "not advertised either", and the code advertised it anyway. A v2 client that
+    // sees `fetch=shallow` sends `deepen` arguments and believes it received a shallow history; this
+    // server answers with the whole pack and no error, so the client's own record of what it holds
+    // is wrong from then on. A capability a server declares and cannot honour is worse than one it
+    // omits, because the client has no way to fall back - which is what the module docs say and what
+    // this line now follows.
+    //
+    // The bundle path does support depth (`build_bundle_with_depth`, used by the native `clone
+    // --depth`), so a native shallow clone still works; it is only the git protocol surface that
+    // cannot honour the request.
+    out.extend_from_slice(&pkt_line(b"fetch=\n"));
     out.extend_from_slice(&pkt_line(b"object-format=sha1\n"));
     out.extend_from_slice(&crate::transport::gitserver::flush());
     out
@@ -318,6 +329,48 @@ mod tests {
             !text.contains("refs/heads/"),
             "the capability advertisement must not carry refs"
         );
+    }
+
+    #[test]
+    fn the_advertisement_does_not_claim_shallow() {
+        // #175. This assertion was missing: the old test asked only whether the text contained
+        // "fetch", which stays true whether or not the value is honest, so `fetch=shallow` shipped
+        // for as long as the module docs said shallow was not implemented - and those docs also
+        // said it was "not advertised either". A client that negotiates shallow then receives a full
+        // pack and no error, so it believes it holds a shallow history and is wrong.
+        //
+        // A capability the server cannot honour must not be listed, which is the rule the module
+        // docs already state. Checked as a whole value rather than a substring, so a future
+        // `shallow-since` or `shallow-exclude` also has to be a deliberate decision.
+        // Checked through the pkt-line framing, not `lines()`: each line arrives with a four-byte
+        // hex length prefix, so a raw text search for a line that starts with `fetch=` finds nothing
+        // and a naive assertion would fail for the wrong reason - which is what the first version of
+        // this test did.
+        let caps: Vec<String> = read_pkt_lines(&capability_advertisement("0.9.0"))
+            .into_iter()
+            .map(|l| l.trim().to_string())
+            .collect();
+        let fetch_line = caps
+            .iter()
+            .find(|l| l.starts_with("fetch="))
+            .unwrap_or_else(|| {
+                panic!(
+                    "a v2 advertisement without a fetch line is not a v2 advertisement: {caps:?}"
+                )
+            });
+        assert_eq!(
+            fetch_line, "fetch=",
+            "shallow fetch is not implemented, so it must not be advertised"
+        );
+        let joined = caps.join("\n");
+        // `filter` and `wait-for-done` are in the same position, and the module docs list them
+        // together with shallow as not implemented.
+        for absent in ["shallow", "filter", "wait-for-done", "ref-in-want"] {
+            assert!(
+                !joined.contains(absent),
+                "unimplemented capability {absent:?} must stay off the list: {joined}"
+            );
+        }
     }
 
     #[test]
