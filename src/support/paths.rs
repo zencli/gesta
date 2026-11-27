@@ -48,8 +48,14 @@ pub fn is_repo_relative(path: &str) -> bool {
     }
     // No component may climb, and a component that is empty means the value is malformed rather than
     // merely unusual.
+    //
+    // The empty and `.` cases were documented and not checked (#304), so `a//b`, `a/` and `.` all
+    // passed. `Path::join` normalises them, which is why nothing broke, but the function is used as a
+    // boundary check on paths that come from a pack or a request: accepting a shape it promises to
+    // refuse means every caller that trusts the promise is trusting a check that is not there. `.` is
+    // the root rather than a file, which is the same reason the empty string is refused.
     for part in path.split('/') {
-        if part == ".." {
+        if part == ".." || part.is_empty() || part == "." {
             return false;
         }
     }
@@ -62,14 +68,14 @@ mod tests {
 
     #[test]
     fn a_tree_path_is_relative_and_does_not_climb() {
-        for ok in [
-            "a.txt",
-            "src/main.rs",
-            "a/b/c.rs",
-            "./a.txt",
-            "assets/x.bin",
-        ] {
+        for ok in ["a.txt", "src/main.rs", "a/b/c.rs", "assets/x.bin"] {
             assert!(is_repo_relative(ok), "{ok} must be accepted");
+        }
+        // `./a.txt`, `a/`, `a//b` and `.` were accepted here until #304, which contradicted this
+        // function's own doc: an empty component and `.` are malformed, and `.` names the root rather
+        // than a file. They are refused now, so a caller that trusts the check gets the check.
+        for bad in ["./a.txt", "a/", "a//b", ".", "/a.txt", "../x", "..\\x"] {
+            assert!(!is_repo_relative(bad), "{bad:?} must be refused");
         }
         let backslash = "a\\b";
         let unc = "\\\\server\\share\\x";

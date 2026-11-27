@@ -133,23 +133,30 @@ pub fn changeset_from_content(
             // file. Refusing is the only honest answer.
             return Err(bad(format!("{} appears twice in one changeset", path)));
         }
+        // Every entry is validated, whether or not its content was sent (#310).
+        //
+        // The check below this block was inside the `content.is_empty()` arm, so an entry with content
+        // went straight into `changeset_files` with no validation at all. The one production caller
+        // validates first, which is why nothing was reachable through it - but this function is where
+        // a tree is built, and a tree holding `../../x` is the input of every checkout that has to
+        // place it: the restore and bisect traversal fixed in #275 read exactly these rows. A store
+        // function that trusts its caller to have checked is a store function that cannot be reused
+        // safely, and the check is one predicate.
+        if !crate::support::paths::is_repo_relative(path) {
+            return Err(bad(format!(
+                "{}: a tree entry must be a relative path that stays inside the repository. \
+                 Refused: it is absolute, climbs out, or is malformed.",
+                path
+            )));
+        }
         // Binary files arrive with empty content; read bytes from disk and store
         // Raw bytes. Text files use the provided string.
         let new_hash = if content.is_empty() {
-            // The path comes from the request body, and an empty content entry is the signal to read
-            // the bytes off disk. Reading `path` as given meant a client could name `/etc/passwd` or
-            // `../../../etc/shadow` and have its contents stored as an object, then read back through
-            // the ordinary file routes: the server read whatever the client named. A tree path is
-            // relative and stays inside the repository by definition, so anything that is not is
-            // refused. Checked here rather than at the HTTP layer because this is the only place that
-            // opens a file on the caller's word, and the CLI reaches it too.
-            if !crate::support::paths::is_repo_relative(path) {
-                return Err(bad(format!(
-                    "{}: an entry with empty content is read from disk, so the path must be relative \
-                     and stay inside the repository. Refused: it is absolute or climbs out.",
-                    path
-                )));
-            }
+            // The path was validated above, for both arms, so the reason this function is the place
+            // to check is worth keeping: reading `path` as given meant a client could name
+            // `/etc/passwd` and have its contents stored as an object, then read back through the
+            // ordinary file routes (#152). Opening a file on the caller's word is the sharpest use of
+            // the path, which is why the check lives here and not at the HTTP layer.
             // Against the repository root, not against whatever directory the server happens to
             // have been started in (#107). This function is handed a tree path - the same string
             // that goes into `changeset_files` - and reading it as given meant the answer depended
@@ -252,13 +259,7 @@ mod tests {
 
     #[test]
     fn a_repo_relative_path_is_the_only_kind_allowed() {
-        for ok in [
-            "a.txt",
-            "src/main.rs",
-            "a/b/c.rs",
-            "./a.txt",
-            "assets/x.bin",
-        ] {
+        for ok in ["a.txt", "src/main.rs", "a/b/c.rs", "assets/x.bin"] {
             assert!(
                 crate::support::paths::is_repo_relative(ok),
                 "{ok} must be accepted"
@@ -275,6 +276,11 @@ mod tests {
             "..",
             "",
             backslash,
+            // Refused since #304: an empty component and `.` are malformed, which is what this
+            // function's doc always said.
+            "./a.txt",
+            "a/",
+            "a//b",
         ] {
             assert!(
                 !crate::support::paths::is_repo_relative(bad),
@@ -306,7 +312,7 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(
-            err.contains("must be relative") && err.contains("climbs out"),
+            err.contains("must be a relative path") && err.contains("climbs out"),
             "the refusal must say the path is not a tree path: {err}"
         );
 
@@ -630,5 +636,55 @@ mod tests {
             "the stored object is not the file inside the repository"
         );
         let _ = std::fs::remove_dir_all(&repo);
+    }
+    #[test]
+    fn an_entry_with_content_is_validated_too() {
+        // #310: the check lived inside the `content.is_empty()` arm, so an entry that SENT its content
+        // went into `changeset_files` with no validation at all. The one production caller validated
+        // first, which is why nothing was reachable through it - but this is where a tree is built, and
+        // a tree holding `../../x` is exactly the input of the checkout paths fixed in #275.
+        let conn = mem_db();
+        let poisoned = vec![("../../escaped.txt".to_string(), "content".to_string())];
+        let err = match changeset_from_content(
+            Repo {
+                conn: &conn,
+                root: no_disk(),
+            },
+            "poison",
+            "agent",
+            "main",
+            &poisoned,
+            &[],
+            None,
+        ) {
+            Ok(cs) => panic!("a climbing path with content was accepted: {}", cs.id),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("must be a relative path"),
+            "the refusal must name the rule: {err}"
+        );
+
+        // Nothing was written: the tree is still empty.
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM changeset_files", [], |r| r.get(0))
+            .unwrap_or(0);
+        assert_eq!(rows, 0, "a refused entry must not leave rows behind");
+
+        // An ordinary path with content still works, so the guard cannot pass by refusing everything.
+        let fine = vec![("src/ok.txt".to_string(), "content".to_string())];
+        changeset_from_content(
+            Repo {
+                conn: &conn,
+                root: no_disk(),
+            },
+            "fine",
+            "agent",
+            "main",
+            &fine,
+            &[],
+            None,
+        )
+        .expect("a normal path with content must be accepted");
     }
 }
