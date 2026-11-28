@@ -58,7 +58,6 @@ fn mode_of(meta: &fs::Metadata) -> String {
 pub struct ScanResult {
     pub files: Vec<ScannedFile>,
     /// Paths that are binary or otherwise not valid UTF-8.
-    pub skipped_binary: Vec<String>,
     /// Paths whose stat did not match the cache and had to be re-read.
     pub rehashed: usize,
     /// Files that could not be read at all, with the reason.
@@ -84,7 +83,6 @@ pub fn scan_with_cache(
     // element several times, which is measurable when the elements hold strings.
     let estimate = known.len().max(64);
     let mut files = Vec::with_capacity(estimate);
-    let skipped_binary: Vec<String> = Vec::new();
 
     let mut rehashed = 0usize;
     let mut cached = 0usize;
@@ -250,9 +248,9 @@ pub fn scan_with_cache(
     }
 
     // Pruning uses the scan's own results: `files` holds the text paths and
-    // `skipped_binary` the binary ones, which together are every path present on
+    // the scanned ones, which together are every path present on
     // disk. Keeping a third copy of the same strings was pure allocation.
-    prune_cache(conn, &files, &skipped_binary)?;
+    prune_cache(conn, &files)?;
     // Sorted by repository path before it leaves this function. The walk returns whatever order the
     // filesystem hands back, which is hash order on ext4 and insertion order on others, so anything
     // that reads `files` positionally was reading an order the filesystem chose. Two machines with
@@ -263,7 +261,6 @@ pub fn scan_with_cache(
     files.sort_by(|a, b| a.rel.cmp(&b.rel));
     Ok(ScanResult {
         files,
-        skipped_binary,
         rehashed,
         cached,
         unreadable,
@@ -298,7 +295,7 @@ fn load_cache(conn: &Connection) -> ZResult<HashMap<String, (i64, i64, String)>>
 ///
 /// Equal counts do not prove equal membership. Populate a temporary live set and
 /// delete stale rows by membership, including when the two counts are equal.
-fn prune_cache(conn: &Connection, files: &[ScannedFile], binary: &[String]) -> ZResult<()> {
+fn prune_cache(conn: &Connection, files: &[ScannedFile]) -> ZResult<()> {
     conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS live_paths(path TEXT PRIMARY KEY);")?;
     conn.execute("DELETE FROM live_paths", [])?;
     {
@@ -307,9 +304,6 @@ fn prune_cache(conn: &Connection, files: &[ScannedFile], binary: &[String]) -> Z
             let mut stmt = tx.prepare("INSERT OR IGNORE INTO live_paths(path) VALUES(?1)")?;
             for f in files {
                 stmt.execute(params![f.rel])?;
-            }
-            for b in binary {
-                stmt.execute(params![b.as_str()])?;
             }
         }
         tx.execute(
@@ -367,18 +361,28 @@ mod tests {
             content: String::new(),
             mode: "100644".into(),
         }];
-        prune_cache(&conn, &files, &["keep.bin".into()]).unwrap();
+        prune_cache(&conn, &files).unwrap();
         let rows = load_cache(&conn).unwrap();
         assert!(
             !rows.contains_key("stale.txt"),
             "equal counts must not retain a stale row"
         );
-        assert!(rows.contains_key("keep.bin"));
-        assert_eq!(rows.len(), 1);
+        assert!(
+            !rows.contains_key("keep.bin"),
+            "a path the scan did not report is not on disk any more, so its row goes too. Both rows \
+             used to be kept only because a second, always-empty list of binary paths was passed in \
+             and treated as live (#325)"
+        );
+        assert_eq!(
+            rows.len(),
+            0,
+            "neither cached path is on disk, and pruning only removes rows - it does not write the \
+             newly scanned one, which the scan itself does"
+        );
 
-        prune_cache(&conn, &[], &[]).unwrap();
+        prune_cache(&conn, &[]).unwrap();
         assert!(load_cache(&conn).unwrap().is_empty());
-        prune_cache(&conn, &[], &[]).unwrap();
+        prune_cache(&conn, &[]).unwrap();
         assert!(load_cache(&conn).unwrap().is_empty());
     }
 

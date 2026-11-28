@@ -158,6 +158,14 @@ pub fn cmd_status() -> ZResult<()> {
             for (id, paths) in stale.iter().take(5) {
                 println!("  {} ({})", &id[..id.len().min(14)], paths.join(", "));
             }
+            if stale.len() > 5 {
+                // Same rule as every other capped list here: the reader is told the rest exists and
+                // where to see it, rather than being left with a count they cannot act on.
+                println!(
+                    "  ... and {} more (gesta changeset list shows every pending one)",
+                    stale.len() - 5
+                );
+            }
             println!("Commit or discard them before snapshotting again.");
         }
     }
@@ -216,20 +224,6 @@ pub fn cmd_status() -> ZResult<()> {
         );
     }
 
-    if !d.skipped_binary.is_empty() {
-        println!("\nskipped (binary, {} file(s)):", d.skipped_binary.len());
-        for f in d.skipped_binary.iter().take(10) {
-            println!("  ? {}", f);
-        }
-        if d.skipped_binary.len() > 10 {
-            // Nothing hidden: output that was cut says where the rest is. A count alone leaves
-            // the reader knowing something exists and unable to see it.
-            println!(
-                "  ... and {} more (gesta diff --json lists every skipped path)",
-                d.skipped_binary.len() - 10
-            );
-        }
-    }
     Ok(())
 }
 
@@ -756,10 +750,6 @@ pub fn cmd_status_json() -> ZResult<()> {
             "deleted",
             Json::arr(d.deleted.into_iter().map(Json::str).collect()),
         ),
-        (
-            "skipped_binary",
-            Json::arr(d.skipped_binary.into_iter().map(Json::str).collect()),
-        ),
         ("unchanged", Json::int(d.unchanged as i64)),
     ]));
     Ok(())
@@ -840,10 +830,6 @@ pub fn cmd_diff_json(changeset: Option<&str>, name_only: bool) -> YResultAlias {
                 (
                     "deleted",
                     Json::arr(d.deleted.into_iter().map(Json::str).collect()),
-                ),
-                (
-                    "skipped_binary",
-                    Json::arr(d.skipped_binary.into_iter().map(Json::str).collect()),
                 ),
                 ("unchanged", Json::int(d.unchanged as i64)),
             ]));

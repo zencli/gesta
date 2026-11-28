@@ -3181,12 +3181,29 @@ mod tests {
         use crate::support::secrets::env_name_for_remote;
         // Documented in one place, because a token that saves under one spelling and loads under
         // another is a token that silently does not work.
+        //
+        // The separator is an escape, not a substitution: `-` becomes `_2d` rather than `_` (#306).
+        // The plain substitution made `a-b` and `a_b` both `GESTA_REMOTE_TOKEN_A_B`, so a token
+        // exported for one remote was used for the other with no warning - and two remotes are
+        // usually two different servers.
         assert_eq!(env_name_for_remote("origin"), "GESTA_REMOTE_TOKEN_ORIGIN");
         assert_eq!(
             env_name_for_remote("up-stream"),
-            "GESTA_REMOTE_TOKEN_UP_STREAM"
+            "GESTA_REMOTE_TOKEN_UP_2dSTREAM"
         );
-        assert_eq!(env_name_for_remote("a.b"), "GESTA_REMOTE_TOKEN_A_B");
+        assert_eq!(env_name_for_remote("a.b"), "GESTA_REMOTE_TOKEN_A_2eB");
+
+        // The property that matters: two different names, one variable.
+        assert_ne!(
+            env_name_for_remote("a-b"),
+            env_name_for_remote("a_b"),
+            "a dash and an underscore must not collapse to the same variable"
+        );
+        assert_eq!(
+            env_name_for_remote("a_b"),
+            "GESTA_REMOTE_TOKEN_A__B",
+            "an underscore escapes as a double underscore so it cannot be read as a separator"
+        );
     }
 
     #[test]

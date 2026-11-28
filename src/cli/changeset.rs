@@ -59,12 +59,6 @@ pub fn cmd_changeset_create_paths(
     for rel in &cs.deleted {
         println!("  D {}", rel);
     }
-    if !cs.skipped.is_empty() {
-        println!("\nskipped {} binary file(s):", cs.skipped.len());
-        for f in cs.skipped.iter().take(10) {
-            println!("  ? {}", f);
-        }
-    }
     println!("\nnext: gesta changeset commit {}", cs.id);
     Ok(())
 }
@@ -448,10 +442,6 @@ fn cmd_changeset_create_json(
         (
             "deleted",
             Json::arr(cs.deleted.iter().cloned().map(Json::str).collect()),
-        ),
-        (
-            "skipped_binary",
-            Json::arr(cs.skipped.iter().cloned().map(Json::str).collect()),
         ),
     ]));
     Ok(())

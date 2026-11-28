@@ -159,7 +159,13 @@ pub(crate) fn refuse_secrets(
         msg.push_str(&format!("  {}  {}  {}\n", f.path, f.rule, f.redacted));
     }
     if found.len() > 10 {
-        msg.push_str(&format!("  and {} more\n", found.len() - 10));
+        // A capped list says where the rest is. A count alone leaves the reader knowing something
+        // exists and unable to see it, which matters more here than anywhere: this is the message
+        // that stops a commit, so the operator needs the whole list to decide.
+        msg.push_str(&format!(
+            "  ... and {} more (gesta secret scan lists every one)\n",
+            found.len() - 10
+        ));
     }
     msg.push_str(
         "\nIf one of these is a fixture rather than a credential, add it to .gesta/secret-allowlist:\n",
