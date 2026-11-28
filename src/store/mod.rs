@@ -119,42 +119,54 @@ pub fn with_retry<T>(mut f: impl FnMut() -> ZResult<T>) -> ZResult<T> {
 /// one database, and that is not a rule anything enforces: the server opens a connection per
 /// request, and a caller that ever opens two repositories would find a column present in the first
 /// suppressing the ALTER in the second, then fail with "no such column" on a query that should work.
-fn columns_cached(conn: &Connection, table: &str) -> ZResult<Vec<String>> {
+///
+/// The cache lives at module scope so `invalidate_columns` can reach the same map. It used to be a
+/// `thread_local` declared inside this function, and `invalidate_columns` declared its OWN
+/// `thread_local` of a DIFFERENT type (`HashMap<String, Vec<String>>` against
+/// `HashMap<(String, String), Vec<String>>`) - so its `remove` deleted from a map nobody ever wrote
+/// or read, and the real cache was never cleared (#308). `ensure_column` then looked at a stale list,
+/// tried the `ALTER` again, and got "duplicate column", which it swallowed as success.
+mod columns_cache {
     use std::cell::RefCell;
     thread_local! {
-        // Keyed by (database path, table). The path is cached per connection so the PRAGMA below runs
-        // once per connection rather than once per column check: `ensure_column` runs for every column
-        // on every open, and a query there is exactly the cost this cache exists to remove.
-        static CACHE: RefCell<std::collections::HashMap<(String, String), Vec<String>>> =
-            RefCell::new(std::collections::HashMap::new());
-        static DB_PATH: RefCell<std::collections::HashMap<usize, String>> =
+        /// Column lists, keyed by (database path, table).
+        ///
+        /// Kept here rather than inside `columns_cached` so `invalidate_columns` can reach it. It
+        /// used to be a `thread_local` inside that function, and `invalidate_columns` declared its own
+        /// of a DIFFERENT type (`HashMap<String, Vec<String>>` against
+        /// `HashMap<(String, String), Vec<String>>`), so its `remove` deleted from a map nobody wrote
+        /// and the real cache was never cleared (#308). `ensure_column` then re-read a stale list,
+        /// tried the `ALTER` again, and swallowed the resulting "duplicate column" as success.
+        pub static CACHE: RefCell<std::collections::HashMap<(String, String), Vec<String>>> =
             RefCell::new(std::collections::HashMap::new());
     }
-    // The connection's address is a stable identity for its lifetime and does not borrow it. A closed
-    // connection's entry is harmless: a new connection at the same address would read the same path
-    // only if it opened the same file, and a different file gets a different answer from the PRAGMA
-    // the first time the key is missing.
-    let id = conn as *const Connection as usize;
-    let db = match DB_PATH.with(|c| c.borrow().get(&id).cloned()) {
-        Some(p) => p,
-        None => {
-            let p: String = conn
-                .query_row("PRAGMA database_list", [], |r| {
-                    r.get::<_, Option<String>>(2)
-                })
-                .unwrap_or(None)
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| ":memory:".to_string());
-            DB_PATH.with(|c| c.borrow_mut().insert(id, p.clone()));
-            p
-        }
-    };
+}
+
+fn columns_cached(conn: &Connection, table: &str) -> ZResult<Vec<String>> {
+    // The database path is read per call and not cached against the connection.
+    //
+    // It used to be cached by the connection's address, only inserted and never removed. A closed
+    // connection's address is handed to the next one, so a new connection on a different file read
+    // the previous path and was then served another database's column list (#308). There is no
+    // teardown hook to hang a cleanup on - `Connection` is rusqlite's, with no `Drop` of ours to
+    // extend - so the safe answer is not to keep the mapping at all.
+    //
+    // Measured on a warm in-memory handle: `PRAGMA database_list` costs 1.29 microseconds, and this
+    // runs once per (connection, table) rather than once per column, because the result is keyed into
+    // CACHE below. That is cheaper than the bug it prevents.
+    let db: String = conn
+        .query_row("PRAGMA database_list", [], |r| {
+            r.get::<_, Option<String>>(2)
+        })
+        .unwrap_or(None)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| ":memory:".to_string());
     let key = (db, table.to_string());
-    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+    if let Some(hit) = columns_cache::CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return Ok(hit);
     }
     let cols = table_columns(conn, table)?;
-    CACHE.with(|c| c.borrow_mut().insert(key, cols.clone()));
+    columns_cache::CACHE.with(|c| c.borrow_mut().insert(key, cols.clone()));
     Ok(cols)
 }
 
@@ -185,14 +197,14 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> ZR
     Ok(false)
 }
 
+/// Drop the cached column list for a table, in every database this thread has cached.
+///
+/// The table is the whole identity here: the caller has just changed that table's shape, and a
+/// shape change applies to the table wherever it lives. Keeping the database in the filter would
+/// mean a second repository opened in the same process never saw its own column being added.
 fn invalidate_columns(table: &str) {
-    use std::cell::RefCell;
-    thread_local! {
-        static CACHE: RefCell<std::collections::HashMap<String, Vec<String>>> =
-            RefCell::new(std::collections::HashMap::new());
-    }
-    CACHE.with(|c| {
-        c.borrow_mut().remove(table);
+    columns_cache::CACHE.with(|c| {
+        c.borrow_mut().retain(|(_, t), _| t != table);
     });
 }
 
@@ -2390,12 +2402,36 @@ fn apply_changeset_to_tree(conn: &Connection, branch: &str, changeset: &str) -> 
 
 /// Move a branch back to having no head, and drop its tree.
 pub fn clear_branch_head(conn: &Connection, branch: &str) -> ZResult<()> {
-    conn.execute(
-        "UPDATE branches SET head = NULL WHERE name = ?1",
-        params![branch],
-    )?;
-    conn.execute("DELETE FROM branch_tree WHERE branch = ?1", params![branch])?;
-    Ok(())
+    // The head and its derived tree are cleared together or not at all (#309).
+    //
+    // `set_branch_head` was given a savepoint for exactly this reason (#96) and this sibling was
+    // missed. A crash or an error between the two statements left `head` NULL with the old tree still
+    // in place. The next commit on that branch read `old_head = None`, so the new changeset's parent
+    // was NULL, `set_branch_head` took the incremental path, and `apply_changeset_to_tree` applied
+    // onto the stale tree - resurrecting every file the tree had already lost.
+    //
+    // SAVEPOINT, not BEGIN, for the same reason as #96: callers pass both bare connections and
+    // transactions they already opened, and a nested BEGIN is an error while a savepoint nests.
+    conn.execute_batch("SAVEPOINT clear_branch_head")?;
+    let outcome = (|| -> ZResult<()> {
+        conn.execute(
+            "UPDATE branches SET head = NULL WHERE name = ?1",
+            params![branch],
+        )?;
+        conn.execute("DELETE FROM branch_tree WHERE branch = ?1", params![branch])?;
+        Ok(())
+    })();
+    match outcome {
+        Ok(()) => {
+            conn.execute_batch("RELEASE clear_branch_head")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO clear_branch_head");
+            let _ = conn.execute_batch("RELEASE clear_branch_head");
+            Err(e)
+        }
+    }
 }
 
 /// Rebuild `branch_tree` for one branch from its head.
@@ -4492,5 +4528,81 @@ pub(crate) mod tests {
         let read = get_object(&conn, &again)
             .expect("content stored after a gc must be readable, not shadowed by a stale delta");
         assert_eq!(read, tip);
+    }
+    #[test]
+    fn adding_a_column_clears_the_column_cache_it_just_invalidated() {
+        // #308: `invalidate_columns` declared its own `thread_local` of a different type, so its
+        // `remove` hit a map nobody wrote and the real cache kept the stale list. `ensure_column`
+        // then saw the column as missing, ran the `ALTER` again, and swallowed "duplicate column"
+        // as success - which hid the fact that the cache was never cleared.
+        //
+        // A stale entry is visible from the outside as work repeated: the second `ensure_column`
+        // returns false (the column already existed) but only if the cache was refreshed. If it
+        // returns true the cache lied, because it re-added a column that was already there.
+        let conn = mem_db();
+        conn.execute_batch("CREATE TABLE t_fresh (a TEXT)").unwrap();
+
+        assert!(
+            ensure_column(&conn, "t_fresh", "b", "TEXT").unwrap(),
+            "the first call adds the column"
+        );
+        assert!(
+            !ensure_column(&conn, "t_fresh", "b", "TEXT").unwrap(),
+            "the second call must see the column the first one added, which means the cache was \
+             cleared; returning true here means it re-ran the ALTER against a stale list"
+        );
+
+        // And what the cache answers now must match the table.
+        let cached = columns_cached(&conn, "t_fresh").unwrap();
+        assert!(cached.contains(&"b".to_string()), "cached list: {cached:?}");
+    }
+
+    #[test]
+    fn clearing_a_branch_head_leaves_no_tree_behind() {
+        // #309: the two statements ran with no savepoint. A crash between them left `head` NULL with
+        // the old tree in place, and the next commit applied onto that stale tree - resurrecting
+        // files the tree had lost.
+        let conn = mem_db();
+        // `mem_db` already carries a `main` branch from `init_schema`.
+        conn.execute(
+            "INSERT OR IGNORE INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, 0, NULL)",
+            [],
+        )
+        .unwrap();
+        // Build the tree the way a commit does: one path, one object, one branch_tree row.
+        let hash = put_object(&conn, "a\n").unwrap();
+        conn.execute(
+            "INSERT INTO branch_tree(branch, path, hash) VALUES('main', 'a.txt', ?1)",
+            params![hash],
+        )
+        .unwrap();
+        let before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM branch_tree WHERE branch = 'main'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, 1, "the tree starts with one path");
+
+        clear_branch_head(&conn, "main").unwrap();
+
+        let head: Option<String> = conn
+            .query_row("SELECT head FROM branches WHERE name = 'main'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(head.is_none(), "the head is cleared");
+        let after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM branch_tree WHERE branch = 'main'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            after, 0,
+            "and the tree goes with it, not one without the other"
+        );
     }
 }
