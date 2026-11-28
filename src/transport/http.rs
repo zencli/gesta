@@ -481,10 +481,26 @@ where
         std::thread::sleep(Duration::from_millis(2));
     }
     std::thread::spawn(move || {
+        // The slot comes back through a drop guard, not after `work()` returns (#283).
+        //
+        // Releasing it at the end of the closure meant a panicking handler unwound past the
+        // decrement and lost the slot for the life of the process. `MAX_CONNECTIONS` such panics and
+        // the wait loop above spins forever: the accept loop takes no more connections and the server
+        // goes silent while the process is still alive. One panic per connection is enough to get
+        // there, so this is reachable by anything that can make a handler panic.
+        let _slot = SlotGuard(slots);
         work();
-        let mut n = slots.lock().unwrap_or_else(|e| e.into_inner());
-        *n = n.saturating_sub(1);
     });
+}
+
+/// Returns one connection slot when it goes out of scope, panic or not.
+struct SlotGuard(Arc<std::sync::Mutex<usize>>);
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        let mut n = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        *n = n.saturating_sub(1);
+    }
 }
 
 /// Serve `root` over HTTP until the process is killed.
@@ -2427,6 +2443,44 @@ fn complete_body(head_text: &str, payload: Vec<u8>) -> ZResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panicking_worker_gives_its_slot_back() {
+        // #283: the slot was released after `work()` returned, so a panicking handler unwound past the
+        // decrement and lost it for the life of the process. `MAX_CONNECTIONS` such panics and the wait
+        // loop spins forever: the server accepts nothing more while still alive.
+        //
+        // The panic is caught here so the test process survives; what is asserted is the counter, which
+        // is what the wait loop reads.
+        let slots = Arc::new(std::sync::Mutex::new(0usize));
+
+        let before = *slots.lock().unwrap();
+        let s2 = slots.clone();
+        // Silence the panic output: this test deliberately panics.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let handle = std::thread::spawn(move || {
+            spawn_bounded(s2, || panic!("a handler panicked"));
+        });
+        let _ = handle.join();
+        std::panic::set_hook(prev);
+
+        // Give the worker thread a moment to finish unwinding; `spawn_bounded` returns as soon as it has
+        // spawned, so the slot is released by the guard when that thread ends.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let n = *slots.lock().unwrap();
+            if n == before {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the slot was never released: the counter is {n}, was {before} before the spawn. A \
+                 panicking worker must not cost a permanent connection slot"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
     /// A server that answers one request with the given head and body, then closes.
     fn one_shot_reply(head: &'static str, body: &'static [u8]) -> String {

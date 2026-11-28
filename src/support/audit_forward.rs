@@ -174,6 +174,35 @@ impl Forwarder {
 
 /// A minimal HTTP POST. Deliberately not the project's client: the audit path must not depend on the
 /// TLS stack, and a collector on a private network is reached over plain HTTP behind that network.
+/// Resolve a `host:port` string, giving up after `limit`.
+///
+/// `ToSocketAddrs` has no deadline, and a dead resolver blocks for however long the system's
+/// resolver waits. The lookup therefore runs on its own thread and the caller stops waiting at
+/// `limit`; the thread is left to finish, because joining it would put the block right back (#287).
+fn resolve_with_deadline(
+    addr: String,
+    limit: std::time::Duration,
+) -> Result<std::net::SocketAddr, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let probe = addr.clone();
+    std::thread::spawn(move || {
+        let answer = std::net::ToSocketAddrs::to_socket_addrs(&probe)
+            .map_err(|e| format!("resolve {}: {}", probe, e))
+            .and_then(|mut it| {
+                it.next()
+                    .ok_or_else(|| format!("resolve {}: no address", probe))
+            });
+        // The receiver may be gone when the deadline fired first; that is the expected case, not an
+        // error worth reporting anywhere.
+        let _ = tx.send(answer);
+    });
+    match rx.recv_timeout(limit) {
+        Ok(Ok(sock)) => Ok(sock),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(format!("resolve {}: no answer within {:?}", addr, limit)),
+    }
+}
+
 fn post(url: &str, token: Option<&str>, body: &str) -> Result<(), String> {
     use std::io::{Read, Write};
 
@@ -195,11 +224,18 @@ fn post(url: &str, token: Option<&str>, body: &str) -> Result<(), String> {
     // timeouts set below never come into play because there is no stream yet. The audit path is on
     // the critical path of every recorded decision, so an unreachable collector must be given up on
     // in seconds and counted as dropped, which is what the gap note exists to report.
+    // Resolution gets a deadline too (#287).
+    //
+    // #75 put a timeout on the connect and left the step before it unbounded: `to_socket_addrs`
+    // blocks for the whole resolver wait, which on a dead DNS is measured in tens of seconds per
+    // call. The drain thread then sits there while events pile into the 4096 queue and drop - counted,
+    // but a stall, and the note the queue exists to produce arrives late.
+    //
+    // `ToSocketAddrs` has no deadline of its own, so the lookup runs on its own thread and this call
+    // stops waiting at `CONNECT_TIMEOUT`. The thread is detached rather than joined: it will finish
+    // on its own, and joining would put the block straight back.
     let addr = format!("{}:{}", host, port);
-    let sock = std::net::ToSocketAddrs::to_socket_addrs(&addr)
-        .map_err(|e| format!("resolve {}: {}", addr, e))?
-        .next()
-        .ok_or_else(|| format!("resolve {}: no address", addr))?;
+    let sock = resolve_with_deadline(addr.clone(), CONNECT_TIMEOUT)?;
     let mut stream = std::net::TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT)
         .map_err(|e| format!("connect {}: {}", addr, e))?;
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
@@ -489,6 +525,34 @@ mod tests {
             "giving up took {:.1}s; without CONNECT_TIMEOUT the kernel retries for about two \
              minutes, which stalls every recorded decision behind an unreachable collector",
             took.as_secs_f32()
+        );
+    }
+    #[test]
+    fn resolving_gives_up_at_the_deadline_instead_of_waiting_for_the_resolver() {
+        // #287: `to_socket_addrs` blocks for the system resolver's whole wait. On a dead resolver that
+        // is tens of seconds per call, and it ran before the connect timeout that #75 added, so the
+        // drain thread stalled and events dropped out of the queue while the timeout that was supposed
+        // to bound the call had not started yet.
+        //
+        // A name that cannot resolve quickly is not something a test can arrange portably, so this
+        // checks the mechanism: a lookup that does not answer within the limit returns at the limit,
+        // not later. `resolve_with_deadline` is given a limit far below any real resolution and a name
+        // whose resolution cannot beat it.
+        let start = std::time::Instant::now();
+        let outcome = resolve_with_deadline(
+            "does-not-exist.invalid:9".to_string(),
+            std::time::Duration::from_millis(1),
+        );
+        let elapsed = start.elapsed();
+
+        assert!(
+            outcome.is_err(),
+            "a lookup that cannot answer must be an error, not a silent success"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "the call returned after {elapsed:?}; the deadline is the only thing that bounds it and it \
+             must not be the resolver's own wait"
         );
     }
 }
