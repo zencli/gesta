@@ -39,3 +39,25 @@ pub(crate) fn with_schema(v: Json) -> Json {
         other => other,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emitting_a_document_marks_that_a_document_was_emitted() {
+        // #327: four emitters printed a document with `println!` and returned, so they never set
+        // `JSON_PRINTED`. Nothing doubled today because no error path follows them, but the invariant
+        // is what keeps a second object off one stream, and it was broken at each of those sites.
+        //
+        // Every JSON emitter has to go through `emit`, and the property that makes that work is this
+        // one: emit sets the flag.
+        JSON_PRINTED.store(false, std::sync::atomic::Ordering::Relaxed);
+        emit(Json::obj(vec![("k", Json::str("v"))]));
+        assert!(
+            JSON_PRINTED.load(std::sync::atomic::Ordering::Relaxed),
+            "an emitted document must set JSON_PRINTED, or an error path after it prints a second              document and the stream stops being parseable"
+        );
+        JSON_PRINTED.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}

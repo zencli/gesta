@@ -2865,7 +2865,12 @@ pub fn cmd_audit(refused: bool, limit: Option<usize>, json_out: bool) -> ZResult
             ("count", crate::support::json::Json::int(rows.len() as i64)),
             ("events", crate::support::json::Json::Arr(items)),
         ]);
-        println!("{}", doc.render());
+        // Routed through `emit` so `JSON_PRINTED` is set (#327). These emitters printed a document
+        // carrying its schema and returned, which looks right and leaves the invariant broken: any
+        // error path added after them would print a second object, and the caller would receive two
+        // JSON documents on one stream. `emit` also stamps the schema, so the explicit one below stays
+        // as documentation of the version rather than as the only place it comes from.
+        crate::cli::jsonutil::emit(doc);
         return Ok(());
     }
     for e in &rows {

@@ -1209,6 +1209,16 @@ fn quiet_broken_pipe() {
     }));
 }
 
+/// Whether `--json` was asked for and no document was printed.
+///
+/// The condition for the refusal at the end of `run` (#326). Its own function so the rule can be
+/// stated in a test without driving a command: the state that decides is two flags, and that is a
+/// value.
+fn json_asked_and_unanswered() -> bool {
+    cli::JSON_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
+        && !cli::JSON_PRINTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn main() {
     quiet_broken_pipe();
     if let Err(e) = run() {
@@ -1828,7 +1838,33 @@ fn run() -> ZResult<()> {
                 cli_remote::cmd_attributes_why(&path, json_attr || json)
             }
         },
+    }?;
+
+    // A command that takes `--json` and ignores it is worse than one that refuses it (#326).
+    //
+    // The flag is global, so `gesta worktree list --json` parses and then prints text. A caller that
+    // asked for JSON gets prose, parses nothing, and - the case that matters - cannot tell that from
+    // an empty result. Sixteen commands were in that state, and the list would drift: the next
+    // command added without a JSON form would join it silently.
+    //
+    // The check is the invariant rather than a list of names. `JSON_REQUESTED` is set when the flag
+    // is parsed, `JSON_PRINTED` when an emitter runs, and a command that honoured the flag has set
+    // the second by the time it returns. Anything else is a command that does not honour it, named
+    // in the refusal so the caller knows to drop the flag rather than to look for a bug.
+    //
+    // After the match rather than before each arm, so a command added later is covered without being
+    // remembered.
+    if json_asked_and_unanswered() {
+        // A Usage error, not a plain one: the command was understood and the flag is wrong, which is
+        // what exit code 2 means here. A generic failure would tell a script the repository was
+        // damaged when the invocation was.
+        return Err(Box::new(error::Error::new(
+            error::Code::Usage,
+            "this command has no JSON form; drop --json, or run `gesta --help` to see the commands \
+             that do",
+        )));
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2011,5 +2047,35 @@ mod tests {
         assert_eq!(repo_dir(&d), d.join(ZF_DIR));
         assert_eq!(repo_db(&d), d.join(ZF_DIR).join(ZF_DB));
         let _ = std::fs::remove_dir_all(&d);
+    }
+    #[test]
+    fn asking_for_json_and_getting_text_is_refused() {
+        // #326: the flag is global, so `gesta worktree list --json` parsed and then printed text. A
+        // caller that asked for JSON got prose and could not tell that from an empty result. Sixteen
+        // commands were in that state.
+        //
+        // The refusal keys on the invariant, not on a list of names, so a command added later without
+        // a JSON form is covered without anyone remembering to add it.
+        use std::sync::atomic::Ordering;
+
+        // Not asked: no refusal, whatever was printed.
+        super::cli::JSON_REQUESTED.store(false, Ordering::Relaxed);
+        super::cli::JSON_PRINTED.store(false, Ordering::Relaxed);
+        assert!(!super::json_asked_and_unanswered());
+
+        // Asked and answered: no refusal.
+        super::cli::JSON_REQUESTED.store(true, Ordering::Relaxed);
+        super::cli::JSON_PRINTED.store(true, Ordering::Relaxed);
+        assert!(!super::json_asked_and_unanswered());
+
+        // Asked and not answered: refuse. This is the case that printed prose.
+        super::cli::JSON_REQUESTED.store(true, Ordering::Relaxed);
+        super::cli::JSON_PRINTED.store(false, Ordering::Relaxed);
+        assert!(
+            super::json_asked_and_unanswered(),
+            "a command that ignored --json must be refused, not silently print text"
+        );
+
+        super::cli::JSON_REQUESTED.store(false, Ordering::Relaxed);
     }
 }
