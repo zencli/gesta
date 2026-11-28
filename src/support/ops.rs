@@ -11,9 +11,17 @@ use crate::{bad, now, ZResult};
 /// Snapshot of every ref the log cares about.
 #[derive(Clone)]
 pub struct RepoSnapshot {
-    pub branches: Vec<(String, Option<String>)>,
+    /// Name, head, and where the branch was created from.
+    ///
+    /// `from_branch` is carried because `restore` wrote NULL for it, so a single undo permanently
+    /// erased where every branch came from (#291).
+    pub branches: Vec<(String, Option<String>, Option<String>)>,
     pub current_branch: String,
-    pub tags: Vec<(String, String)>,
+    /// Name, changeset, and the tag message.
+    ///
+    /// The message is carried for the same reason: `restore` wrote NULL, so undoing anything
+    /// discarded every tag's message (#291).
+    pub tags: Vec<(String, String, Option<String>)>,
 }
 
 /// Escape a snapshot field so a tab or a newline in a name survives the round trip (#89).
@@ -69,19 +77,31 @@ fn unescape(v: &str) -> ZResult<String> {
 
 impl RepoSnapshot {
     pub fn capture(conn: &Connection) -> ZResult<RepoSnapshot> {
-        let branches: Vec<(String, Option<String>)> = {
-            let mut stmt = conn.prepare("SELECT name, head FROM branches ORDER BY name")?;
+        let branches: Vec<(String, Option<String>, Option<String>)> = {
+            let mut stmt =
+                conn.prepare("SELECT name, head, from_branch FROM branches ORDER BY name")?;
             let rows = stmt
                 .query_map([], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
-        let tags: Vec<(String, String)> = {
-            let mut stmt = conn.prepare("SELECT name, changeset_id FROM tags ORDER BY name")?;
+        let tags: Vec<(String, String, Option<String>)> = {
+            let mut stmt =
+                conn.prepare("SELECT name, changeset_id, message FROM tags ORDER BY name")?;
             let rows = stmt
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
@@ -94,11 +114,12 @@ impl RepoSnapshot {
     }
 
     pub fn restore(&self, conn: &Connection) -> ZResult<()> {
-        for (name, head) in &self.branches {
+        for (name, head, from_branch) in &self.branches {
             conn.execute(
-                "INSERT INTO branches(name, head, created_at, from_branch) VALUES(?1, ?2, ?3, NULL)
-                 ON CONFLICT(name) DO UPDATE SET head = excluded.head",
-                params![name, head, now()],
+                "INSERT INTO branches(name, head, created_at, from_branch) VALUES(?1, ?2, ?3, ?4)
+                 ON CONFLICT(name) DO UPDATE SET head = excluded.head,
+                                                from_branch = excluded.from_branch",
+                params![name, head, now(), from_branch],
             )?;
             // Undo moves a head, so the derived tree has to follow. Missing this
             // made `fsck` report a stale tree after any undo, and `status` then
@@ -106,7 +127,7 @@ impl RepoSnapshot {
             crate::store::refresh_branch_tree(conn, name)?;
         }
         // Branches created after the snapshot are removed.
-        let keep: Vec<String> = self.branches.iter().map(|(n, _)| n.clone()).collect();
+        let keep: Vec<String> = self.branches.iter().map(|(n, _, _)| n.clone()).collect();
         let existing: Vec<String> = {
             let mut stmt = conn.prepare("SELECT name FROM branches")?;
             let rows = stmt
@@ -121,10 +142,10 @@ impl RepoSnapshot {
             }
         }
         conn.execute("DELETE FROM tags", [])?;
-        for (name, cs) in &self.tags {
+        for (name, cs, message) in &self.tags {
             conn.execute(
-                "INSERT INTO tags(name, changeset_id, message, created_at) VALUES(?1, ?2, NULL, ?3)",
-                params![name, cs, now()],
+                "INSERT INTO tags(name, changeset_id, message, created_at) VALUES(?1, ?2, ?3, ?4)",
+                params![name, cs, message, now()],
             )?;
         }
         crate::store::set_state(conn, "current_branch", &self.current_branch)?;
@@ -137,17 +158,28 @@ impl RepoSnapshot {
         // that could not be parsed; `decode` then dropped it and `restore` deleted every branch it
         // did not see. A branch is a name a person can type - `$'a\tb'` is a legal one - so the
         // format has to carry it, not hope it does not appear.
-        let mut s = String::from("V2\n");
+        // `V3` adds the branch origin and the tag message; `V2` is still read, with those two
+        // fields absent (#291). A snapshot is written and read by the same binary in practice -
+        // it lives inside the `operations` row that the same command wrote - so bumping the marker
+        // cannot strand an old snapshot; the reader accepts both anyway, because a rollback to an
+        // older gesta must not make its own log unreadable.
+        let mut s = String::from("V3\n");
         s.push_str(&format!("B\t{}\n", escape(&self.current_branch)));
-        for (n, h) in &self.branches {
+        for (n, h, from) in &self.branches {
             s.push_str(&format!(
-                "R\t{}\t{}\n",
+                "R\t{}\t{}\t{}\n",
                 escape(n),
-                h.as_deref().map(escape).unwrap_or_else(|| "-".into())
+                h.as_deref().map(escape).unwrap_or_else(|| "-".into()),
+                from.as_deref().map(escape).unwrap_or_else(|| "-".into())
             ));
         }
-        for (n, c) in &self.tags {
-            s.push_str(&format!("T\t{}\t{}\n", escape(n), escape(c)));
+        for (n, c, m) in &self.tags {
+            s.push_str(&format!(
+                "T\t{}\t{}\t{}\n",
+                escape(n),
+                escape(c),
+                m.as_deref().map(escape).unwrap_or_else(|| "-".into())
+            ));
         }
         s
     }
@@ -161,7 +193,10 @@ impl RepoSnapshot {
     fn decode(s: &str) -> ZResult<RepoSnapshot> {
         let mut lines = s.lines();
         let first = lines.next().unwrap_or("");
-        let escaped = first == "V2";
+        // `V3` carries the branch origin and the tag message; in `V2` those columns are absent, so
+        // the arms below take the short form and leave both `None` - which is what a snapshot written
+        // before #291 held anyway (#291).
+        let escaped = first == "V2" || first == "V3";
         if !escaped && !first.starts_with('B') {
             return Err(bad(format!(
                 "the operation snapshot does not start with a branch line or a V2 marker; the first \
@@ -195,10 +230,20 @@ impl RepoSnapshot {
                     snap.current_branch = un(b)?;
                     saw_branch = true;
                 }
-                ["R", n, h] => snap
-                    .branches
-                    .push((un(n)?, if *h == "-" { None } else { Some(un(h)?) })),
-                ["T", n, c] => snap.tags.push((un(n)?, un(c)?)),
+                ["R", n, h] => {
+                    snap.branches
+                        .push((un(n)?, if *h == "-" { None } else { Some(un(h)?) }, None))
+                }
+                ["R", n, h, from] => snap.branches.push((
+                    un(n)?,
+                    if *h == "-" { None } else { Some(un(h)?) },
+                    if *from == "-" { None } else { Some(un(from)?) },
+                )),
+                ["T", n, c] => snap.tags.push((un(n)?, un(c)?, None)),
+                ["T", n, c, m] => {
+                    snap.tags
+                        .push((un(n)?, un(c)?, if *m == "-" { None } else { Some(un(m)?) }))
+                }
                 other => {
                     return Err(bad(format!(
                         "the operation snapshot holds a line this cannot read ({} field(s): {:?});                          refusing rather than skipping it, because `restore` deletes every branch \
@@ -362,7 +407,7 @@ pub fn undo(conn: &Connection, root: &std::path::Path) -> ZResult<String> {
     match before {
         Some(s) => RepoSnapshot::decode(&s)?.restore(&tx)?,
         None => RepoSnapshot {
-            branches: vec![("main".into(), None)],
+            branches: vec![("main".into(), None, None)],
             current_branch: "main".into(),
             tags: Vec::new(),
         }
@@ -410,12 +455,17 @@ pub fn undo(conn: &Connection, root: &std::path::Path) -> ZResult<String> {
 
 /// Put back the most recently undone operation.
 pub fn redo(conn: &Connection, root: &std::path::Path) -> ZResult<String> {
-    // The newest undo is the one with the highest id among the undone rows, because undo
-    // marks rows in descending order.
+    // The newest undo is the row with the LOWEST id among the undone ones (#272).
+    //
+    // Undo marks rows in descending order: operations 1..5, undo takes 5, then 4. So after two
+    // undos the undone rows are {4, 5} and the most recent undo is 4, not 5. Taking the highest
+    // replayed 5 first: there is no undone=0 row after 5, so the fallback jumped the head straight
+    // to that changeset while operation 4 was still undone, and `log` and the branch disagreed.
+    // Redo is a stack, so it pops in the order the undos pushed.
     let next: Option<(i64, String, Option<String>, String)> = conn
         .query_row(
             "SELECT id, kind, target, snapshot FROM operations
-             WHERE undone = 1 ORDER BY id DESC LIMIT 1",
+             WHERE undone = 1 ORDER BY id ASC LIMIT 1",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
@@ -488,14 +538,24 @@ mod tests {
     #[test]
     fn snapshot_roundtrips_through_encode() {
         let snap = RepoSnapshot {
-            branches: vec![("main".into(), Some("cs1".into())), ("dev".into(), None)],
+            branches: vec![
+                ("main".into(), Some("cs1".into()), None),
+                ("dev".into(), None, Some("main".into())),
+            ],
             current_branch: "dev".into(),
-            tags: vec![("v1.0".into(), "cs1".into())],
+            tags: vec![("v1.0".into(), "cs1".into(), Some("release".into()))],
         };
         let back = RepoSnapshot::decode(&snap.encode()).unwrap();
         assert_eq!(back.current_branch, "dev");
         assert_eq!(back.branches.len(), 2);
-        assert_eq!(back.tags, vec![("v1.0".to_string(), "cs1".to_string())]);
+        assert_eq!(
+            back.tags,
+            vec![(
+                "v1.0".to_string(),
+                "cs1".to_string(),
+                Some("release".to_string())
+            )]
+        );
     }
 
     #[test]
@@ -881,7 +941,7 @@ mod tests {
         );
 
         let back = RepoSnapshot::decode(&text).unwrap();
-        let names: Vec<&str> = back.branches.iter().map(|(n, _)| n.as_str()).collect();
+        let names: Vec<&str> = back.branches.iter().map(|(n, _, _)| n.as_str()).collect();
         assert!(
             names.contains(&awkward),
             "the branch must survive the round trip, decoded names were {names:?}"
@@ -922,6 +982,145 @@ mod tests {
         assert!(
             no_branch.to_string().contains("no current-branch line"),
             "a snapshot with no current branch must not default to one, got: {no_branch}"
+        );
+    }
+    #[test]
+    fn redo_replays_the_oldest_undo_first() {
+        // #272: `redo` took `ORDER BY id DESC`, so after two undos it replayed the LAST undone
+        // operation instead of the first. Undo marks rows in descending order (5, then 4), so the
+        // oldest undone row is the undo the user most recently performed: redo is a stack. With DESC
+        // the first redo jumped the head straight past the still-undone row, and `log` and the branch
+        // disagreed.
+        let d = std::env::temp_dir().join(format!("gesta-redo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&d).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, ?1, NULL)",
+            params![0i64],
+        )
+        .unwrap();
+        crate::store::set_state(&conn, "current_branch", "main").unwrap();
+
+        // Three commits, each followed by an operation record that names the changeset - exactly what
+        // the CLI writes. `commit_one` on its own records nothing, and the target matters: replaying
+        // the last undone operation uses it to move the head, because there is no later effective row
+        // whose snapshot describes what that operation produced.
+        let mut heads = Vec::new();
+        for i in 1..=3 {
+            std::fs::write(d.join("f.txt"), format!("rev{i}\n")).unwrap();
+            let cs = crate::repo::create_changeset(&conn, &d, &format!("c{i}"), "alice")
+                .unwrap()
+                .expect("a written file is something to snapshot");
+            crate::repo::commit_one(&conn, &cs.id).unwrap();
+            crate::support::ops::record(&conn, "commit", Some(&cs.id), None).unwrap();
+            heads.push(cs.id);
+        }
+
+        // Undo twice: pops op3 then op2, leaving the head at the first commit.
+        crate::support::ops::undo(&conn, &d).unwrap();
+        crate::support::ops::undo(&conn, &d).unwrap();
+        let after_undo = crate::store::branch_head(&conn, "main").unwrap().unwrap();
+        assert_eq!(after_undo, heads[0], "two undos leave the first commit");
+
+        // One redo must replay op2 - the older undone row - not op3.
+        crate::support::ops::redo(&conn, &d).unwrap();
+        let after_one = crate::store::branch_head(&conn, "main").unwrap().unwrap();
+        assert_eq!(
+            after_one, heads[1],
+            "the first redo replays the undo the user performed most recently, which is op2"
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.join("f.txt")).unwrap(),
+            "rev2\n",
+            "and the disk follows it"
+        );
+
+        // The second redo reaches the newest commit.
+        crate::support::ops::redo(&conn, &d).unwrap();
+        assert_eq!(
+            crate::store::branch_head(&conn, "main").unwrap().unwrap(),
+            heads[2],
+            "the second redo replays op3"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_snapshot_carries_the_tag_message_and_the_branch_origin() {
+        // #291: `capture` read only (name, changeset) for tags and (name, head) for branches, and
+        // `restore` wrote NULL for the two columns it did not carry. One undo therefore erased every
+        // tag's message and every branch's origin for good.
+        let d = std::env::temp_dir().join(format!("gesta-meta-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&d).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO branches(name, head, created_at, from_branch)
+             VALUES('main', NULL, 0, NULL), ('dev', NULL, 0, 'main')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tags(name, changeset_id, message, created_at) VALUES('v1.0', 'cs1', 'release one', 0)",
+            [],
+        )
+        .unwrap();
+
+        let snap = RepoSnapshot::capture(&conn).unwrap();
+        // Wipe both pieces of metadata, then put the snapshot back.
+        conn.execute("DELETE FROM tags", []).unwrap();
+        conn.execute("DELETE FROM branches", []).unwrap();
+        conn.execute(
+            "INSERT INTO branches(name, head, created_at, from_branch) VALUES('main', NULL, 0, NULL)",
+            [],
+        )
+        .unwrap();
+        snap.restore(&conn).unwrap();
+
+        let message: Option<String> = conn
+            .query_row("SELECT message FROM tags WHERE name = 'v1.0'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            message.as_deref(),
+            Some("release one"),
+            "the tag message must survive the round trip"
+        );
+
+        let from: Option<String> = conn
+            .query_row(
+                "SELECT from_branch FROM branches WHERE name = 'dev'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            from.as_deref(),
+            Some("main"),
+            "the branch origin must survive the round trip"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_v2_snapshot_without_the_new_columns_still_decodes() {
+        // Snapshots written before #291 have three fields on a branch line and two on a tag line, and
+        // a binary rolled back to an older build must not find its own log unreadable.
+        let v2 = "V2\nB\tmain\nR\tdev\tcs1\t-\nT\tv1.0\tcs1\n";
+        let snap = RepoSnapshot::decode(v2).unwrap();
+        assert_eq!(
+            snap.branches,
+            vec![("dev".to_string(), Some("cs1".to_string()), None)]
+        );
+        assert_eq!(
+            snap.tags,
+            vec![("v1.0".to_string(), "cs1".to_string(), None)]
         );
     }
 }
