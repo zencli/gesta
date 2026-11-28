@@ -213,6 +213,7 @@ pub fn search_worktree(
 
     let mut hits = Vec::new();
     let mut too_large: Vec<String> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
     for f in scanned.files {
         if !scope.contains(&f.rel) {
             continue;
@@ -230,19 +231,45 @@ pub fn search_worktree(
         // The size comes from the scan cache where it has one, so the check costs nothing extra on the
         // path that already stat'ed the file.
         let full = root.join(&f.rel);
+        // A file whose metadata cannot be read is REPORTED, not skipped (#298).
+        //
+        // `continue` here meant a file deleted between the scan and this read was neither searched
+        // nor mentioned: the search came back saying "no match", which reads as "the text is not
+        // there" about a file it never opened. That is the same wrong answer #91 refused for the
+        // size cap, applied to a different failure.
         let size = match std::fs::metadata(&full) {
             Ok(m) => m.len(),
-            Err(_) => continue,
+            Err(e) => {
+                unreadable.push(format!("{} ({})", f.rel, e));
+                continue;
+            }
         };
         if size > MAX_SEARCH_FILE {
             too_large.push(format!("{} ({} MiB)", f.rel, size / (1024 * 1024)));
             continue;
         }
-        let body = match std::fs::read(&full) {
+        // Read through a cap, not `fs::read` (#298).
+        //
+        // Between the `metadata` above and this read the file can grow - a log being appended to,
+        // which is exactly the file a repository has that is worth capping. `fs::read` then read
+        // whatever was there, past the cap the check had just enforced. Taking `size + 1` bytes and
+        // refusing anything longer makes the cap hold at the moment of reading rather than at the
+        // moment of measuring.
+        let body = match read_capped(&full, size) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-            Err(_) => continue,
+            Err(e) => {
+                unreadable.push(format!("{} ({})", f.rel, e));
+                continue;
+            }
         };
         hits.extend(pattern.scan(&f.rel, &body, ""));
+    }
+    if !unreadable.is_empty() {
+        return Err(bad(format!(
+            "not searched: {} (the file could not be read)\n\
+             this is not \"no match\": the text was never looked at",
+            unreadable.join(", ")
+        )));
     }
     if !too_large.is_empty() {
         return Err(bad(format!(
@@ -252,6 +279,31 @@ pub fn search_worktree(
         )));
     }
     Ok(hits)
+}
+
+/// Read a file, refusing anything longer than it measured a moment ago.
+///
+/// The size check before this makes the cap mean something only if the read honours the same bound.
+/// `fs::read` reads whatever is on disk at the moment it runs, so a file growing between the measure
+/// and the read slipped past the cap entirely (#298). Reading `size + 1` bytes answers both questions
+/// in one pass: if the result is longer than `size`, the file grew and the answer is a refusal rather
+/// than a body that breaks the promise the cap makes.
+fn read_capped(path: &std::path::Path, measured: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = Vec::with_capacity(measured.min(MAX_SEARCH_FILE) as usize);
+    // One byte past the measurement: enough to tell "the same" from "it grew" without reading the
+    // rest of a file that may be gigabytes.
+    f.by_ref()
+        .take(measured.saturating_add(1))
+        .read_to_end(&mut buf)?;
+    if buf.len() as u64 > measured {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the file grew while it was being read",
+        ));
+    }
+    Ok(buf)
 }
 
 /// Search every distinct version of every tracked path, newest first.
@@ -265,6 +317,18 @@ pub fn search_history(
     path_filter: Option<&str>,
     limit: i64,
 ) -> ZResult<Vec<Hit>> {
+    // SQLite reads `LIMIT -1` as "no limit" (#297).
+    //
+    // `limit` comes from clap as a signed integer and went straight into the statement, so
+    // `gesta grep --history --limit -1` read every version of every tracked path and every distinct
+    // object body - exactly the work the limit exists to prevent, reached by typing a number the
+    // flag was supposed to reject. A negative limit is a usage error, not a request for everything.
+    if limit < 0 {
+        return Err(bad(format!(
+            "--limit must be zero or more, not {}; a negative limit used to mean \"read everything\"",
+            limit
+        )));
+    }
     let mut stmt = conn.prepare(
         "SELECT fv.path, fv.hash, fv.changeset_id
          FROM file_versions fv
@@ -493,6 +557,55 @@ mod tests {
         let pattern = Pattern::new("needle", false, false).unwrap();
         let hits = search_worktree(&conn, &dir, &pattern, None).unwrap();
         assert_eq!(hits.len(), 1, "the ordinary file must still be searched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn a_negative_limit_is_refused_instead_of_reading_everything() {
+        // #297: `limit` came from clap as a signed integer and went straight into `LIMIT ?1`, where
+        // SQLite reads -1 as "no limit". `gesta grep --history --limit -1` then read every version of
+        // every tracked path and every distinct object body - exactly the work the limit exists to
+        // prevent, reached by typing a number the flag was meant to reject.
+        let conn = crate::store::tests::mem_db();
+        let pattern = Pattern::new("needle", false, false).unwrap();
+        let err = search_history(&conn, &pattern, None, -1)
+            .expect_err("a negative limit must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("zero or more"),
+            "the refusal must say what is allowed, got: {msg}"
+        );
+
+        // Zero is a real limit and must stay harmless rather than becoming an error.
+        assert!(
+            search_history(&conn, &pattern, None, 0).is_ok(),
+            "zero means zero rows, not a refusal"
+        );
+    }
+
+    #[test]
+    fn a_read_is_refused_when_the_file_grew_past_its_measurement() {
+        // #298: the cap was enforced against a `metadata` call and then `fs::read` read whatever was
+        // on disk at that later moment, so a file growing in between slipped past the cap entirely.
+        // The read takes `measured + 1` bytes, which is enough to tell "the same" from "it grew"
+        // without reading the rest of a file that may be gigabytes.
+        let dir = std::env::temp_dir().join(format!("gesta-grow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("grow.txt");
+        std::fs::write(&f, "0123456789").unwrap();
+
+        // Measured ten, read ten: fine.
+        let ok = read_capped(&f, 10).unwrap();
+        assert_eq!(ok.len(), 10);
+
+        // Measured five, file is ten: it grew, so the answer is a refusal rather than ten bytes.
+        let err =
+            read_capped(&f, 5).expect_err("a file longer than its measurement must be refused");
+        assert!(
+            err.to_string().contains("grew"),
+            "the refusal must name what happened, got: {err}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
