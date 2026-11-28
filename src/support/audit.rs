@@ -359,31 +359,45 @@ fn tail_text(path: &std::path::Path, limit: Option<usize>) -> std::io::Result<Op
         Some(n) => n as u64,
     };
 
-    // The window is a guess at how much text `want` lines occupy. If it yields fewer complete lines
-    // than asked for, read the whole file: returning fewer lines than exist would read as "the log is
-    // short", which is a wrong answer about the thing the log exists to prove.
-    let window = (want * TAIL_BYTES_PER_LINE).min(len);
-    let start = len - window;
-    f.seek(SeekFrom::Start(start))?;
-    let mut buf = String::new();
-    f.read_to_string(&mut buf)?;
+    // The window is a guess at how much text `want` lines occupy, and it grows until the window holds
+    // enough lines - it does not fall back to reading the whole file (#289).
+    //
+    // The fallback was `read_to_string` on the entire file, so `--limit 20` on a log whose lines are
+    // longer than the guess held the whole log in memory: the bug #78 fixed, surviving in the branch
+    // that was supposed to be the careful one. A log that really is mostly long lines is exactly the
+    // file whose tail somebody wants.
+    //
+    // `saturating_mul` because `want * TAIL_BYTES_PER_LINE` overflows `u64` at a `--limit` around
+    // 2^54: the window wrapped small, the line count came up short, and that fed the whole-file read.
+    let mut window = want.saturating_mul(TAIL_BYTES_PER_LINE).min(len);
+    loop {
+        let start = len - window;
+        f.seek(SeekFrom::Start(start))?;
+        let mut buf = String::new();
+        f.read_to_string(&mut buf)?;
 
-    let text = if start == 0 {
-        buf
-    } else {
-        // The window began mid-line, so the first fragment is not a line.
-        match buf.find('\n') {
-            Some(i) => buf[i + 1..].to_string(),
-            None => String::new(),
+        let text = if start == 0 {
+            buf
+        } else {
+            // The window began mid-line, so the first fragment is not a line.
+            match buf.find('\n') {
+                Some(i) => buf[i + 1..].to_string(),
+                None => String::new(),
+            }
+        };
+        let enough =
+            start == 0 || text.lines().filter(|l| !l.trim().is_empty()).count() >= want as usize;
+        if enough {
+            return Ok(Some(text));
         }
-    };
-    if start > 0 && text.lines().filter(|l| !l.trim().is_empty()).count() < want as usize {
-        let mut all = String::new();
-        f.seek(SeekFrom::Start(0))?;
-        f.read_to_string(&mut all)?;
-        return Ok(Some(all));
+        // Grow geometrically so a file of very long lines costs a handful of reads, not one per line,
+        // and stop at the whole file: at that point there is nothing more to read, and the answer is
+        // what is there.
+        if window >= len {
+            return Ok(Some(text));
+        }
+        window = window.saturating_mul(4).min(len).max(window + 1);
     }
-    Ok(Some(text))
 }
 
 pub fn read(
@@ -745,5 +759,41 @@ mod tests {
             "the event that triggered the rotation must still be in the new log"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+    #[test]
+    fn a_tail_of_long_lines_does_not_read_the_whole_file() {
+        // #289: when the window held fewer lines than asked for, the fallback read the ENTIRE file -
+        // the bug #78 fixed, surviving in the branch that was supposed to be the careful one. A log of
+        // long lines (a JSON entry with a big diff in it, say) is exactly where somebody wants the
+        // tail, so this is the case that matters.
+        let dir = std::env::temp_dir().join(format!("gesta-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audit.log");
+
+        // Twenty lines, each far longer than the bytes-per-line guess, so one window is not enough.
+        let mut body = String::new();
+        for i in 0..20 {
+            body.push_str(&format!(
+                "{}\n",
+                "x".repeat(200_000 - 8) + &format!("{i:08}")
+            ));
+        }
+        std::fs::write(&path, &body).unwrap();
+
+        let got = tail_text(&path, Some(3)).unwrap().unwrap();
+        let lines: Vec<&str> = got.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "three lines were asked for and three lines exist, so three must come back"
+        );
+        assert!(
+            lines[2].ends_with("00000019"),
+            "and they must be the LAST three, not the first: got {:?}",
+            &lines[2][lines[2].len() - 8..]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

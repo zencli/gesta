@@ -195,6 +195,33 @@ fn tool(name: &str, description: &str, schema: Json) -> Json {
 /// this server has.
 const MAX_LINE: usize = 8 * 1024 * 1024;
 
+/// Read and discard the remainder of an overlong line.
+///
+/// The bounded read that refused the line stopped somewhere inside it. The rest is still in the
+/// stream, and if it were left there it would arrive on the next round and be parsed as a message of
+/// its own - so text the client meant as a continuation could become a valid request (#319). This
+/// drains to the newline that ended the line the refusal was about.
+///
+/// Draining through a fixed buffer, rather than reading the line into a `Vec`, keeps the memory cost
+/// bounded: the cap that refused the line exists because the line may be endless, and draining must
+/// not undo that.
+///
+/// Returns `None` when the line was drained and the loop should carry on, `Some(())` when the stream
+/// ended while draining and the server should stop.
+fn drain_to_newline<R: std::io::BufRead>(reader: &mut R) -> ZResult<Option<()>> {
+    let mut sink = vec![0u8; 64 * 1024];
+    loop {
+        let n = match reader.read_until(b'\n', &mut sink) {
+            Ok(0) => return Ok(Some(())),
+            Ok(n) => n,
+            Err(e) => return Err(crate::bad(format!("reading stdin failed: {}", e))),
+        };
+        if sink[..n].last() == Some(&b'\n') {
+            return Ok(None);
+        }
+    }
+}
+
 /// Run the server on stdin/stdout until the client closes the stream.
 ///
 /// A malformed line is answered with a parse error and the loop continues. `BufRead::lines` yields
@@ -224,12 +251,21 @@ pub fn serve_stdio(root: &Path) -> ZResult<()> {
         if read == buf.len() && buf.last() != Some(&b'\n') && buf.len() >= MAX_LINE {
             // A line longer than the cap: refuse it and keep the connection, because the client may
             // recover and the alternative is dying on one bad message.
+            //
+            // Then drain to the end of that line (#319). The bounded read stopped inside it, and
+            // without draining, the REST of the overlong line arrived on the next round and was parsed
+            // as a message in its own right - text the client wrote as a continuation could become a
+            // valid JSON-RPC call. Draining with a buffer means an endless line still costs bounded
+            // memory, which is the property the cap was there for.
             let _ = writeln!(
                 stdout,
                 "{}",
                 error_response(Json::Null, -32700, "parse error: line too long").render()
             );
             let _ = stdout.flush();
+            if let Some(done) = drain_to_newline(&mut reader)? {
+                return Ok(done);
+            }
             continue;
         }
         let text = match std::str::from_utf8(&buf) {
@@ -1061,5 +1097,39 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&d);
+    }
+    #[test]
+    fn the_tail_of_an_overlong_line_is_not_parsed_as_a_message() {
+        // #319: the bounded read stopped inside the overlong line and left the rest in the stream. The
+        // next round read that tail and parsed it as a message in its own right, so text the client
+        // wrote as a continuation could arrive as a valid request.
+        //
+        // The remainder here is a well-formed JSON-RPC call on purpose: if draining is missing, the
+        // tail is exactly the thing that would be executed.
+        let tail = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}\n";
+        let stream = format!("{}{}", "x".repeat(1000), tail);
+        let mut reader = std::io::BufReader::new(stream.as_bytes());
+
+        // Consume the overlong line's first part the way the loop does, then drain.
+        let mut head = Vec::new();
+        reader
+            .by_ref()
+            .take(500)
+            .read_until(b'\n', &mut head)
+            .unwrap();
+        assert!(
+            head.last() != Some(&b'\n'),
+            "the bounded read must stop inside the line for this test to mean anything"
+        );
+
+        drain_to_newline(&mut reader).unwrap();
+
+        // Nothing of the tail may be left to read.
+        let mut rest = String::new();
+        std::io::Read::read_to_string(&mut reader, &mut rest).unwrap();
+        assert!(
+            rest.is_empty(),
+            "the drained tail must not be readable as a message; left: {rest:?}"
+        );
     }
 }

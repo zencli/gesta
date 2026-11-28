@@ -275,11 +275,20 @@ pub fn fetch_response(pack: &[u8]) -> Vec<u8> {
 pub fn acknowledgments(haves: &[String], recognized: &[String]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&pkt_line(b"acknowledgments\n"));
+
+    // `ACK` for each have the server has, and then at most ONE `NAK` (#322).
+    //
+    // The loop used to write a `NAK` per unrecognised have, so a client with fifty unknown haves was
+    // answered with fifty `NAK` lines. The v2 shape is `ACK`s, or a single `NAK` when nothing is
+    // common, then `ready` - a client reading the section expects one verdict, not one per line it
+    // sent.
+    let mut sent_nak = false;
     for h in haves {
         if recognized.iter().any(|r| r == h) {
             out.extend_from_slice(&pkt_line(format!("ACK {}\n", h).as_bytes()));
-        } else {
+        } else if !sent_nak {
             out.extend_from_slice(&pkt_line(b"NAK\n"));
+            sent_nak = true;
         }
     }
     if !recognized.is_empty() {
@@ -460,5 +469,19 @@ mod tests {
         let out = fetch_response(b"PACKDATA");
         let text = String::from_utf8_lossy(&out[..12]).to_string();
         assert!(text.contains("packfile"), "{}", text);
+    }
+    #[test]
+    fn the_acknowledgments_section_carries_one_nak_not_one_per_unknown_have() {
+        // #322: the loop wrote a `NAK` for every have the server did not recognize, so a client with
+        // fifty unknown haves got fifty `NAK` lines. The v2 section is ACKs, or a single NAK, then
+        // `ready`; a client reading it expects one verdict.
+        let haves: Vec<String> = (0..50).map(|i| format!("{:040x}", i)).collect();
+        let out = acknowledgments(&haves, &[]);
+        let text = String::from_utf8_lossy(&out);
+        let naks = text.matches("NAK").count();
+        assert_eq!(
+            naks, 1,
+            "one NAK for the whole section, not one per have; got {naks} in {text:?}"
+        );
     }
 }
