@@ -57,5 +57,23 @@ pub fn cmd_git_export(path: &str, branch: Option<&str>) -> ZResult<()> {
     if !out.root.is_empty() {
         println!("head: {}", out.root);
     }
+    // Tags are reported like branches, for the same reason (#206): an export that silently drops
+    // them is indistinguishable from one that had none.
+    if !out.tags.is_empty() {
+        println!("tags: {}", out.tags.join(", "));
+    }
+    // A skipped tag is said out loud rather than failing the whole export (#330). By the time the tag
+    // loop runs every branch is already written, so an error there reported total failure for a
+    // partial success; naming the tag lets the reader see what was left out and why.
+    if !out.skipped_tags.is_empty() {
+        println!(
+            "tags not written ({}): {}",
+            out.skipped_tags.len(),
+            out.skipped_tags.join(", ")
+        );
+        println!(
+            "  these name changesets no exported branch reaches; export the branch that has them"
+        );
+    }
     Ok(())
 }

@@ -399,6 +399,13 @@ pub struct Exported {
     /// Reporting them matters for the same reason `branches` does: an export that silently drops
     /// tags looks identical to one that had none.
     pub tags: Vec<String>,
+    /// Tags naming a changeset no exported branch reaches, with the reason (#330).
+    ///
+    /// Reported rather than fatal. The tag loop runs after every branch has already been written, so
+    /// returning an error there told the caller the export failed while the destination git repo held
+    /// all the branches and objects: a half-done job described as a total failure, which is the
+    /// answer that makes someone re-run and then distrust the tool.
+    pub skipped_tags: Vec<String>,
 }
 
 /// Write this repository into a git repository at `git_root`, which is created if missing.
@@ -551,11 +558,17 @@ fn export_into(conn: &Connection, repo: &Repo, branch: Option<&str>) -> ZResult<
                 out.tags.push(name);
             }
             None => {
-                return Err(bad(format!(
-                    "tag {} names changeset {}, which is not reachable from any exported branch; \
-                     refusing to write a tag that points at nothing",
+                // A tag outside every exported branch is SKIPPED and reported (#330), not fatal.
+                //
+                // `--branch` exports one branch, and a tag on another branch's history is then
+                // unreachable by construction - a legitimate state, not a broken repository. Returning
+                // an error here also ran after all branches were written, so the caller was told the
+                // export failed while the destination held everything that did succeed. The tag is
+                // named in the report, so a reader can see what was left out and why.
+                out.skipped_tags.push(format!(
+                    "{} (changeset {}, not reachable from the exported branches)",
                     name, changeset
-                )))
+                ));
             }
         }
     }
@@ -1889,6 +1902,54 @@ mod tests {
             git_of(&conn, "cs1"),
             "the tag must point at the commit its changeset became"
         );
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn a_tag_outside_every_exported_branch_is_reported_not_fatal() {
+        // #330: the tag loop runs after every branch has already been written, so returning an error
+        // there told the caller the export failed while the destination git repo held all the
+        // branches and objects - a half-done job described as a total failure.
+        //
+        // A tag on a branch that `--branch` did not export is unreachable by construction, which is a
+        // legitimate state, not a broken repository.
+        let conn = crate::store::tests::mem_db();
+        crate::store::init_schema(&conn).unwrap();
+        crate::repo::tests::commit_files(&conn, "cs1", "root", &[("a.txt", "one\n")]);
+        // A tag naming a changeset that does not exist stands in for "unreachable from the export":
+        // both reach the same branch of the loop, and this way the test needs no second branch.
+        conn.execute(
+            "INSERT INTO tags(name, changeset_id, message, created_at) VALUES('v-ghost','cs-missing',NULL,20)",
+            [],
+        )
+        .unwrap();
+
+        let out = temp("tag-ghost-out");
+        let _ = std::fs::remove_dir_all(&out);
+        let got = export(&conn, &out, None)
+            .expect("an unreachable tag must not fail the export that already wrote its branches");
+
+        assert!(
+            got.tags.is_empty(),
+            "nothing was written under refs/tags: {:?}",
+            got.tags
+        );
+        assert_eq!(
+            got.skipped_tags.len(),
+            1,
+            "the skipped tag must be reported so the reader can see what was left out: {:?}",
+            got.skipped_tags
+        );
+        assert!(
+            got.skipped_tags[0].contains("v-ghost"),
+            "the report must name the tag, got: {:?}",
+            got.skipped_tags
+        );
+        assert!(
+            !got.branches.is_empty(),
+            "the branch written before the tag loop must still be reported as written"
+        );
+
         let _ = std::fs::remove_dir_all(&out);
     }
 

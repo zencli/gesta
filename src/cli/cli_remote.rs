@@ -1422,17 +1422,25 @@ pub fn cmd_ignore_why(path: &str, json: bool) -> ZResult<()> {
         println!("{} is not ignored", rel);
         // A path that a rule would have caught and a negation rescued is the case people ask
         // about. Saying only "not ignored" leaves them hunting for the rule that saved it.
-        if let Some((_source, rule)) = &deciding {
+        if let Some((_source, _rule)) = &deciding {
             println!("  a rule covers it, and one of these puts it back:");
+            // Only a negation whose own pattern matches this path can have saved it (#329).
+            //
+            // The test here used to be `!restored.is_ignored(&rel, false)`, where `restored` holds a
+            // single negated rule. A lone `!pattern` can never return true - on a match `ignored`
+            // becomes `!negated`, which is false, and on no match it is false too - so that condition
+            // held for EVERY negation in every file. `ignore why` listed all of them as if each one
+            // had saved the path, which is the opposite of what the command exists to answer: which
+            // rule decided.
+            //
+            // The question is whether the negation's pattern covers the path, so it is asked of the
+            // body with the `!` stripped, the same way the deciding-rule loop above asks it.
             for (src, rules) in &sources {
                 for r in rules.iter().filter(|r| r.starts_with('!')) {
-                    let restored = crate::store::walk::IgnoreRules::new(vec![r.clone()]);
-                    if crate::store::walk::IgnoreRules::new(vec![rule
-                        .trim_start_matches('!')
-                        .to_string()])
-                    .is_ignored(&rel, false)
-                        && !restored.is_ignored(&rel, false)
-                    {
+                    let body = r.trim_start_matches('!');
+                    let covers = crate::store::walk::IgnoreRules::new(vec![body.to_string()])
+                        .is_ignored(&rel, false);
+                    if covers {
                         println!("    {}  (from {})", r, src);
                     }
                 }
@@ -3452,6 +3460,47 @@ mod tests {
         assert!(
             entries_named(&entries, "write").is_empty(),
             "the role must not be mistaken for the name: that is the bug"
+        );
+    }
+    #[test]
+    fn a_negation_is_listed_only_when_its_own_pattern_covers_the_path() {
+        // #329: the filter was `!restored.is_ignored(&rel, false)` on a lone `!pattern`. A single
+        // negated rule can never return true - on a match `ignored = !negated` is false, on no match
+        // it is false too - so that condition held for EVERY negation in every file, and `ignore why`
+        // listed all of them as if each had rescued the path.
+        use crate::store::walk::IgnoreRules;
+
+        let rel = "keep.log";
+        let rules: [String; 3] = [
+            "!keep.log".to_string(),
+            "!build/important.txt".to_string(),
+            "!unrelated-*.tmp".to_string(),
+        ];
+
+        // The rule that did the rescuing: its body matches.
+        let covering: Vec<&String> = rules
+            .iter()
+            .filter(|r| {
+                IgnoreRules::new(vec![r.trim_start_matches('!').to_string()]).is_ignored(rel, false)
+            })
+            .collect();
+        assert_eq!(
+            covering.len(),
+            1,
+            "exactly one negation covers keep.log, got {covering:?}"
+        );
+        assert_eq!(covering[0].as_str(), "!keep.log");
+
+        // The old condition, kept here to show what it did: every rule passes it, which is why the
+        // output named all three.
+        let by_old_test: Vec<&String> = rules
+            .iter()
+            .filter(|r| !IgnoreRules::new(vec![(*r).clone()]).is_ignored(rel, false))
+            .collect();
+        assert_eq!(
+            by_old_test.len(),
+            rules.len(),
+            "the old test passed for every negation, which is the defect"
         );
     }
 }
