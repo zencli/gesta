@@ -48,7 +48,28 @@ pub fn protected_branches(conn: &Connection) -> ZResult<Vec<String>> {
 }
 
 /// Record one sign-off. Signing twice is not an error: the row is already the answer.
+///
+/// A changeset that does not exist IS an error (#307). `INSERT OR IGNORE` suppresses every
+/// constraint failure, not just the duplicate key, so it also swallowed the foreign-key violation from
+/// approving something that is not in the database: the command printed success, recorded nothing, and
+/// the caller believed a sign-off existed. A protection rule that counts approvals then found none and
+/// refused for a reason nobody could see.
+///
+/// The existence check is explicit rather than a tightened insert because the two answers must stay
+/// different: duplicate is fine, unknown is not.
 pub fn approve(conn: &Connection, changeset: &str, branch: &str, signer: &str) -> ZResult<()> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM changesets WHERE id = ?1",
+        params![changeset],
+        |r| r.get(0),
+    )?;
+    if exists == 0 {
+        return Err(crate::bad(format!(
+            "no changeset {} to approve; check the id, or the changeset may not have been committed \
+             on this machine",
+            changeset
+        )));
+    }
     conn.execute(
         "INSERT OR IGNORE INTO approvals(changeset_id, branch, signer, created_at)
          VALUES(?1, ?2, ?3, ?4)",
@@ -153,5 +174,34 @@ mod tests {
         // branch that does not exist would fail here instead of reporting the branch.
         let conn = schema_only();
         assert!(!is_protected(&conn, "no-such-branch").unwrap());
+    }
+    #[test]
+    fn approving_a_changeset_that_does_not_exist_is_an_error_not_a_silent_success() {
+        // #307: `INSERT OR IGNORE` suppresses every constraint failure, not just the duplicate key, so
+        // it also swallowed the foreign-key violation from approving something that is not in the
+        // database. The command printed success, recorded nothing, and the caller believed a sign-off
+        // existed; a protection rule counting approvals then found none and refused for a reason
+        // nobody could see.
+        let conn = schema_only();
+
+        let err = approve(&conn, "no-such-changeset", "main", "alice")
+            .expect_err("an unknown changeset must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no changeset"),
+            "the refusal must say the changeset is unknown, got: {msg}"
+        );
+
+        // A real changeset approves, and approving it twice is still not an error.
+        conn.execute(
+            "INSERT INTO changesets(id, message, author, created_at, status, branch)
+             VALUES('cs1', 'm', 'a', 1, 'pending', 'main')",
+            [],
+        )
+        .unwrap();
+        approve(&conn, "cs1", "main", "alice").unwrap();
+        approve(&conn, "cs1", "main", "alice")
+            .expect("signing twice is the row already being the answer");
+        assert_eq!(approvers(&conn, "cs1").unwrap(), vec!["alice".to_string()]);
     }
 }

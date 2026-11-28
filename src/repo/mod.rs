@@ -74,7 +74,6 @@ pub struct WorktreeDelta {
     /// removed files they never saw, and acting on it recorded a deletion of content they wanted.
     pub absent: Vec<String>,
     pub unchanged: usize,
-    pub skipped_binary: Vec<String>,
     /// Files served from the stat cache, and files that had to be re-hashed.
     pub cached: usize,
     pub rehashed: usize,
@@ -150,7 +149,6 @@ pub fn diff_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult<Wo
         deleted: Vec::new(),
         absent: Vec::new(),
         unchanged: 0,
-        skipped_binary: Vec::new(),
         cached: 0,
         rehashed: 0,
     };
@@ -198,7 +196,6 @@ pub fn diff_worktree(conn: &Connection, root: &Path, branch: &str) -> ZResult<Wo
             scanned.unreadable.len() - 1
         )));
     }
-    d.skipped_binary = scanned.skipped_binary;
     d.cached = scanned.cached;
     d.rehashed = scanned.rehashed;
 
@@ -243,7 +240,6 @@ pub struct NewChangeset {
     pub id: String,
     pub files: Vec<(String, Option<String>, String)>,
     pub deleted: Vec<String>,
-    pub skipped: Vec<String>,
 }
 
 pub fn create_changeset(
@@ -364,8 +360,6 @@ pub fn create_changeset_scoped(
             changes.push((f.rel, old_hash, f.hash, content, f.mode));
         }
     }
-    let skipped = scanned.skipped_binary;
-
     let mut tracked: Vec<String> = committed.keys().cloned().collect();
     tracked.sort();
     for path in tracked {
@@ -413,12 +407,7 @@ pub fn create_changeset_scoped(
     }
     tx.commit()?;
 
-    Ok(Some(NewChangeset {
-        id,
-        files,
-        deleted,
-        skipped,
-    }))
+    Ok(Some(NewChangeset { id, files, deleted }))
 }
 
 /// Commit one pending changeset. Returns files written; `0` means it was

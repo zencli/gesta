@@ -772,10 +772,6 @@ fn tool_diff(conn: &Connection, root: &Path, args: &Json) -> Result<Json, String
                     "deleted",
                     Json::arr(d.deleted.into_iter().map(Json::str).collect()),
                 ),
-                (
-                    "skipped_binary",
-                    Json::arr(d.skipped_binary.into_iter().map(Json::str).collect()),
-                ),
                 ("unchanged", Json::int(d.unchanged as i64)),
             ]))
         }

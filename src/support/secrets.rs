@@ -146,20 +146,32 @@ pub fn remote_entry_name(remote: &str) -> String {
 
 /// `GESTA_REMOTE_TOKEN_<NAME>`, for a build that has no passphrase.
 ///
-/// The name is upper-cased and anything that is not a letter or a digit becomes `_`, so `origin` is
-/// `GESTA_REMOTE_TOKEN_ORIGIN` and `up-stream` is `GESTA_REMOTE_TOKEN_UP_STREAM`. Returns `None` for
-/// an empty value, so `VAR=` behaves like unset rather than like an empty token.
+/// The name is upper-cased and encoded so that different remote names cannot produce the same
+/// variable (#306). The first version lower-cased nothing and turned every non-alphanumeric character
+/// into `_`, which made `a-b` and `a_b` both `GESTA_REMOTE_TOKEN_A_B`: a token exported for one remote
+/// was then used for the other, and nothing said so. Two remotes are usually two different servers, so
+/// that is a credential reaching a host it was not meant for.
+///
+/// The encoding is an escape, not a substitution:
+///
+///   `A-Z`, `0-9`   kept, upper-cased
+///   `_`            `__`     (so an escape can never be read as a separator)
+///   other byte     `_<hh>`  lower-case hex of the UTF-8 byte
+///
+/// It is injective: each input byte maps to a distinct, self-delimiting output, so two different names
+/// cannot collide. `origin` stays `ORIGIN` and `up-stream` becomes `UP_2DSTREAM`, which is uglier than
+/// before and correct.
+///
+/// Returns `None` for an empty value, so `VAR=` behaves like unset rather than like an empty token.
 pub fn env_name_for_remote(remote: &str) -> String {
-    let suffix: String = remote
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
+    let mut suffix = String::with_capacity(remote.len());
+    for b in remote.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => suffix.push(b.to_ascii_uppercase() as char),
+            b'_' => suffix.push_str("__"),
+            _ => suffix.push_str(&format!("_{:02x}", b)),
+        }
+    }
     format!("GESTA_REMOTE_TOKEN_{}", suffix)
 }
 
