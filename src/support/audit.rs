@@ -480,7 +480,7 @@ mod tests {
     use super::*;
 
     fn dir() -> std::path::PathBuf {
-        let d = super::super::scratch::scratch("gesta-audit");
+        let d = super::super::scratch::scratch("gesta-audit").expect("a test scratch directory");
         std::fs::create_dir_all(d.join(".gesta")).unwrap();
         d
     }

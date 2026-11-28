@@ -3594,7 +3594,7 @@ pub fn open_repo_for_serve(root: &Path) -> ZResult<ServedRepository> {
     // the first had already removed, which is why the pack had a count and no bodies. The name now
     // comes from `test_scratch`, which counts instead of asking the clock, so the collision cannot
     // come back on a host whose clock is coarser than a nanosecond.
-    let dir = crate::support::scratch::scratch("gesta-serve");
+    let dir = crate::support::scratch::scratch("gesta-serve")?;
     std::fs::create_dir_all(&dir)?;
     let mut refs = Vec::new();
     let mut objects = Vec::new();
