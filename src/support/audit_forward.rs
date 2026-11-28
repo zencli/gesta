@@ -510,15 +510,20 @@ mod tests {
         // drain for that long per event. The read and write timeouts set afterwards never come into
         // play because there is no stream yet.
         //
-        // 203.0.113.0/24 is TEST-NET-3: reserved for documentation, never routed, so a connect there
-        // hangs rather than being refused, which is the shape this needs. A refused connection would
-        // return immediately and prove nothing.
+        // 203.0.113.0/24 is TEST-NET-3: reserved for documentation and never routed on a normal
+        // egress, so a connect there hangs rather than being refused, which is the shape this needs.
+        //
+        // Not every egress is normal (#288). One measured here accepts the SYN and closes at once, so
+        // the failure is "collector answered: nothing" rather than a connect error. Both are fast
+        // failures of an unreachable collector, and the property under test is the TIME, not which
+        // syscall reported it - asserting the wording made the test red on a network where the code
+        // was fine. What must not happen is a wait measured in minutes.
         let started = std::time::Instant::now();
         let err = post("http://203.0.113.1:9/audit", None, "{}\n").unwrap_err();
         let took = started.elapsed();
         assert!(
-            err.contains("connect"),
-            "the failure must be the connect, got: {err}"
+            err.contains("connect") || err.contains("collector answered"),
+            "the failure must name the connect or an answer from the collector, got: {err}"
         );
         assert!(
             took < std::time::Duration::from_secs(10),

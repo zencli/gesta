@@ -2053,6 +2053,40 @@ pub fn cmd_token_add(
     Ok(())
 }
 
+/// How many fields the secret occupies at the front of a line.
+///
+/// Three shapes live in the auth file, and all three put the secret first:
+///
+///   `<token>:<role>:<name>:...`            clear
+///   `sha256:<digest>:<role>:<name>:...`    unkeyed digest
+///   `sha256m:<mac>:<role>:<name>:...`      keyed digest
+///
+/// So the secret is field 0 unless the line starts with a digest marker, in which case it is field 1.
+/// That rule is the whole function, and it exists because four call sites used to spell it out with
+/// `starts_with("sha256:")` (#286). `sha256m:` does not start with `sha256:`, so a keyed entry fell
+/// into the clear branch everywhere: `entries_named` read the role as the name and the last four
+/// characters of the marker as the selector suffix, `rotate` wrote the digest back as the role, and
+/// `list` printed a hashed entry as `clear`. Selecting a keyed token by anything a person can read
+/// therefore picked the wrong entry or none, and rotating one corrupted it.
+///
+/// One function rather than four comparisons, for the same reason `entries_named` is shared: the next
+/// shape to be added lands here or the compiler says so.
+fn secret_offset(line: &str) -> usize {
+    match line.trim().split(':').next() {
+        Some("sha256") | Some("sha256m") => 1,
+        _ => 0,
+    }
+}
+
+/// The stored form of a line, as `token list` reports it.
+fn entry_kind(line: &str) -> &'static str {
+    match line.trim().split(':').next() {
+        Some("sha256") => "sha256",
+        Some("sha256m") => "sha256m",
+        _ => "clear",
+    }
+}
+
 /// Which entries a selector names.
 ///
 /// Two commands used to answer this separately and disagreed. `rotate` took the first entry whose
@@ -2074,27 +2108,17 @@ fn entries_named(entries: &[String], selector: &str) -> Vec<usize> {
         if l.is_empty() || l.starts_with('#') {
             continue;
         }
-        // `sha256:<digest>:<role>:<name>...` puts the name at the same index as the clear form; only
-        // the secret's position differs.
-        let (id, name) = if let Some(rest) = l.strip_prefix("sha256:") {
-            let mut parts = rest.splitn(3, ':');
-            let digest = parts.next().unwrap_or("");
-            let _role = parts.next();
-            let tail = parts.next().unwrap_or("");
-            (
-                digest.to_string(),
-                tail.split(':').next().unwrap_or("").trim().to_string(),
-            )
-        } else {
-            let mut parts = l.splitn(3, ':');
-            let token = parts.next().unwrap_or("").to_string();
-            let _role = parts.next();
-            let tail = parts.next().unwrap_or("");
-            (
-                token,
-                tail.split(':').next().unwrap_or("").trim().to_string(),
-            )
-        };
+        // Field 0 is the secret, or field 1 when the line opens with a digest marker (#286).
+        let off = secret_offset(l);
+        let fields: Vec<&str> = l.split(':').collect();
+        let id = fields.get(off).copied().unwrap_or("").to_string();
+        // role at off+1, name at off+2, whatever follows is scope.
+        let name = fields
+            .get(off + 2)
+            .copied()
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let last4: String = {
             let chars: Vec<char> = id.chars().collect();
             let start = chars.len().saturating_sub(4);
@@ -2125,7 +2149,7 @@ fn one_entry_named(entries: &[String], selector: &str, verb: &str) -> ZResult<us
                 .map(|&i| {
                     let l = entries[i].trim();
                     let f: Vec<&str> = l.split(':').collect();
-                    let off = if l.starts_with("sha256:") { 1 } else { 0 };
+                    let off = secret_offset(l);
                     f.get(off + 2).copied().unwrap_or("?").to_string()
                 })
                 .collect();
@@ -2161,11 +2185,7 @@ pub fn cmd_token_rotate(selector: &str, hashed: bool) -> ZResult<()> {
     // The failing entry is parsed before anything is written, so a rotate on a malformed line refuses
     // rather than replacing it with a well-formed but different grant.
     let fields: Vec<String> = entries[idx].split(':').map(|s| s.to_string()).collect();
-    let offset = if entries[idx].starts_with("sha256:") {
-        1
-    } else {
-        0
-    };
+    let offset = secret_offset(&entries[idx]);
     if fields.len() < 3 + offset {
         return Err(bad(format!("the entry for {:?} is malformed", selector)));
     }
@@ -2243,23 +2263,18 @@ pub fn cmd_token_list() -> ZResult<()> {
         if l.is_empty() || l.starts_with('#') {
             continue;
         }
-        let (role, name, id) = if let Some(rest) = l.strip_prefix("sha256:") {
-            let mut parts = rest.splitn(3, ':');
-            let digest = parts.next().unwrap_or("");
-            (
-                parts.next().unwrap_or("read").to_string(),
-                parts.next().unwrap_or("unnamed").to_string(),
-                digest.to_string(),
-            )
-        } else {
-            let mut parts = l.splitn(3, ':');
-            let token = parts.next().unwrap_or("").to_string();
-            (
-                parts.next().unwrap_or("read").to_string(),
-                parts.next().unwrap_or("unnamed").to_string(),
-                token,
-            )
-        };
+        // Field 0 is the secret, or field 1 for either digest shape (#286). `sha256m:` used to fall
+        // into the clear branch, so a keyed entry printed its 64-hex digest as the role, the real
+        // role as the name, and "clear" as the kind.
+        let off = secret_offset(l);
+        let fields: Vec<&str> = l.split(':').collect();
+        let id = fields.get(off).copied().unwrap_or("").to_string();
+        let role = fields.get(off + 1).copied().unwrap_or("read").to_string();
+        let name = fields
+            .get(off + 2)
+            .copied()
+            .unwrap_or("unnamed")
+            .to_string();
         let tail: String = id
             .chars()
             .rev()
@@ -2268,11 +2283,7 @@ pub fn cmd_token_list() -> ZResult<()> {
             .chars()
             .rev()
             .collect();
-        let kind = if l.starts_with("sha256:") {
-            "hashed"
-        } else {
-            "clear"
-        };
+        let kind = entry_kind(l);
         println!("{:<10} {:<18} {:<7} ...{}", role, name, kind, tail);
         shown += 1;
     }
@@ -3372,5 +3383,43 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn a_keyed_entry_is_read_as_a_keyed_entry_by_every_token_command() {
+        // #286: every site compared `starts_with("sha256:")`, and the keyed form is `sha256m:`. So a
+        // keyed entry fell into the clear branch everywhere: `list` printed the digest as the role,
+        // the real role as the name and "clear" as the kind; `entries_named` read the role as the name
+        // and the last four characters of "sha256m" as the selector suffix; `rotate` wrote the digest
+        // back as the role. Selecting a keyed token by anything a person can read picked the wrong
+        // entry, and rotating one corrupted it.
+        let keyed = "sha256m:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:write:ci:src/**:*/main";
+
+        assert_eq!(
+            secret_offset(keyed),
+            1,
+            "the secret is field 1, not field 0"
+        );
+        assert_eq!(
+            entry_kind(keyed),
+            "sha256m",
+            "the kind must not read as clear"
+        );
+
+        let fields: Vec<&str> = keyed.split(':').collect();
+        let off = secret_offset(&fields.join(":"));
+        assert_eq!(fields[off + 1], "write", "the role is at off+1");
+        assert_eq!(fields[off + 2], "ci", "the name is at off+2");
+
+        // And the selector finds it by name, which is what a person has in front of them.
+        let entries = vec![keyed.to_string()];
+        assert_eq!(
+            entries_named(&entries, "ci"),
+            vec![0],
+            "the name `ci` must select the keyed entry"
+        );
+        assert!(
+            entries_named(&entries, "write").is_empty(),
+            "the role must not be mistaken for the name: that is the bug"
+        );
     }
 }
