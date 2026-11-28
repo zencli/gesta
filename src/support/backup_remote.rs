@@ -212,10 +212,24 @@ pub fn unseal(sealed: &[u8], passphrase: &str) -> ZResult<Vec<u8>> {
 /// directory nobody else can enter covers all three, and its mode is a property of this call, which
 /// is why it is its own function and can be asserted without a network upload.
 fn private_temp_dir() -> ZResult<std::path::PathBuf> {
+    // Unique per CALL, not per second (#296).
+    //
+    // The name was pid plus `unix_now()`, which counts SECONDS. Two pushes that started in the same
+    // second drew the same name, and the second `create` failed "already exists" - so one of two
+    // concurrent pushes died for a reason that had nothing to do with either of them. Sequential
+    // pushes never noticed, because the directory is removed on the way out.
+    //
+    // The random suffix covers both same-second concurrency and a pid reused after a crash, which a
+    // nanosecond stamp does not: the clock's granularity was measured coarser than the unit it
+    // reports (49.2% of back-to-back readings repeated), which is why `support::scratch` does not use
+    // it either.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let d = std::env::temp_dir().join(format!(
-        "gesta-backup-{}-{}",
+        "gesta-backup-{}-{}-{:08x}",
         std::process::id(),
-        crate::support::clock::unix_now()
+        seq,
+        crate::support::scratch::nonce()
     ));
     #[cfg(unix)]
     {

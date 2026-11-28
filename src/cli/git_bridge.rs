@@ -1008,7 +1008,8 @@ mod tests {
     /// error, and the assertion below is about memory, not about the exit status.
     fn staging_with_padded_pack(size: u64) -> std::path::PathBuf {
         use std::io::Write;
-        let staging = crate::support::scratch::scratch("gesta-unpack");
+        let staging =
+            crate::support::scratch::scratch("gesta-unpack").expect("a test scratch directory");
         let pack_dir = staging.join("objects").join("pack");
         std::fs::create_dir_all(&pack_dir).unwrap();
         let path = pack_dir.join("pack-t.pack");

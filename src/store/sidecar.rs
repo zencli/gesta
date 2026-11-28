@@ -137,7 +137,8 @@ mod tests {
     use super::*;
 
     fn repo() -> PathBuf {
-        let d = crate::support::scratch::scratch("gesta-sidecar");
+        let d =
+            crate::support::scratch::scratch("gesta-sidecar").expect("a test scratch directory");
         std::fs::create_dir_all(d.join(crate::ZF_DIR)).unwrap();
         d
     }

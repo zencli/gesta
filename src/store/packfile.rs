@@ -581,7 +581,8 @@ mod tests {
     fn handle_for(bytes: &[u8]) -> (std::fs::File, std::path::PathBuf) {
         // The directory was keyed on the pid alone, so every call in one process shared it, and the
         // file name inside it came from the clock. Both halves now come from one counter.
-        let dir = crate::support::scratch::scratch("gesta-pkvar");
+        let dir =
+            crate::support::scratch::scratch("gesta-pkvar").expect("a test scratch directory");
         let p = dir.join(format!(
             "h-{}-{:?}.bin",
             bytes.len(),

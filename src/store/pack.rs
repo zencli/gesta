@@ -215,7 +215,7 @@ mod tests {
     use super::*;
 
     fn repo() -> (Connection, std::path::PathBuf) {
-        let dir = crate::support::scratch::scratch("gesta-pack");
+        let dir = crate::support::scratch::scratch("gesta-pack").expect("a test scratch directory");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(dir.join(".gesta")).ok();
         let conn = crate::store::open_db(&dir).unwrap();

@@ -794,7 +794,7 @@ pub fn receive_pack_scoped(
         return Ok(out);
     }
 
-    let scratch = crate::support::scratch::scratch("gesta-push");
+    let scratch = crate::support::scratch::scratch("gesta-push")?;
     let result = (|| -> ZResult<Vec<u8>> {
         std::fs::create_dir_all(&scratch)?;
         let init = std::process::Command::new("git")

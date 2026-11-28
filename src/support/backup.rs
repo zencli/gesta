@@ -80,6 +80,41 @@ pub fn contents(conn: &Connection) -> ZResult<Contents> {
     })
 }
 
+/// Which tables came out of the copy with fewer rows, as a message, or `None` when none did.
+///
+/// The check compared `changesets` and `objects` and called that "fewer rows", while `contents` had
+/// been counting six tables all along (#295). A copy that lost tag, branch, file_versions or
+/// blame_ranges rows passed: the store opened, the counts it did look at were intact, and the damage
+/// surfaced later as missing history or empty blame. A backup that reports success on a partial copy
+/// is worse than no backup, because the old one has already been replaced by then.
+///
+/// A separate function so the rule can be tested without arranging a corrupt copy on disk: the
+/// state that matters is "these two counts differ", and that is a value.
+fn rows_lost(before: &Contents, after: &Contents) -> Option<String> {
+    let pairs: [(&str, i64, i64); 6] = [
+        ("changesets", after.changesets, before.changesets),
+        ("objects", after.objects, before.objects),
+        ("branches", after.branches, before.branches),
+        ("tags", after.tags, before.tags),
+        ("file_versions", after.file_versions, before.file_versions),
+        ("blame_ranges", after.blame_ranges, before.blame_ranges),
+    ];
+    // Only FEWER is a failure. A higher count is legitimate: the source can gain rows during the
+    // copy, and the check is against the count taken when the copy started.
+    let lost: Vec<String> = pairs
+        .iter()
+        .filter(|(_, a, b)| a < b)
+        .map(|(t, a, b)| format!("{} {a} against {b}", t))
+        .collect();
+    if lost.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "the backup holds fewer rows than the repository held when the copy started: {}",
+        lost.join(", ")
+    ))
+}
+
 /// Write the whole store to `dest`.
 ///
 /// `dest` is replaced if it exists, because a backup that silently appends to an older file produces
@@ -116,12 +151,9 @@ pub fn backup(conn: &Connection, dest: &std::path::Path) -> ZResult<BackupReport
     // The backup API writes a database without WAL settings, so the result opens as a clean store.
     let check = Connection::open(&staged)?;
     let after = contents(&check)?;
-    // Against the count taken before the copy, not the live one.
-    if after.changesets < before.changesets || after.objects < before.objects {
-        return Err(bad_err(format!(
-            "the backup holds fewer rows than the repository held when the copy started: {} changesets against {}, {} objects against {}",
-            after.changesets, before.changesets, after.objects, before.objects
-        )));
+    // Against the count taken before the copy, not the live one, and for EVERY table (#295).
+    if let Some(report) = rows_lost(&before, &after) {
+        return Err(bad_err(report));
     }
     drop(check);
 
@@ -730,5 +762,71 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&d);
+    }
+    #[test]
+    fn a_copy_that_lost_rows_from_any_table_is_refused_not_only_objects_and_changesets() {
+        // #295: the check compared `changesets` and `objects` and called that "fewer rows", while
+        // `contents` had been counting six tables all along. A copy that lost tag, branch,
+        // file_versions or blame_ranges rows passed the check - the store opened, the two counts it
+        // did look at were intact, and the damage appeared later as missing history or empty blame.
+        let full = Contents {
+            changesets: 10,
+            objects: 20,
+            branches: 3,
+            tags: 4,
+            file_versions: 30,
+            blame_ranges: 40,
+        };
+
+        // An identical copy is not a failure.
+        assert!(
+            rows_lost(&full, &full).is_none(),
+            "an intact copy must pass, or backups would never complete"
+        );
+
+        // A source that gained rows during the copy is not a failure either: the check is against the
+        // count taken when the copy started.
+        let grown = Contents {
+            changesets: 11,
+            ..full
+        };
+        assert!(
+            rows_lost(&full, &grown).is_none(),
+            "more rows than before is legitimate and must not be refused"
+        );
+
+        // Every table, one at a time. Each of these passed the old check.
+        for (label, partial) in [
+            ("tags", Contents { tags: 3, ..full }),
+            (
+                "branches",
+                Contents {
+                    branches: 2,
+                    ..full
+                },
+            ),
+            (
+                "file_versions",
+                Contents {
+                    file_versions: 29,
+                    ..full
+                },
+            ),
+            (
+                "blame_ranges",
+                Contents {
+                    blame_ranges: 39,
+                    ..full
+                },
+            ),
+        ] {
+            let msg = rows_lost(&full, &partial)
+                .unwrap_or_else(|| panic!("a copy short of {label} rows must be refused"));
+            assert!(
+                msg.contains(label),
+                "the refusal has to name the table that lost rows, so an operator knows what to \
+                 restore; got: {msg}"
+            );
+        }
     }
 }
