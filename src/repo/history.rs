@@ -325,6 +325,51 @@ pub fn revert_changeset(
         // did not overlap - a file edited at the top after `target`, reverted for an unrelated
         // change at the bottom, silently lost the top edit.
         let current = latest_hash(&tx, path, &branch)?;
+
+        // The path was deleted after `target`, and reverting would bring it back (#316).
+        //
+        // Reverting an edit used to write `restore_hash` whole when the path was gone, silently undoing
+        // somebody else's deliberate deletion. Git calls this a modify/delete conflict and refuses, and
+        // so does this: the deletion is a decision the revert knows nothing about, and undoing it is
+        // not what "revert that edit" means.
+        //
+        // The signal is a row for this path in a changeset strictly between `target` and the head with
+        // `new_hash` NULL - that is a deletion, written by a commit that came later. Asking
+        // `latest_hash` instead gives `None` for both "deleted" and "the head does not carry it", and
+        // the working-tree test below relies on the difference.
+        //
+        // A `target` that itself deleted the path is the other way round and stays allowed: its own
+        // row is at `target`, not after it, so it never matches this query.
+        let deleted_after: bool = match conn.query_row(
+            "SELECT COALESCE(generation, 0) FROM changesets WHERE id = ?1",
+            params![target],
+            |r| r.get::<_, i64>(0),
+        ) {
+            Ok(_) => {
+                let later: Option<i64> = tx
+                    .query_row(
+                        "SELECT 1 FROM changeset_files cf
+                         JOIN changesets cs ON cs.id = cf.changeset_id
+                         WHERE cf.path = ?1 AND cf.new_hash IS NULL
+                           AND cs.generation > (SELECT COALESCE(generation, 0) FROM changesets WHERE id = ?2)
+                           AND cf.changeset_id IN (SELECT id FROM changesets WHERE branch = ?3 OR ?3 = '')
+                         LIMIT 1",
+                        params![path, target, branch],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .optional()?;
+                later.is_some()
+            }
+            Err(_) => false,
+        };
+        if deleted_after && new.is_some() {
+            return Err(bad(format!(
+                "cannot revert {}: {} was deleted after that change, so reverting it would resurrect \
+                 the file. Restore it deliberately first if that is what you want",
+                target, path
+            )));
+        }
+
         let mut new_version = restore_hash.clone();
         if let (Some(c), Some(n)) = (&current, new) {
             if c != n {
@@ -940,6 +985,145 @@ y = 3
             "keep me\n",
             "reverting a deletion must put the file back"
         );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+    #[test]
+    fn reverting_an_edit_refuses_when_a_later_commit_deleted_the_file() {
+        // #316: the path was gone at the head, so the merge was skipped and `restore_hash` was written
+        // whole - silently undoing somebody else's deliberate deletion. Git calls this a
+        // modify/delete conflict and refuses. The test builds exactly that history and asks for the
+        // refusal.
+        let tmp = std::env::temp_dir().join(format!("zf_revert_del_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let conn = mem_db();
+
+        let a1 = put_object(&conn, "A\n").unwrap();
+        let b1 = put_object(&conn, "B\n").unwrap();
+
+        // cs1 writes a.txt = A. cs2 edits it to B. cs3 deletes it.
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch,generation)
+             VALUES('cs1','one','a',1,'committed',NULL,'main',1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs1','a.txt',NULL,?1)",
+            params![a1],
+        )
+        .unwrap();
+        commit_one(&conn, "cs1").unwrap();
+
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch,generation)
+             VALUES('cs2','two','a',2,'committed','cs1','main',2)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs2','a.txt',?1,?2)",
+            params![a1, b1],
+        )
+        .unwrap();
+        commit_one(&conn, "cs2").unwrap();
+
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch,generation)
+             VALUES('cs3','three','a',3,'committed','cs2','main',3)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs3','a.txt',?1,NULL)",
+            params![b1],
+        )
+        .unwrap();
+        commit_one(&conn, "cs3").unwrap();
+        fs::write(tmp.join("a.txt"), "B\n").unwrap();
+
+        // Reverting the edit (cs2) must refuse, because cs3 deleted the file on purpose.
+        let err = revert_changeset(&conn, &tmp, "cs2", "bot", None)
+            .expect_err("reverting an edit whose file was deleted later must not resurrect it");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("deleted after that change"),
+            "the refusal has to say why, got: {msg}"
+        );
+
+        // And the file stays gone: the refusal wrote no changeset for it. The branch head is not
+        // asserted here because `commit_one` in this fixture writes `branches.head` only through the
+        // repository path, which a hand-built history does not go through; what matters is that no
+        // revert row was created.
+        let revert_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM changesets WHERE message LIKE 'Revert%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            revert_rows, 0,
+            "a refused revert must not create a changeset"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn reverting_a_deletion_still_brings_the_file_back() {
+        // The other half of #316, and the reason the guard cannot simply be "the file is missing".
+        // Reverting the changeset that deleted the file is supposed to restore it.
+        let tmp = std::env::temp_dir().join(format!("zf_revert_undel_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let conn = mem_db();
+
+        let a1 = put_object(&conn, "A\n").unwrap();
+
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch,generation)
+             VALUES('cs1','one','a',1,'committed',NULL,'main',1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs1','a.txt',NULL,?1)",
+            params![a1],
+        )
+        .unwrap();
+        commit_one(&conn, "cs1").unwrap();
+
+        conn.execute(
+            "INSERT INTO changesets(id,message,author,created_at,status,parent,branch,generation)
+             VALUES('cs2','two','a',2,'committed','cs1','main',2)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changeset_files(changeset_id,path,old_hash,new_hash)
+             VALUES('cs2','a.txt',?1,NULL)",
+            params![a1],
+        )
+        .unwrap();
+        commit_one(&conn, "cs2").unwrap();
+
+        let outcome = revert_changeset(&conn, &tmp, "cs2", "bot", None)
+            .expect("reverting a deletion restores the file, which is what a revert is for");
+        assert_eq!(
+            fs::read_to_string(tmp.join("a.txt")).unwrap(),
+            "A\n",
+            "the file is back with the content it had before the deletion"
+        );
+        assert_eq!(
+            branch_head(&conn, "main").unwrap().as_deref(),
+            Some(outcome.id.as_str())
+        );
+
         let _ = fs::remove_dir_all(&tmp);
     }
 }
