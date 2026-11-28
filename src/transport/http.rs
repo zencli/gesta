@@ -321,13 +321,35 @@ pub fn parse_http_url(url: &str) -> ZResult<HttpUrl> {
         Some(i) => (&rest[..i], rest[i..].to_string()),
         None => (rest, String::new()),
     };
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) => (
-            h.to_string(),
-            p.parse::<u16>()
+    // An IPv6 literal is bracketed: `[::1]:8080`. Both halves here used to keep the brackets, so the
+    // host became `[::1]` and `TcpStream::connect` was handed a hostname std will not resolve - every
+    // request to an IPv6 literal failed at connect time (#320). The brackets are delimiters, not part
+    // of the address, so they come off here and go back on only where a `host:port` string is built.
+    //
+    // A bracketed literal has no port after the last `:` inside it, so `rsplit_once(':')` on the whole
+    // authority is wrong for `[::1]`: the split would land inside the address. The bracket is closed
+    // before the port, so it is the authority that decides.
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((lit, after)) = rest.split_once(']') else {
+            return Err(bad(format!("unclosed bracket in host: {}", authority)));
+        };
+        let port = match after.strip_prefix(':') {
+            Some(p) => p
+                .parse::<u16>()
                 .map_err(|_| bad(format!("bad port in url: {}", p)))?,
-        ),
-        None => (authority.to_string(), default_port),
+            None if after.is_empty() => default_port,
+            None => return Err(bad(format!("bad host in url: {}", authority))),
+        };
+        (lit.to_string(), port)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, p)) => (
+                h.to_string(),
+                p.parse::<u16>()
+                    .map_err(|_| bad(format!("bad port in url: {}", p)))?,
+            ),
+            None => (authority.to_string(), default_port),
+        }
     };
     if host.is_empty() {
         return Err(bad("empty host in url"));
@@ -2443,6 +2465,33 @@ fn complete_body(head_text: &str, payload: Vec<u8>) -> ZResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ipv6_literal_host_loses_its_brackets_before_a_connection_is_attempted() {
+        // #320: both halves of the URL parser kept the brackets, so host became `[::1]` and
+        // `TcpStream::connect` was handed a hostname std will not resolve. Every request to an IPv6
+        // literal failed at connect time, while `plain_http_is_allowed` next door stripped them
+        // correctly - so the allow gate passed and the connect died.
+        let url =
+            parse_http_url("http://[::1]:8080/base").expect("an IPv6 literal is a valid host");
+        assert_eq!(
+            url.host, "::1",
+            "the brackets are delimiters, not address characters"
+        );
+        assert_eq!(url.port, 8080);
+        assert_eq!(url.base_path, "/base");
+
+        // A bracketed literal with no port takes the scheme's default.
+        let bare = parse_http_url("http://[::1]").expect("a bare IPv6 literal is valid");
+        assert_eq!(bare.host, "::1");
+        assert_eq!(bare.port, 80);
+
+        // An unclosed bracket is refused rather than guessed at.
+        assert!(
+            parse_http_url("http://[::1/base").is_err(),
+            "an unclosed bracket is a malformed host, not a hostname"
+        );
+    }
 
     #[test]
     fn a_panicking_worker_gives_its_slot_back() {

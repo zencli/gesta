@@ -143,14 +143,59 @@ impl S3Config {
             ));
         };
         let rest = rest.trim_end_matches('/');
-        let (host, port) = match rest.rsplit_once(':') {
-            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => (
-                h.to_string(),
-                p.parse::<u16>().map_err(|e| bad(e.to_string()))?,
-            ),
-            _ => (rest.to_string(), if tls { 443 } else { 80 }),
+        // An IPv6 literal is bracketed and its brackets are delimiters, not address characters (#320).
+        // `rsplit_once(':')` on `[::1]:9000` lands on the port correctly by luck, but on `[::1]` it
+        // lands inside the address and the host becomes `[:`, which cannot connect. The same mistake
+        // this file's own `plain_http_is_allowed` already avoided by stripping the brackets - so an
+        // endpoint passed the allow gate and then died at connect time.
+        let (host, port) = if let Some(after_open) = rest.strip_prefix('[') {
+            let Some((lit, after)) = after_open.split_once(']') else {
+                return Err(bad(format!("unclosed bracket in endpoint host: {rest}")));
+            };
+            let port = match after.strip_prefix(':') {
+                Some(p) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+                    p.parse::<u16>().map_err(|e| bad(e.to_string()))?
+                }
+                None if after.is_empty() => {
+                    if tls {
+                        443
+                    } else {
+                        80
+                    }
+                }
+                _ => return Err(bad(format!("bad port in endpoint: {rest}"))),
+            };
+            (lit.to_string(), port)
+        } else {
+            match rest.rsplit_once(':') {
+                Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => (
+                    h.to_string(),
+                    p.parse::<u16>().map_err(|e| bad(e.to_string()))?,
+                ),
+                _ => (rest.to_string(), if tls { 443 } else { 80 }),
+            }
         };
         Ok((host, port, tls))
+    }
+}
+
+/// `host[:port]`, with an IPv6 literal re-bracketed.
+///
+/// `host_port` returns the address without brackets, because that is the form a resolver and
+/// `TcpStream::connect` want (#320). A URL and a signed `Host` header want the bracketed form, because
+/// the colons inside the address would otherwise read as the port separator. Two jobs, two shapes,
+/// and the conversion belongs in one place rather than at each of the four call sites.
+pub fn authority_of(host: &str, port: u16, tls: bool) -> String {
+    let default = (tls && port == 443) || (!tls && port == 80);
+    let bracketed = if host.contains(':') {
+        format!("[{}]", host)
+    } else {
+        host.to_string()
+    };
+    if default {
+        bracketed
+    } else {
+        format!("{}:{}", bracketed, port)
     }
 }
 
@@ -170,11 +215,7 @@ impl S3Config {
         let scheme = if tls { "https" } else { "http" };
         // The Host header is signed, so it has to carry the port whenever the
         // request uses one the scheme does not imply.
-        let authority = if (tls && port == 443) || (!tls && port == 80) {
-            host.clone()
-        } else {
-            format!("{}:{}", host, port)
-        };
+        let authority = authority_of(&host, port, tls);
         let path = format!("/{}/{}", self.bucket, key);
         Ok((
             format!("{}://{}{}", scheme, authority, path),
@@ -290,11 +331,7 @@ impl S3Config {
         let amz_date = crate::support::clock::format_amz_date(now);
         let (host, port, tls) = self.host_port()?;
         let scheme = if tls { "https" } else { "http" };
-        let authority = if (tls && port == 443) || (!tls && port == 80) {
-            host.clone()
-        } else {
-            format!("{}:{}", host, port)
-        };
+        let authority = authority_of(&host, port, tls);
         let path = format!("/{}", self.bucket);
         let query = vec![
             ("list-type".to_string(), "2".to_string()),

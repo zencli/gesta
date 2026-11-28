@@ -100,6 +100,20 @@ impl Advertisement {
     }
 }
 
+/// Whether a string can be a changeset id: 40 or 64 characters, all hex.
+///
+/// The two sites that read a sha out of an advertisement tested `len() >= 40` (#321). That accepted a
+/// 41-character sha and a 40-character string of punctuation, both of which then travelled as the
+/// `old` value in a push command. Nothing exploited it - the server refuses a command whose `old`
+/// does not match, so it failed closed - but accepting a value the format cannot produce is how a
+/// stricter receiver downstream gets surprised later.
+///
+/// Both widths are allowed because the store holds both: SHA-1 and SHA-256 repositories, and #335
+/// taught the same lesson about assuming one.
+fn is_changeset_id(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Parse a `git-receive-pack` advertisement.
 ///
 /// The body is pkt-lines. The first ref line carries the capabilities after a NUL; the rest are plain.
@@ -154,7 +168,7 @@ pub fn parse_advertisement(raw: &[u8]) -> ZResult<Advertisement> {
         let mut parts = rest.split_whitespace();
         let sha = parts.next().unwrap_or("");
         let name = parts.next().unwrap_or("");
-        if sha.len() >= 40 && !name.is_empty() {
+        if is_changeset_id(sha) && !name.is_empty() {
             out.refs.push(RemoteRef {
                 name: name.to_string(),
                 sha: sha.to_string(),
@@ -446,7 +460,7 @@ fn push_refs(
         // id is not what the remote holds is refused, which is the mechanism that stops a push
         // overwriting work someone else landed.
         let old = match adv.id_of(remote_ref) {
-            Some(sha) if sha.len() >= 40 => sha.to_string(),
+            Some(sha) if is_changeset_id(sha) => sha.to_string(),
             _ => "0".repeat(40),
         };
         // A command that moves a ref to where it already is costs the server work and some servers
