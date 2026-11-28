@@ -353,6 +353,35 @@ pub fn shannon(s: &str) -> f64 {
     h
 }
 
+/// Replace every secret a line contains with its redacted form.
+///
+/// For text that ends up in a report rather than in a scan: a finding quotes the source line it came
+/// from, and a line that mentions a deleted name can also hold the value of the thing being deleted
+/// (`api_key = "9f8e..."`). Reporting the line unredacted put the secret in the report, which is a
+/// worse place for it than the file was (#302).
+///
+/// Runs the same rules the scanner runs, so a secret the scanner would flag is a secret this
+/// removes - one definition of "secret", not two. A line with no finding comes back unchanged, and
+/// everything else keeps its shape so the reader can still see what the line was.
+pub fn redact_line(line: &str) -> String {
+    let scanner = Scanner::default();
+    let mut out = line.to_string();
+    for rule in &scanner.rules {
+        // Collect first: the replacements shift later offsets, and rewriting while iterating the
+        // matches of the same rule would move the ones that have not been handled yet.
+        let hits: Vec<String> = rule
+            .pattern
+            .captures_iter(line)
+            .filter_map(|c| rule.secret_of(&c).map(|s| s.to_string()))
+            .filter(|s| !s.is_empty() && !scanner.allowlist.is_stopword(s))
+            .collect();
+        for secret in hits {
+            out = out.replace(&secret, &redact(&secret));
+        }
+    }
+    out
+}
+
 /// Keep the first four characters and the length, so a report identifies a secret without being one.
 pub fn redact(secret: &str) -> String {
     let visible = 4.min(secret.chars().count());
@@ -432,14 +461,18 @@ pub fn default_rules() -> Vec<Rule> {
             Some(3.5),
         ),
         // GitHub tokens: prefix plus length is the whole signal.
-        ("github-pat", r"\bghp_[A-Za-z0-9]{36}\b", 0, Some(3.0)),
+        // `ghp_` covers a personal token. GitHub also issues `ghu_` (a user-to-server token from an
+        // OAuth app), `ghs_` (server-to-server), `ghr_` (a refresh token) and `gho_` (an OAuth access
+        // token), and none of those matched here (#301). They are the same secret in a different
+        // envelope, and a scanner that catches one and not the others reports a clean tree that is
+        // not clean.
+        ("github-pat", r"\bgh[pousr]_[A-Za-z0-9]{36}\b", 0, Some(3.0)),
         (
             "github-fine-grained",
             r"\bgithub_pat_[A-Za-z0-9_]{82}\b",
             0,
             Some(3.0),
         ),
-        ("github-oauth", r"\bgho_[A-Za-z0-9]{36}\b", 0, Some(3.0)),
         ("gitlab-pat", r"\bglpat-[A-Za-z0-9_-]{20}\b", 0, Some(3.0)),
         // Payment providers, where the prefix is documented and the cost of a leak is money.
         (
@@ -475,8 +508,15 @@ pub fn default_rules() -> Vec<Rule> {
         ),
         // Model providers.
         (
+            // Two shapes, and only the legacy one used to be here. `T3BlbkFJ` is base64 for
+            // "OpenAI", which the legacy keys carry and the newer project keys do not: those are
+            // `sk-proj-` followed by a long base62 tail, and they passed the scanner uncaught (#301).
+            //
+            // Written as one alternation rather than a second rule so a single finding names the
+            // whole thing, and anchored on the token boundary so a longer string that happens to
+            // contain a key is still one finding, not a prefix.
             "openai-key",
-            r"\bsk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}\b",
+            r"\b(?:sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}|sk-proj-[A-Za-z0-9_\-]{32,})\b",
             0,
             Some(3.0),
         ),
@@ -827,5 +867,75 @@ mod tests {
             !err.contains("the secret scanner is off"),
             "one disabled rule is not the scanner being off: {err}"
         );
+    }
+    #[test]
+    fn a_project_key_is_found_and_so_is_every_github_prefix() {
+        // #301: the openai rule required `T3BlbkFJ`, which is base64 for "OpenAI" and only the legacy
+        // keys carry it. `sk-proj-...` therefore passed the scanner uncaught. The GitHub rule was
+        // `ghp_`/`gho_`/`github_pat_` only, missing `ghu_`, `ghs_` and `ghr_` - the same secret in a
+        // different envelope, and a scan that catches one and not the others calls a dirty tree clean.
+        let s = Scanner::default();
+
+        // A project key: `sk-proj-` and a long base62 tail, no `T3BlbkFJ`.
+        let proj = format!("OPENAI_API_KEY=sk-proj-{}", "a1B2c3D4e5F6".repeat(4));
+        let found = s.scan_text("x.py", &proj);
+        assert!(
+            found.iter().any(|f| f.rule == "openai-key"),
+            "sk-proj- keys must be found, got: {:?}",
+            found.iter().map(|f| &f.rule).collect::<Vec<_>>()
+        );
+
+        // The legacy shape still matches. The body has to look random: a run of one repeated
+        // character is below the entropy floor, which is deliberate - `aaaa...` in a test fixture is
+        // not a secret, and flagging it would be the noise the entropy check exists to remove.
+        let legacy = format!(
+            "sk-{}T3BlbkFJ{}",
+            "aB3dE5gH7jK9mN1pQ3sT", "uV5xY7zA9cD1eF3gH5jK"
+        );
+        let found = s.scan_text("y.py", &legacy);
+        assert!(
+            found.iter().any(|f| f.rule == "openai-key"),
+            "legacy keys still match"
+        );
+
+        // Every GitHub prefix, in the shape GitHub issues them.
+        for prefix in ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"] {
+            let line = format!("token: {prefix}{}", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8");
+            let found = s.scan_text("z.yml", &line);
+            assert!(
+                found.iter().any(|f| f.rule == "github-pat"),
+                "{prefix} must be caught, got: {:?}",
+                found.iter().map(|f| &f.rule).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn a_reported_line_has_its_secrets_redacted() {
+        // #302: `Stale.text` carried the first 160 characters of the source line with no redaction, so
+        // a line that mentions a deleted name and also holds a secret value put the secret in the
+        // report - a worse place for it than the file was.
+        let line = format!(
+            "api_key = \"sk-proj-{}\"  # uses old_helper",
+            "a1B2c3D4e5F6".repeat(4)
+        );
+        let redacted = redact_line(&line);
+
+        assert!(
+            !redacted.contains("sk-proj-a1B2c3D4"),
+            "the key must not appear in the clear: {redacted}"
+        );
+        assert!(
+            redacted.contains("old_helper"),
+            "the rest of the line survives, so the reader can still see what it said: {redacted}"
+        );
+        assert!(
+            redacted.contains("****"),
+            "and the secret is marked where it was: {redacted}"
+        );
+
+        // A line with nothing to hide comes back untouched.
+        let plain = "call(old_helper)";
+        assert_eq!(redact_line(plain), plain);
     }
 }

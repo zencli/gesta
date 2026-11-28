@@ -22,6 +22,24 @@ use crate::ZResult;
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 
+/// The line with any secret in it masked, when the secret scanner is compiled in.
+///
+/// `leak` lives behind the `regex` feature and `impact` does not, so the call has to be conditional
+/// or a build without that feature stops compiling - which is what the gate step "the build without
+/// optional features compiles" caught (#324). Without the scanner there is no definition of what a
+/// secret looks like, so the honest fallback withholds the line rather than printing it and hoping:
+/// quoting the source line is a convenience, and leaking the value it mentions is not a price worth
+/// paying for it (#302).
+#[cfg(feature = "regex")]
+fn redacted_line(line: String) -> String {
+    crate::support::leak::redact_line(&line)
+}
+
+#[cfg(not(feature = "regex"))]
+fn redacted_line(_line: String) -> String {
+    String::from("<line withheld: built without the secret scanner>")
+}
+
 /// One reference to a name the change removed, in a file the change did not touch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stale {
@@ -288,7 +306,11 @@ pub fn stale_references(
                         name,
                         path: path.clone(),
                         line: n + 1,
-                        text: line.trim().chars().take(160).collect(),
+                        // Redacted, because a finding quotes the source line and that line can
+                        // hold more than the name it matched (#302). The scanner and the report share
+                        // one definition of what a secret is, so nothing the scan would flag is
+                        // printed here in the clear.
+                        text: redacted_line(line.trim().chars().take(160).collect::<String>()),
                         removed_from: from.clone(),
                     });
                 }
