@@ -1822,7 +1822,17 @@ fn clone_http(
          ON CONFLICT(name) DO UPDATE SET url = excluded.url, token = NULL",
         rusqlite::params![url],
     )?;
-    let (written, _removed) = repo::restore_worktree(&conn, target, &branch)?;
+    // A shallow clone restores from the snapshot the bundle carried (#285).
+    //
+    // Cutting the chain removed the changesets that created the older files, and `restore_worktree`
+    // rebuilds the tree by replaying what survives, so those files were simply absent from disk while
+    // the clone printed success. The other two clone paths already answered this way; this one - the
+    // path `remote clone` actually takes over HTTP - did not.
+    let written = if bundle.snapshot.is_empty() {
+        repo::restore_worktree(&conn, target, &branch)?.0
+    } else {
+        restore_from_snapshot(&conn, target, &bundle.snapshot)?
+    };
 
     // See the bundle path in `cmd_clone`: a bundle carries history, not this store's index over it,
     // so blame has to be derived on arrival. This is the function `remote clone` actually reaches

@@ -691,7 +691,43 @@ pub fn build_bundle_with_depth(
     }
     // The marker a receiver needs so it knows whose parent it is missing. Set here rather than in the
     // struct literal because `b` is built before the depth is known.
-    b.shallow_root = shallow_root.filter(|r| !have.contains(r));
+    let shallow = shallow_root.filter(|r| !have.contains(r));
+    b.shallow_root = shallow.clone();
+
+    // A shallow cut removes the changesets that created older files, so the receiver cannot rebuild
+    // the working tree by replaying what it got: `restore_worktree` walks `tree_at`, which only sees
+    // what survives in the changesets that arrived (#285). The head tree therefore travels with the
+    // bundle, exactly as the S3 path has always done it - and every object that tree names is carried
+    // even when no bundled changeset mentions it, because those are the files the cut dropped.
+    //
+    // Only when a cut actually happened: a full bundle carries its whole history, so its receiver
+    // rebuilds the tree the ordinary way and does not need the snapshot. Sending it anyway would make
+    // every full clone pay for a redundant tree.
+    if shallow.is_some() {
+        if let Some(head) = b.head.clone() {
+            let tree = crate::store::tree_at(conn, &head)?;
+            for (_, hash) in &tree {
+                if b.hashes.iter().any(|h| h == hash) {
+                    continue;
+                }
+                // The object may be text, binary, or already sent as part of a delta.
+                if b.deltas.iter().any(|(h, _, _)| h == hash) {
+                    continue;
+                }
+                match get_object(conn, hash) {
+                    Ok(content) => b.objects.push((hash.clone(), content)),
+                    Err(_) => match crate::store::get_object_bytes(conn, hash) {
+                        Ok(bytes) => b.binaries.push((hash.clone(), bytes)),
+                        Err(_) => {
+                            return Err(bad(format!("cannot bundle missing object {}", hash)))
+                        }
+                    },
+                }
+                b.hashes.push(hash.clone());
+            }
+            b.snapshot = tree;
+        }
+    }
     Ok(b)
 }
 
@@ -1826,5 +1862,54 @@ cs\tp1\t1\tagent\tone\t-\t-\nend\n";
         assert_eq!(b.changesets[0].id, "p1");
         assert!(b.changesets[0].session.is_none());
         assert!(b.changesets[0].intent.is_none());
+    }
+    #[test]
+    fn a_shallow_bundle_carries_the_head_tree_so_the_receiver_can_restore_it() {
+        // #285: `build_bundle_with_depth` cut the chain and left `snapshot` empty, so the receiver had
+        // only the surviving changesets to replay. `restore_worktree` walks `tree_at`, which sees just
+        // those, so every file created by a cut changeset was missing from disk while the clone still
+        // printed success.
+        //
+        // Measured on a three-changeset repository before the fix: `--depth 1` restored 6 of 9 files
+        // and said "cloned ... 6 file(s)". The other two clone paths already carried the tree; only
+        // the HTTP one did not.
+        let conn = mem_db();
+        commit_files(&conn, "c1", "first", &[("old.txt", "one\n")]);
+        commit_files(&conn, "c2", "second", &[("mid.txt", "two\n")]);
+        commit_files(&conn, "c3", "third", &[("new.txt", "three\n")]);
+
+        let bundle = build_bundle_with_depth(&conn, "main", &HashSet::new(), Some(1)).unwrap();
+        assert!(
+            bundle.shallow_root.is_some(),
+            "a depth-1 bundle must be marked shallow, or this is not testing a cut"
+        );
+        let paths: Vec<&str> = bundle.snapshot.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths.len(),
+            3,
+            "the head tree has three files and all three must travel; got {paths:?}"
+        );
+        assert!(
+            paths.contains(&"old.txt"),
+            "the file created by the CUT changeset is the one a replay cannot produce, so it must be \
+             in the snapshot; got {paths:?}"
+        );
+
+        // And the objects those files need must be in the bundle, or the receiver holds a tree it
+        // cannot materialise.
+        for (_, hash) in &bundle.snapshot {
+            assert!(
+                bundle.hashes.iter().any(|h| h == hash),
+                "object {hash} is named by the snapshot but not carried by the bundle"
+            );
+        }
+
+        // A full bundle carries its whole history, so it does not need - and must not pay for - a
+        // redundant tree.
+        let full = build_bundle_with_depth(&conn, "main", &HashSet::new(), None).unwrap();
+        assert!(
+            full.snapshot.is_empty(),
+            "a bundle with no cut restores the ordinary way and should not carry a snapshot"
+        );
     }
 }
