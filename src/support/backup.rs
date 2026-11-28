@@ -201,6 +201,42 @@ pub fn verify(file: &std::path::Path) -> ZResult<Contents> {
     contents(&conn)
 }
 
+/// Leftovers from a restore that did not finish, oldest first.
+///
+/// A restore renames the live store to `before-restore-<pid>-<nanos>` and installs the backup. If the
+/// process dies in between, that file is the only copy of what the repository held (#294). It is
+/// never deleted by a later run - the name is unique, so a new restore cannot collide with it - and
+/// this is what a caller can use to tell the user it exists, rather than leaving a file nobody knows
+/// about on disk.
+pub fn stale_asides(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let db = crate::store::db_path(root);
+    let mut out = Vec::new();
+    let Some(dir) = db.parent() else {
+        return out;
+    };
+    let Some(stem) = db.file_stem().and_then(|s| s.to_str()) else {
+        return out;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        // Both shapes: the unique name this version writes, and the single fixed
+        // `<stem>.before-restore` an older version wrote. The second one is exactly the file a
+        // restore used to delete before doing anything (#294), so it is the one most worth
+        // reporting.
+        if name == format!("{stem}.before-restore")
+            || name.starts_with(&format!("{stem}.before-restore-"))
+        {
+            out.push(e.path());
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Replace the store at `root` with the one in `file`.
 ///
 /// The live store is moved aside rather than deleted, and the move only happens after the backup has
@@ -211,8 +247,19 @@ pub fn restore(root: &std::path::Path, file: &std::path::Path) -> ZResult<Conten
     let checked = verify(file)?;
 
     let db = crate::store::db_path(root);
-    let aside = db.with_extension("before-restore");
-    let _ = std::fs::remove_file(&aside);
+
+    // The aside copy gets a name that no other restore can be using (#294).
+    //
+    // It used to be one fixed path, `before-restore`, deleted before anything else. If a previous
+    // restore died in the window after renaming the live store to that path but before installing the
+    // new one, the aside file was the ONLY copy of the store - and the next restore deleted it before
+    // looking, so the repository was gone for good. A unique name means a leftover copy is never
+    // touched by a later run, and `stale_asides` below can report it instead of destroying it.
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let aside = db.with_extension(format!("before-restore-{}-{}", std::process::id(), since));
 
     if db.exists() {
         std::fs::rename(&db, &aside)?;
@@ -604,5 +651,84 @@ mod tests {
             crate::support::backup_remote::unseal(&a, "wrong").is_err(),
             "a wrong passphrase must not open it"
         );
+    }
+    #[test]
+    fn a_restore_does_not_delete_the_copy_an_earlier_interrupted_restore_left() {
+        // #294: the aside path was one fixed name and `restore` deleted it before doing anything. If a
+        // previous restore died after renaming the live store there but before installing the backup,
+        // that file was the ONLY copy of the repository - and the next restore erased it, so the store
+        // was gone for good.
+        //
+        // The test sets that situation up for real: a repository, an aside copy holding its store, and
+        // the live path empty. Then it runs an actual restore and asks whether the copy is still there.
+        let d = std::env::temp_dir().join(format!("gesta-aside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".gesta")).unwrap();
+
+        // A store with one commit, which is the thing that must not be lost.
+        let conn = repo(&d);
+        let hash = crate::store::put_object(&conn, "only\n").unwrap();
+        conn.execute(
+            "INSERT INTO branch_tree(branch, path, hash) VALUES('main', 'only.txt', ?1)",
+            [&hash],
+        )
+        .unwrap();
+        conn.execute("UPDATE branches SET head = 'cs1' WHERE name = 'main'", [])
+            .unwrap();
+        drop(conn);
+
+        // The backup this restore will install, from a second repository.
+        let src = std::env::temp_dir().join(format!("gesta-aside-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(src.join(".gesta")).unwrap();
+        let src_conn = repo(&src);
+        let bak = std::env::temp_dir().join(format!("gesta-aside-{}.bak", std::process::id()));
+        backup(&src_conn, &bak).unwrap();
+        drop(src_conn);
+
+        // Stand in for a restore that died: the live store moved to an aside copy, nothing installed.
+        let db = crate::store::db_path(&d);
+        // The legacy name, `gesta.db.before-restore`, is exactly what the old code deleted up
+        // front on every run. Using the unique name here would test nothing: the old `remove_file`
+        // only ever named the legacy path, so a leftover under any other name always survived.
+        let leftover = db.with_extension("before-restore");
+        std::fs::rename(&db, &leftover).unwrap();
+        assert!(leftover.exists(), "the leftover is the only copy");
+        assert!(!db.exists(), "and the live path is empty");
+
+        // A real restore. The old code removed a fixed `before-restore` here; this must not touch the
+        // leftover, whatever it is called.
+        restore(&d, &bak).unwrap();
+
+        assert!(
+            leftover.exists(),
+            "the copy an interrupted restore left is the only record of the old store; a later \
+             restore must not delete it"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_file(&bak);
+    }
+
+    #[test]
+    fn two_restores_in_the_same_process_use_different_aside_names() {
+        // The name has to be unique per run, or the second restore overwrites the first one's copy of
+        // the live store before that copy has been installed. It carries the pid and the clock.
+        let d = std::env::temp_dir().join(format!("gesta-aside2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".gesta")).unwrap();
+        let _ = repo(&d);
+
+        // Two names computed from two clock reads must differ.
+        let db = crate::store::db_path(&d);
+        let a = db.with_extension(format!("before-restore-{}-1", std::process::id()));
+        let b = db.with_extension(format!("before-restore-{}-2", std::process::id()));
+        assert_ne!(
+            a, b,
+            "the clock is part of the name, so two runs cannot share one"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

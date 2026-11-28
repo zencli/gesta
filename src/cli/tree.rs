@@ -635,6 +635,29 @@ pub fn cmd_restore_repo(file: &str, yes: bool) -> ZResult<()> {
     }
 
     drop(conn);
+
+    // Say what an earlier restore left behind, before this one adds to it (#294).
+    //
+    // A restore renames the live store to `before-restore-<pid>-<nanos>` and installs the backup. If
+    // the process died in between, that file is the only copy of what the repository held - and the
+    // old code deleted a fixed `before-restore` path at the start of every run, so the next restore
+    // destroyed it. The name is unique now, so nothing removes it, and a file nobody is told about is
+    // its own failure: this names it and says what it is.
+    let leftovers = crate::support::backup::stale_asides(&root);
+    if !leftovers.is_empty() {
+        println!(
+            "warning: {} store copy(ies) left by an earlier restore that did not finish:",
+            leftovers.len()
+        );
+        for p in &leftovers {
+            println!("  {}", p.display());
+        }
+        println!(
+            "  that file is the repository as it was before that restore; copy it to .gesta/gesta.db \
+             to go back to it, or delete it once you are sure the current store is what you want"
+        );
+    }
+
     let restored = crate::support::backup::restore(&root, &path)?;
     if sealed {
         // The unsealed copy is the whole history in the clear; it does not outlive the command.
