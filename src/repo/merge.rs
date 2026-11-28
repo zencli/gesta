@@ -221,12 +221,12 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
     // Walk the base from left to right, consuming hunks from both sides.
     let mut out: Vec<String> = Vec::new();
     let mut conflicts: Vec<String> = Vec::new();
+    // The replacement text the walk last emitted for the region ending at
+    // `bi`. The overlaps branch below needs it to tell a hunk whose
+    // replacement is already in the output (#280) from a new edit (#269).
+    let mut last_repl: Vec<String> = Vec::new();
     let mut bi = 0usize;
     let (mut oi, mut ti) = (0usize, 0usize);
-    // Track the last replacement emitted by each side, so the overlaps branch
-    // can compare replacements even after one side's hunk has been fully consumed.
-    let mut last_our_repl: Vec<String> = Vec::new();
-    let mut last_their_repl: Vec<String> = Vec::new();
 
     while oi < our_hunks.len() || ti < their_hunks.len() {
         // Skip any hunk the walk has already passed. A hunk from the other side can start
@@ -288,7 +288,7 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
                         .map(|s| s.to_string())
                         .collect::<Vec<String>>(),
                 ),
-                None => (bi, bi, last_our_repl.clone()),
+                None => (bi, bi, Vec::new()),
             };
             let (t_start, t_end, t_repl) = match their_hunks.get(ti) {
                 Some(h) => (
@@ -299,7 +299,7 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
                         .map(|s| s.to_string())
                         .collect::<Vec<String>>(),
                 ),
-                None => (bi, bi, last_their_repl.clone()),
+                None => (bi, bi, Vec::new()),
             };
             // Whatever base lines sit between what has been emitted and the earlier of the two
             // regions are untouched by either side and belong in the output before the marker.
@@ -307,6 +307,33 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
             while bi < mark && bi < base_lines.len() {
                 out.push(base_lines[bi].to_string());
                 bi += 1;
+            }
+            // One side has already been consumed, so its replacement is already
+            // in `out` and the comparison below cannot see it (#280). Base
+            // `1,2,3,4` with ours changing `1,2` to `X` and theirs changing
+            // `2,3` to `X`: the ours hunk is consumed first and emits `X`, then
+            // the theirs hunk starts before the walk position and reaches this
+            // branch with the ours side exhausted. Its replacement `X` is
+            // exactly the replacement already emitted for the overlapping
+            // region, so there is nothing left to emit and no conflict.
+            //
+            // The comparison is against the last replacement emitted, not
+            // against the tail of `out`: a hunk whose replacement merely ends
+            // with the same lines is a different edit to different base lines
+            // (#269), and only an exact match of the whole emitted replacement
+            // means both sides produced the same text here. A pure deletion on
+            // the consumed side leaves no replacement behind, so delete vs
+            // modify still conflicts, and the `#119` case (different
+            // replacements) is untouched because the emitted text differs.
+            if our_hunks.get(oi).is_none() && !t_repl.is_empty() && t_repl == last_repl {
+                bi = t_end.max(bi);
+                ti += 1;
+                continue;
+            }
+            if their_hunks.get(ti).is_none() && !o_repl.is_empty() && o_repl == last_repl {
+                bi = o_end.max(bi);
+                oi += 1;
+                continue;
             }
             // Overlapping edits that produce the SAME text are not a conflict (#280).
             //
@@ -319,11 +346,8 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
             // The comparison is between the two replacements, not between ranges: the ranges differ by
             // construction here, which is why this branch was reached.
             if o_repl == t_repl {
-                let oi_past_end = oi >= our_hunks.len();
-                let ti_past_end = ti >= their_hunks.len();
-                if !oi_past_end && !ti_past_end {
-                    out.extend(o_repl);
-                }
+                last_repl = o_repl.clone();
+                out.extend(o_repl);
                 bi = o_end.max(t_end).max(bi);
                 if o_start <= t_start {
                     oi += 1;
@@ -339,6 +363,7 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
                 t_repl.join("\n")
             );
             conflicts.push(marker.clone());
+            last_repl = Vec::new();
             out.push(marker);
             bi = o_end.max(t_end).max(bi);
             if o_start <= t_start {
@@ -370,9 +395,6 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
             our_changed = true;
             oi += 1;
         }
-        if our_changed {
-            last_our_repl = our_repl.clone();
-        }
         let mut their_end = bi;
         let mut their_repl: Vec<String> = Vec::new();
         let mut their_changed = false;
@@ -391,14 +413,12 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
             }
             ti += 1;
         }
-        if their_changed {
-            last_their_repl = their_repl.clone();
-        }
 
         let region_end = our_end.max(their_end);
 
         match (our_changed, their_changed) {
             (true, false) => {
+                last_repl = our_repl.clone();
                 out.extend(our_repl);
                 bi = our_end;
             }
@@ -428,11 +448,13 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
                 // So there is nothing left to suppress here. The insertion exemption from #122 stays,
                 // because it documents why this branch appends rather than dedups.
                 let _ = their_repl_is_insertion;
+                last_repl = their_repl.clone();
                 out.extend(their_repl);
                 bi = their_end;
             }
             (true, true) => {
                 if our_repl == their_repl {
+                    last_repl = our_repl.clone();
                     out.extend(our_repl); // same edit on both sides
                     bi = region_end.max(our_end).max(their_end);
                 } else {
@@ -445,12 +467,14 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
                         their_repl.join("\n")
                     );
                     conflicts.push(marker.clone());
+                    last_repl = Vec::new();
                     out.push(marker);
                     bi = region_end.max(our_end).max(their_end);
                 }
             }
             (false, false) => {
                 out.push(base_lines.get(bi).copied().unwrap_or("").to_string());
+                last_repl = Vec::new();
                 bi += 1;
             }
         }
@@ -763,6 +787,58 @@ mod tests {
         assert_eq!(
             merge3("a\nm\nn\n", "a\nK\nn\n", "a\nm\nK\n").text(),
             "a\nK\nK\n"
+        );
+    }
+    #[test]
+    fn overlapping_edits_to_the_same_text_are_clean_when_one_side_is_consumed() {
+        // #280: base `1,2,3,4`; ours changes `1,2` to `X`; theirs changes `2,3`
+        // to `X`. Both sides agree the overlapping line becomes `X`, so the
+        // merged result is `X` once, then the untouched `4`.
+        //
+        // The walk consumes ours' hunk first and emits `X`; theirs' hunk then
+        // starts before the walk position, so the overlaps branch runs with the
+        // ours side already exhausted (an empty replacement). Comparing only the
+        // two replacements reports a conflict with an empty ours side even
+        // though the answer both sides produced is already in the output.
+        let r = merge3("1\n2\n3\n4\n", "X\n3\n4\n", "1\nX\n4\n");
+        assert!(
+            !r.is_conflict(),
+            "overlapping edits to the same text must not conflict, got {:?}",
+            r.text()
+        );
+        assert_eq!(r.text(), "X\n4\n");
+        // The symmetric direction: theirs' hunk is consumed first.
+        let r = merge3("1\n2\n3\n4\n", "1\nX\n4\n", "X\n3\n4\n");
+        assert!(
+            !r.is_conflict(),
+            "overlapping edits to the same text must not conflict, got {:?}",
+            r.text()
+        );
+        assert_eq!(r.text(), "X\n4\n");
+    }
+
+    #[test]
+    fn overlapping_delete_vs_modify_still_conflicts_when_one_side_is_consumed() {
+        // #280 boundary: a pure deletion on the consumed side leaves no
+        // replacement behind, so delete vs modify is still a real conflict.
+        let r = merge3("1\n2\n3\n4\n", "3\n4\n", "1\nX\n4\n");
+        assert!(
+            r.is_conflict(),
+            "delete vs modify must conflict, got {:?}",
+            r.text()
+        );
+    }
+
+    #[test]
+    fn overlapping_replacement_matching_only_a_suffix_still_conflicts() {
+        // #280 boundary: theirs' replacement `Y` merely ends the replacement
+        // ours already emitted (`X,Y`); the two blocks differ, so which line
+        // `Y` stands for is ambiguous and the safe answer is a conflict.
+        let r = merge3("1\n2\n3\n4\n", "X\nY\n3\n4\n", "1\nY\n4\n");
+        assert!(
+            r.is_conflict(),
+            "a suffix-only match must conflict, got {:?}",
+            r.text()
         );
     }
 }
