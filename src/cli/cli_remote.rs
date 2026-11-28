@@ -578,7 +578,12 @@ fn pull_s3(conn: &mut Connection, url: &str, branch: &str, author: &str) -> ZRes
     // history, not this store's index over it: blame ranges are derived from the changesets, and the
     // branch tree is what `status` and `fsck` read. Without them a file pulled from S3 answered
     // "never committed" and `fsck` reported the branch tree as stale.
-    let _ = crate::repo::rebuild_all_blame(conn)?;
+    // Reported, not returned: the history is already in place and the head has already moved, so
+    // failing here would describe a successful transfer as a failed one. That is the shape #330
+    // fixed and this is the same defect one layer down.
+    if let Err(e) = crate::repo::rebuild_all_blame(conn) {
+        eprintln!("blame rebuild after this transfer failed: {}", e);
+    }
     crate::store::refresh_branch_tree(conn, branch)?;
 
     let head = branch_head(conn, branch)?.unwrap_or_else(|| "(none)".to_string());
@@ -621,7 +626,10 @@ pub fn cmd_pull(remote_name: &str, branch: &str, author: &str) -> ZResult<()> {
     // Blame ranges arrive with the changesets, never with the bundle: they are this store's index
     // over the history, derived from it, so a pull has to derive them the same way a clone does.
     // Without this a pulled file answered "never committed" on the side that received it.
-    let _ = crate::repo::rebuild_all_blame(&conn)?;
+    // Reported, not returned: see the note on the S3 pull path above.
+    if let Err(e) = crate::repo::rebuild_all_blame(&conn) {
+        eprintln!("blame rebuild after this transfer failed: {}", e);
+    }
 
     // The branch tree is the other derived table a bundle does not carry. A pull moves the head but
     // left this describing the changesets that arrived before it, and `fsck` reported the gap as
@@ -705,7 +713,9 @@ pub fn cmd_clone(
     // git import path learned this first (`git_bridge.rs` calls the same function), and the two
     // remote paths were still answering "never committed" for every file a clone brought in.
     // Deriving them once here costs a pass over the newest version of each path.
-    let _ = crate::repo::rebuild_all_blame(&conn)?;
+    if let Err(e) = crate::repo::rebuild_all_blame(&conn) {
+        eprintln!("blame rebuild after this transfer failed: {}", e);
+    }
 
     println!(
         "cloned {} into {} ({} changeset(s), {} file(s) on disk)",
@@ -773,7 +783,9 @@ fn clone_s3(url: &str, target: &Path, branch: Option<&str>, depth: Option<usize>
 
     // Same reason as the bundle path above: blame ranges are this store's index, not part of what
     // the transfer carries, so they have to be derived on arrival.
-    let _ = crate::repo::rebuild_all_blame(&conn)?;
+    if let Err(e) = crate::repo::rebuild_all_blame(&conn) {
+        eprintln!("blame rebuild after this transfer failed: {}", e);
+    }
 
     println!(
         "cloned {} into {} ({} changeset(s), {} file(s) on disk{})",
@@ -1719,7 +1731,9 @@ fn pull_http(
     // rebuilds them. Blame ranges are this store's index over the history, and the branch tree is
     // what `status` and `fsck` read; skipping them left an HTTP pull answering "never committed" for
     // every arrived file and reporting the branch tree as stale.
-    let _ = crate::repo::rebuild_all_blame(conn)?;
+    if let Err(e) = crate::repo::rebuild_all_blame(conn) {
+        eprintln!("blame rebuild after this transfer failed: {}", e);
+    }
     crate::store::refresh_branch_tree(conn, branch)?;
     // The tracking branch the merge came through, not just the branch that received it. `fsck` reads
     // every branch, and the bundle's changesets land on `<remote>/<branch>` first - so refreshing only
@@ -1846,7 +1860,9 @@ fn clone_http(
     // so blame has to be derived on arrival. This is the function `remote clone` actually reaches
     // over HTTP, and it was the third of three clone paths, which is why fixing the first two left
     // the bench still reading zeros.
-    let _ = crate::repo::rebuild_all_blame(&conn)?;
+    if let Err(e) = crate::repo::rebuild_all_blame(&conn) {
+        eprintln!("blame rebuild after this transfer failed: {}", e);
+    }
 
     println!(
         "cloned {} into {} (branch {}, {} changeset(s), {} file(s){})",
@@ -3501,6 +3517,39 @@ mod tests {
             by_old_test.len(),
             rules.len(),
             "the old test passed for every negation, which is the defect"
+        );
+    }
+    #[test]
+    fn a_failed_blame_rebuild_after_a_transfer_is_reported_not_swallowed() {
+        // #331, follow-up to #213. The D39 fix added `rebuild_all_blame` at the six transfer
+        // sites but kept `let _ =`, so the Result was discarded and a rebuild error vanished.
+        // The store is right either way, but the reader is told nothing.
+        //
+        // This asserts the shape of the fix rather than a runtime effect, because firing a real
+        // rebuild failure needs a corrupt object store. `let _ =` is what the issue reports, so
+        // the absence of `let _ =` at every site is the property under test: a future edit that
+        // reintroduces it fails here instead of silently regressing.
+        let src = include_str!("cli_remote.rs");
+        // Built in pieces so this test's own source does not match the needle.
+        let needle = format!("let {} = crate::repo::rebuild_all_blame", "_");
+        let swallowed = src.matches(&needle).count();
+        assert_eq!(
+            swallowed, 0,
+            "every blame rebuild must handle its error, got {swallowed} site(s) discarding it"
+        );
+        let handled_needle = format!("if let {} = crate::repo::rebuild_all_blame", "Err(e)");
+        let handled = src.matches(&handled_needle).count();
+        assert_eq!(
+            handled, 6,
+            "the six transfer sites (s3 pull, local pull, clone, s3 clone, http pull, http clone) \
+             must each report the failure, got {handled}"
+        );
+        // And each one says so on stderr, so `pull` and `clone` in a script leave a trace.
+        let print_needle = format!("blame rebuild after this {} failed", "transfer");
+        assert_eq!(
+            src.matches(&print_needle).count(),
+            6,
+            "a handled error that prints nothing is still silent"
         );
     }
 }
