@@ -42,7 +42,14 @@ pub struct Auth {
     /// so adding a token and removing it within the same tick looks like no change at all. That
     /// window is exactly when a person removes a leaked token. The length plus the mtime is cheap
     /// and catches the case that matters, because a removal always shortens the file.
-    loaded_at: Option<(std::time::SystemTime, u64)>,
+    /// What the auth file looked like when it was last read: mtime, length, and a digest of the bytes.
+    ///
+    /// The digest is the part that matters (#317). A token swapped for another of the same length
+    /// inside one coarse mtime tick leaves (mtime, len) identical, so the server kept honouring the
+    /// revoked token until something else changed the file or it restarted - and revoking a leaked
+    /// token is the one case this whole reload exists for. `cp --preserve=timestamps` reproduces it
+    /// deliberately; a filesystem with second-granularity mtime reproduces it by accident.
+    loaded_at: Option<(std::time::SystemTime, u64, u64)>,
 }
 
 /// One authenticated token: who it is, what it may do, and where.
@@ -289,14 +296,36 @@ impl Auth {
     /// file is small and its modification time is one `stat`, so asking on every request costs less
     /// than the mistake.
     pub fn reload_if_changed(&mut self, path: &std::path::Path) {
-        let stamp = std::fs::metadata(path)
-            .ok()
-            .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
+        // Read the bytes first, then stamp what was read. Asking `metadata` and then reading is two
+        // syscalls either way, and this order means the stamp always describes the bytes that were
+        // actually parsed - a file rewritten between the two calls cannot leave the cache claiming a
+        // state it never loaded.
+        //
+        // The digest is in the stamp, not only the mtime and the length (#317). Swapping a token for
+        // a different one of the same length inside one coarse mtime tick leaves (mtime, len) equal,
+        // and the server would keep honouring the token that was just revoked.
+        let bytes = std::fs::read(path);
+        let stamp = match &bytes {
+            Ok(b) => {
+                let meta = std::fs::metadata(path).ok();
+                let mtime = meta
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                Some((mtime, b.len() as u64, digest_of(b)))
+            }
+            // A file that vanished is a file with no tokens, and its stamp is "nothing", so the next
+            // read of an existing file reloads.
+            Err(_) => None,
+        };
         if stamp == self.loaded_at {
             return;
         }
-        let entries = match std::fs::read_to_string(path) {
-            Ok(text) => text.lines().map(|l| l.to_string()).collect::<Vec<_>>(),
+        let entries = match bytes {
+            Ok(b) => String::from_utf8_lossy(&b)
+                .lines()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>(),
             // A file that vanished is a file with no tokens. Refusing every request because the
             // file is missing would turn a removal into an outage, and accepting them would turn it
             // into an open server.
@@ -429,6 +458,20 @@ pub const DIGEST_KEY_VAR: &str = "GESTA_AUTH_KEY";
 ///
 /// The domain prefix keeps this from being the plain digest with a key stuck on: a keyed hash over
 /// the bare token would let the two forms be confused when the key happens to be a token.
+/// A cheap, stable digest of a file's bytes, for telling two versions apart.
+///
+/// Not a security boundary: the file itself is trusted by the time this is compared, and the value
+/// only decides whether to re-parse. It is a `u64` from the first eight bytes of SHA-256 rather than
+/// the whole digest because it lives in a tuple compared on every request.
+fn digest_of(bytes: &[u8]) -> u64 {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    let out = h.finalize();
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&out[..8]);
+    u64::from_be_bytes(b)
+}
+
 pub fn digest_keyed(token: &str, key: &[u8]) -> String {
     let hk = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key);
     let tag = ring::hmac::sign(&hk, format!("gesta-auth-v1\u{0}{}", token).as_bytes());
@@ -902,5 +945,82 @@ mod tests {
         let _role = parts.next();
         let tail = parts.next().unwrap();
         assert_eq!(tail.split(':').next().unwrap(), "b");
+    }
+    #[test]
+    fn a_same_length_token_swap_is_reloaded_even_when_the_mtime_does_not_move() {
+        // #317: the stamp was (mtime, len). A token replaced by another token of the SAME length
+        // inside one mtime tick left both equal, so the server kept honouring the revoked token until
+        // something else changed the file or it restarted - and revoking a leaked token is the only
+        // reason this reload exists.
+        //
+        // `cp --preserve=timestamps` reproduces the situation deliberately; a filesystem with
+        // second-granularity mtime reproduces it by accident. The test forces it by restoring the
+        // mtime after writing, which is what those two cases amount to.
+        use std::io::Write;
+
+        let d = std::env::temp_dir().join(format!("gesta-authswap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("auth");
+
+        // Two tokens of exactly the same length, so the file length does not change either.
+        let old = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let new = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert_eq!(
+            old.len(),
+            new.len(),
+            "the lengths must match for this test to mean anything"
+        );
+        let old_line = format!("{old}:write:alice");
+        let new_line = format!("{new}:write:alice");
+        assert_eq!(old_line.len(), new_line.len());
+
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(old_line.as_bytes()).unwrap();
+        drop(f);
+        let before = std::fs::metadata(&path).unwrap();
+        let mtime = before.modified().unwrap();
+
+        // Start from an empty cache, then load the file the way the server does. `lookup` takes the
+        // raw token, not the whole entry: the digest covers the part before the first colon.
+        let mut auth = Auth::from_entries(&[]);
+        auth.reload_if_changed(&path);
+        assert!(
+            auth.lookup(old).is_some(),
+            "the original token authenticates before the swap"
+        );
+
+        // Swap the content and put the mtime back, which is the trick the bug needs.
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(new_line.as_bytes()).unwrap();
+        drop(f);
+        let times = std::fs::FileTimes::new().set_modified(mtime);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            after.modified().unwrap(),
+            mtime,
+            "the mtime has to be identical for this to test the bug"
+        );
+        assert_eq!(after.len(), before.len(), "and so does the length");
+
+        auth.reload_if_changed(&path);
+
+        assert!(
+            auth.lookup(new).is_some(),
+            "the replacement token must work after the reload"
+        );
+        assert!(
+            auth.lookup(old).is_none(),
+            "the revoked token must stop working even though mtime and length did not move; a stamp \
+             of (mtime, len) alone misses this and keeps the revoked token alive"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
