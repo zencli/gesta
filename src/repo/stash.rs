@@ -526,11 +526,19 @@ fn load(conn: &Connection, id: Option<i64>) -> ZResult<Stash> {
             // The path as recorded, and nothing else. A hunk's identity is its `Entry`, which
             // carries its own ordinal, so two hunks of one file are two rows with the same path
             // instead of one row under a key built to be unique.
-            let real = match &entry {
-                Entry::Hunk { .. } => parse_legacy_hunk_key(&path)
+            //
+            // Only a row with NO kind is read by its old key (#281). `parse_legacy_hunk_key` was
+            // applied to every hunk entry, including new rows whose `path` is already the real path,
+            // so a file legitimately named `notes#1#2#3` with a stashed hunk came back as `notes`:
+            // pop then wrote the hunk into the wrong file, or failed when `notes` did not exist.
+            // That is the same defect #131 fixed in the classification, in the other half of the
+            // code - the half that decides where the hunk goes.
+            let real = if kind.is_none() {
+                parse_legacy_hunk_key(&path)
                     .map(|(real, ..)| real.to_string())
-                    .unwrap_or(path.clone()),
-                Entry::File { .. } => path.clone(),
+                    .unwrap_or(path.clone())
+            } else {
+                path.clone()
             };
             out.push((real, entry));
         }
@@ -683,6 +691,23 @@ fn apply_hunk(
     // the other edits in place, so asking whether the file changed refuses every legitimate pop.
     // Asking whether the recorded position still holds the recorded base is a question about this
     // hunk, and it is answerable.
+    // "Already applied" is asked FIRST (#312).
+    //
+    // The `holds` check below demands that the file still contain the recorded `base` at `at`. When
+    // the user re-did the edit by hand and then pops, the file holds `body` there instead, so `holds`
+    // failed and the pop reported "no longer holds what this hunk replaced" - keeping the stash and
+    // reporting failure for a target state the file had already reached. The shortcut that answers
+    // exactly that question was reachable only when `base` was empty, because it sat after the check.
+    fn block_at(lines: &[String], at: usize, body: &[&str]) -> bool {
+        lines.len() >= at + body.len()
+            && lines[at..at + body.len()]
+                .iter()
+                .zip(body)
+                .all(|(have, want)| have == want)
+    }
+    if block_at(&updated, at, &body_lines) {
+        return Ok(());
+    }
     let base_lines: Vec<&str> = base.lines().collect();
     if !base_lines.is_empty() {
         let here = at.min(updated.len());
@@ -703,16 +728,6 @@ fn apply_hunk(
     // of lines, not a position: a one line hunk adding `return nil` was skipped whenever the file
     // held `return nil` somewhere else, and `pop` then dropped the stash and reported success, so
     // the work was gone with no error.
-    fn block_at(lines: &[String], at: usize, body: &[&str]) -> bool {
-        lines.len() >= at + body.len()
-            && lines[at..at + body.len()]
-                .iter()
-                .zip(body)
-                .all(|(have, want)| have == want)
-    }
-    if block_at(&updated, at, &body_lines) {
-        return Ok(());
-    }
     // `at` is the line index the hunk started at when it was taken, recorded then because that is the
     // only moment the number is known. It used to be the hunk's ordinal, which put every hunk that was
     // not the first at the top of the file - a wrong edit that reported success.
@@ -1221,6 +1236,86 @@ mod tests {
             "NEW\na\nb\nc\n",
             "the local edit survives"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn a_hunk_whose_target_state_is_already_reached_is_not_an_error() {
+        // #312: the `holds` check demands the file still contain the recorded `base` at `at`. When the
+        // user re-did the edit by hand and then pops, the file holds `body` there instead, so `holds`
+        // failed and the pop reported "no longer holds what this hunk replaced" - keeping the stash
+        // and reporting failure for a target state the file had already reached. The shortcut that
+        // answers exactly that question sat AFTER the check, so it was reachable only when `base` was
+        // empty.
+        //
+        // Driven at `apply_hunk` rather than through `stash pop`, because pop stops at its own
+        // "these paths have local changes" guard before reaching this function - which is right, and
+        // makes the CLI the wrong instrument for this particular question.
+        let d = std::env::temp_dir().join(format!("gesta-stash-already-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("f.txt");
+        // The file already holds what the hunk would write, and NOT the base it replaced.
+        std::fs::write(&f, "a\nB-EDITED\nc\n").unwrap();
+
+        let r = apply_hunk(&d, "f.txt", 1, Some(1), "B-EDITED", "b");
+        assert!(
+            r.is_ok(),
+            "the target state is already on disk, so applying it must be a no-op, not a failure: {:?}",
+            r.err().map(|e| e.to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "a\nB-EDITED\nc\n",
+            "and the file must be left exactly as it was"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_stashed_hunk_of_a_hash_named_file_goes_back_into_that_file() {
+        // #281: `parse_legacy_hunk_key` ran on EVERY hunk entry, including new rows whose `path` is
+        // already the real path. A file named `a#1#2#3` with a stashed HUNK therefore came back as
+        // `a`, and pop wrote the hunk into the wrong file - or failed when `a` did not exist.
+        //
+        // The file-level case is covered above (#131 fixed that half). This is the hunk half, which is
+        // the one that was still broken: a hunk entry, so the row carries `kind='hunk'` and its path is
+        // the real name.
+        let conn = crate::store::tests::mem_db();
+        let dir = std::env::temp_dir().join(format!("gesta-stash-hunkname-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        commit_files(&conn, "n1", "base", &[("a#1#2#3", "one\ntwo\nthree\n")]);
+        crate::store::set_branch_head(&conn, "main", "n1").unwrap();
+        crate::repo::materialise(&conn, &dir, "main").unwrap();
+
+        // A hunk of two lines, so the row is a hunk and not a whole-file entry.
+        std::fs::write(dir.join("a#1#2#3"), "one\nTWO\nthree\n").unwrap();
+        save(&conn, &dir, "one hunk", "a").unwrap();
+
+        let st = load(&conn, None).expect("the stash must load");
+        let paths: Vec<&str> = st.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            paths.contains(&"a#1#2#3"),
+            "the entry must keep the file's own name; load reported {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"a"),
+            "the name must not be decoded as a legacy key: {paths:?}"
+        );
+
+        pop(&conn, &dir, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a#1#2#3")).unwrap(),
+            "one\nTWO\nthree\n",
+            "the hunk must land back in its own file"
+        );
+        assert!(
+            !dir.join("a").exists(),
+            "no file at the path the legacy decode pretended to name"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
