@@ -317,6 +317,20 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
             // exactly the replacement already emitted for the overlapping
             // region, so there is nothing left to emit and no conflict.
             //
+            // A side is consumed when its hunk starts before the walk
+            // position, not when its hunk list is exhausted: the consumed
+            // side can still have a later, independent hunk. Base
+            // `1,2,3,4,5` with ours `X,3,4,Y,5` and theirs `1,X,4,5`: ours'
+            // first hunk is consumed and emits `X`, then theirs' hunk starts
+            // before the walk position while ours still has its `Y` hunk.
+            // Requiring the ours list to be exhausted missed the agreement,
+            // so the merge conflicted and `Y` landed twice, once in the
+            // marker and once after it. The other side's current hunk must
+            // start at or after the walk position: if it also started before
+            // it, both sides overlap the emitted region and the comparison
+            // below decides. An exhausted side reports its start as the walk
+            // position, so it still counts as not overlapping.
+            //
             // The comparison is against the last replacement emitted, not
             // against the tail of `out`: a hunk whose replacement merely ends
             // with the same lines is a different edit to different base lines
@@ -325,12 +339,12 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> MergeResult {
             // the consumed side leaves no replacement behind, so delete vs
             // modify still conflicts, and the `#119` case (different
             // replacements) is untouched because the emitted text differs.
-            if our_hunks.get(oi).is_none() && !t_repl.is_empty() && t_repl == last_repl {
+            if !t_repl.is_empty() && t_repl == last_repl && t_start < bi && o_start >= bi {
                 bi = t_end.max(bi);
                 ti += 1;
                 continue;
             }
-            if their_hunks.get(ti).is_none() && !o_repl.is_empty() && o_repl == last_repl {
+            if !o_repl.is_empty() && o_repl == last_repl && o_start < bi && t_start >= bi {
                 bi = o_end.max(bi);
                 oi += 1;
                 continue;
@@ -815,6 +829,64 @@ mod tests {
             r.text()
         );
         assert_eq!(r.text(), "X\n4\n");
+    }
+
+    #[test]
+    fn overlapping_edits_to_the_same_text_are_clean_when_the_consumed_side_has_a_later_hunk() {
+        // #280 follow-up (Leader tin 25891): the consumed side still has an
+        // independent hunk after the overlap. Base `1,2,3,4,5`; ours changes
+        // `1,2` to `X` and inserts `Y` after `4`; theirs changes `2,3` to
+        // `X`. The overlap agrees on `X`, and the later `Y` hunk is
+        // independent, so the merged result is `X,4,Y,5` with no conflict.
+        // Line `4` is untouched by both sides, so it survives: the hunk
+        // dump shows ours' second hunk is a pure insertion at old position
+        // 4 (`old_len 0`), not a replacement of `4`. Dropping `4` would
+        // repeat the #119 silent-drop bug. The `X,Y,5` reading, where `Y`
+        // replaces `4`, is pinned by the test below it.
+        //
+        // The consumed-side check used to require the consumed side's hunk
+        // list to be exhausted (`our_hunks.get(oi).is_none()`), so the later
+        // `Y` hunk made it miss the agreement: the merge conflicted and `Y`
+        // landed twice, once in the marker and once after it.
+        let r = merge3("1\n2\n3\n4\n5\n", "X\n3\n4\nY\n5\n", "1\nX\n4\n5\n");
+        assert!(
+            !r.is_conflict(),
+            "overlapping edits to the same text must not conflict, got {:?}",
+            r.text()
+        );
+        assert_eq!(r.text(), "X\n4\nY\n5\n");
+    }
+
+    #[test]
+    fn overlapping_edits_to_the_same_text_are_clean_when_the_other_side_has_a_later_hunk() {
+        // #280 follow-up, symmetric direction: theirs carries the later
+        // independent hunk. Base `1,2,3,4,5`; ours changes `2,3` to `X`;
+        // theirs changes `1,2` to `X` and inserts `Y` after `4`. Same
+        // agreement on `X`, same independent `Y`, and the untouched `4`
+        // survives, so the result is `X,4,Y,5` clean.
+        let r = merge3("1\n2\n3\n4\n5\n", "1\nX\n4\n5\n", "X\n3\n4\nY\n5\n");
+        assert!(
+            !r.is_conflict(),
+            "overlapping edits to the same text must not conflict, got {:?}",
+            r.text()
+        );
+        assert_eq!(r.text(), "X\n4\nY\n5\n");
+    }
+
+    #[test]
+    fn overlapping_edits_to_the_same_text_are_clean_when_the_later_hunk_replaces_a_line() {
+        // #280 follow-up, replacement reading of the Leader's example
+        // (tin 25891): ours changes `1,2` to `X` and `4` to `Y`, theirs
+        // changes `2,3` to `X`. The overlap agrees on `X`, the later `Y`
+        // hunk replaces the untouched `4`, so the merged result is
+        // literally `X,Y,5` with no conflict.
+        let r = merge3("1\n2\n3\n4\n5\n", "X\n3\nY\n5\n", "1\nX\n4\n5\n");
+        assert!(
+            !r.is_conflict(),
+            "overlapping edits to the same text must not conflict, got {:?}",
+            r.text()
+        );
+        assert_eq!(r.text(), "X\nY\n5\n");
     }
 
     #[test]
