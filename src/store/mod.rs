@@ -1577,14 +1577,35 @@ fn read_whole(conn: &Connection, hash: &str) -> ZResult<String> {
                 .map_err(|e| bad(format!("object {} is not valid UTF-8: {}", hash, e)));
         }
     }
-    let row: Option<(Vec<u8>, i64)> = conn
+    let row: Option<(Vec<u8>, i64, i64)> = conn
         .query_row(
-            "SELECT content, compressed FROM objects WHERE hash = ?1",
+            "SELECT content, compressed, sidecar FROM objects WHERE hash = ?1",
             params![hash],
-            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
         )
         .optional()?;
-    let (blob, compressed) = row.ok_or_else(|| {
+    // The sidecar flag is read here too (#277). `get_object_bytes` was fixed under #95 to fail
+    // closed when the row says its body lives in a sidecar file and that file is gone; this reader
+    // kept selecting two columns, never saw the flag, and returned the row's empty body as `Ok("")`.
+    // Two readers of one object then answered differently: bytes said Corrupt, text said the file is
+    // empty. Reachable from `get_object`, so `find_delta_base`, `show` and `diff` could build on an
+    // empty string for an object the store had already lost.
+    if row.as_ref().is_some_and(|(_, _, s)| *s != 0) {
+        return Err(Box::new(crate::support::error::Error::new(
+            crate::support::error::Code::Corrupt,
+            format!(
+                "object {} is marked as living in a sidecar file, and that file is missing; the store is damaged",
+                hash
+            ),
+        )));
+    }
+    let (blob, compressed, _) = row.ok_or_else(|| {
         bad(format!(
             "object {} not found (store may be corrupted)",
             hash
@@ -4604,5 +4625,57 @@ pub(crate) mod tests {
             after, 0,
             "and the tree goes with it, not one without the other"
         );
+    }
+    #[test]
+    fn both_readers_agree_that_a_missing_sidecar_is_corruption() {
+        // #277: `get_object_bytes` was fixed under #95 to fail closed on a missing sidecar, but
+        // `read_whole` still selected only `content, compressed`. It never saw the `sidecar` column,
+        // so the row's empty body came back as `Ok("")` - the object read as an empty file while the
+        // bytes reader called the store damaged. Two readers, one object, two answers.
+        //
+        // Both readers are asserted here, in one test, because the defect is the disagreement. A
+        // future edit that fixes only one of them fails on the other side.
+        let d = std::env::temp_dir().join(format!("gesta-sidecar-agree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&d).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+
+        // Above `sidecar::INLINE_LIMIT` (4 MiB), or the body stays inline and this tests nothing.
+        let body: Vec<u8> = (0..(crate::store::sidecar::INLINE_LIMIT + 1024))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let hash = put_object_bytes(&conn, &body).unwrap();
+        assert!(
+            object_is_sidecar(&conn, &hash),
+            "the fixture must be a sidecar object"
+        );
+
+        // Remove the file the row points at. The row stays, still claiming the body lives there.
+        let file = crate::store::sidecar::path_for(&d, &hash).unwrap();
+        std::fs::remove_file(&file).unwrap();
+
+        let bytes_err = match get_object_bytes(&conn, &hash) {
+            Ok(b) => panic!(
+                "bytes reader returned {} byte(s) for a lost object",
+                b.len()
+            ),
+            Err(e) => e.to_string(),
+        };
+        let text_err = match read_whole(&conn, &hash) {
+            // The empty string is the answer this test exists to prevent: it is what made `show`
+            // read a missing 4 MiB object as an empty file.
+            Ok(t) => panic!(
+                "text reader returned {:?} for a lost object instead of reporting corruption",
+                t
+            ),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            bytes_err.contains("sidecar") && text_err.contains("sidecar"),
+            "both readers must name the sidecar, got bytes={bytes_err:?} text={text_err:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
