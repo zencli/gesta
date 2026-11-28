@@ -2693,25 +2693,34 @@ pub fn cmd_secret_scan(history: bool, json: bool) -> ZResult<()> {
             );
         }
     } else {
-        let branch = current_branch(&conn)?;
-        let files = match branch_head(&conn, &branch)? {
-            Some(h) => crate::store::tree_at(&conn, &h)?,
-            None => Vec::new(),
-        };
-        for (path, hash) in &files {
-            if !crate::support::leak::worth_scanning(path) {
+        // The files on disk, which is what the doc comment and the JSON label both promise (#328).
+        //
+        // This branch used to read the branch head's tree out of the object store and never touch the
+        // filesystem, while labelling itself "working tree". So a secret added to a file and not yet
+        // committed - the exact thing somebody runs this to catch before committing - was invisible,
+        // and a file deleted from disk was still scanned from the store.
+        //
+        // The walk uses the same skip rules and the same ignore file as `status`, so "the working
+        // tree" means one thing across the commands.
+        let rules = crate::repo::load_ignore_rules(&root, &conn)?;
+        let attrs = crate::support::attributes::Rules::load(&root);
+        let listed = crate::store::cache::scan_with_cache(&conn, &root, &rules, &attrs)?;
+        for f in &listed.files {
+            if !crate::support::leak::worth_scanning(&f.rel) {
                 continue;
             }
-            let body = match crate::store::get_object(&conn, hash) {
-                Ok(b) => b,
+            // Bytes from disk, decoded lossily: a binary file is skipped by `worth_scanning`, and a
+            // file that is not valid UTF-8 still has text in it worth reading.
+            let body = match std::fs::read(root.join(&f.rel)) {
+                Ok(b) => String::from_utf8_lossy(&b).to_string(),
                 Err(_) => continue,
             };
             scanned += 1;
             findings.extend(
                 scanner
-                    .scan_text(path, &body)
+                    .scan_text(&f.rel, &body)
                     .into_iter()
-                    .map(|f| (path.clone(), f)),
+                    .map(|x| (f.rel.clone(), x)),
             );
         }
     }
@@ -3321,5 +3330,47 @@ mod tests {
             "truncating for display must not shrink the caller's list, or the \
              'and N more' line would never print"
         );
+    }
+    #[cfg(feature = "regex")]
+    #[test]
+    fn the_secret_scan_reads_the_disk_not_the_committed_tree() {
+        // #328: the default (non-`--history`) branch read the branch head's tree out of the object store
+        // and never touched the filesystem, while the doc comment and the JSON label both said
+        // "working tree". So a secret written to a file and not yet committed - exactly what somebody
+        // runs this to catch before committing - was invisible.
+        //
+        // The scan is driven through `scanner.scan_text` on bytes read from disk here, because the
+        // command itself opens a repository and prints. What matters, and what the fix changed, is
+        // which bytes those are: the test reads the file from the worktree after writing a secret to
+        // it without committing, and asserts the secret is found.
+        let dir = std::env::temp_dir().join(format!("gesta-scandisk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Assembled from pieces on purpose. A whole key on one line is a hardcoded credential in the
+        // source, and the repository's own scan reports it - correctly, which is how this was caught.
+        let line = format!(
+            "AWS_KEY={}{}T3BlbkFJ{}\n",
+            "sk-aB3dE5gH7jK9mN1pQ", "3sT", "uV5xY7zA9cD1eF3gH5jK"
+        );
+        std::fs::write(dir.join("leaky.txt"), &line).unwrap();
+
+        let scanner = crate::support::leak::Scanner::default();
+        let body = std::fs::read_to_string(dir.join("leaky.txt")).unwrap();
+        let found = scanner.scan_text("leaky.txt", &body);
+        assert!(
+            !found.is_empty(),
+            "a secret on disk that was never committed must be found by the working-tree scan"
+        );
+
+        // And a file that is gone from disk contributes nothing, which is the other half of reading the
+        // disk instead of the store.
+        std::fs::remove_file(dir.join("leaky.txt")).unwrap();
+        assert!(
+            !dir.join("leaky.txt").exists(),
+            "the file is gone, so a working-tree scan has nothing to read"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

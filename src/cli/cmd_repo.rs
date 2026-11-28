@@ -90,7 +90,17 @@ pub fn cmd_mount(target: &str, branch: Option<&str>) -> ZResult<()> {
 /// entry to add to the allowlist, which takes one line.
 #[cfg(not(feature = "regex"))]
 pub(crate) fn refuse_secrets(_conn: &Connection, _root: &Path, _id: &str) -> ZResult<()> {
-    Ok(())
+    // A build without the scanner cannot check, and returning `Ok(())` made that a gate that fails
+    // open (#324). Every commit path always calls this function, so the missing feature silently
+    // turned the commit-time secret check into a no-op while `secret scan` next door answers with a
+    // clear Usage error for the same missing feature. Refusing is the only honest answer: a commit
+    // this binary cannot check must not look checked.
+    Err(Box::new(crate::support::error::Error::new(
+        crate::support::error::Code::Usage,
+        "this build has no secret scanner, so it cannot check a commit for secrets; \
+         rebuild with the `regex` feature, or commit with a build that has it"
+            .to_string(),
+    )))
 }
 
 #[cfg(feature = "regex")]
@@ -245,6 +255,29 @@ mod tests {
             err.is_err(),
             "a store that cannot be queried must report the error, not answer false"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[cfg(not(feature = "regex"))]
+    #[test]
+    fn a_build_without_the_scanner_refuses_a_commit_instead_of_passing_it() {
+        // #324: the no-feature `refuse_secrets` returned `Ok(())`, so every commit path - which always
+        // calls this - silently lost the secret gate. `secret scan` next door answers with a clear
+        // Usage error for the same missing feature; failing open here was the inconsistency, and the
+        // dangerous half of it.
+        let dir = std::env::temp_dir().join(format!("gesta-nogate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".gesta")).unwrap();
+        let conn = crate::store::open_db(&dir).unwrap();
+        crate::store::init_schema(&conn).unwrap();
+
+        let err = refuse_secrets(&conn, &dir, "cs1")
+            .expect_err("a build that cannot scan must refuse, not pass");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("no secret scanner") || msg.contains("regex"),
+            "the refusal has to name the missing feature, got: {msg}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
