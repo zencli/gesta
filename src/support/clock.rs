@@ -146,7 +146,11 @@ pub fn parse_minute(s: &str) -> Option<i64> {
     } else {
         0
     };
-    if h > 23 || mi > 59 || sec > 60 {
+    // Both ends (#303). `parse::<i64>` accepts a leading minus, so `-1:30` parsed successfully and
+    // produced a timestamp an hour and a half before midnight of that day: silently wrong rather than
+    // refused. `parse_date` next door already rejects month and day 0; this is the same rule on the
+    // clock, and `sec` allows 60 because a leap second is a real value.
+    if !(0..=23).contains(&h) || !(0..=59).contains(&mi) || !(0..=60).contains(&sec) {
         return None;
     }
     Some(base + h * 3600 + mi * 60 + sec)
@@ -272,5 +276,33 @@ mod tests {
         let end = end_of_day("2026-11-17").unwrap();
         assert_eq!(end - start, 86_399);
         assert_eq!(format_rfc3339(end), "2026-11-17T23:59:59Z");
+    }
+    #[test]
+    fn a_negative_clock_field_is_refused_rather_than_silently_wrong() {
+        // #303: only the upper bounds were checked, and `parse::<i64>` accepts a leading minus, so
+        // `2026-11-17 -1:30` parsed successfully and produced a timestamp an hour and a half before
+        // midnight of that day. Silently wrong is worse than refused: nothing downstream can tell.
+        assert!(
+            parse_minute("2026-11-17 -1:30").is_none(),
+            "a negative hour must be refused"
+        );
+        assert!(
+            parse_minute("2026-11-17 12:-30").is_none(),
+            "a negative minute must be refused"
+        );
+        assert!(
+            parse_minute("2026-11-17 12:30:-5").is_none(),
+            "a negative second must be refused"
+        );
+
+        // The valid forms still parse, so the guard did not become a wall.
+        assert!(
+            parse_minute("2026-11-17 00:00").is_some(),
+            "midnight is valid"
+        );
+        assert!(
+            parse_minute("2026-11-17 23:59:60").is_some(),
+            "23:59:60 is a leap second and stays valid"
+        );
     }
 }

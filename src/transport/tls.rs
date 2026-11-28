@@ -425,6 +425,9 @@ pub fn connect(
     // which on Linux is over two minutes, so a host that drops SYNs held the caller for minutes
     // before the first timeout applied - the caller asked for `timeout` and got something else.
     // Resolving first and trying each address with a deadline keeps the promise.
+    // The host arrives without brackets when it is an IPv6 literal, and that is the form std wants
+    // (#320). A `[::1]` handed to `to_socket_addrs` is a hostname std will not resolve, which is why
+    // every TLS request to an IPv6 literal failed at connect.
     let addrs = (host, port)
         .to_socket_addrs()
         .map_err(|e| bad(format!("cannot resolve {}:{}: {}", host, port, e)))?;
